@@ -48,6 +48,9 @@ struct MySignupPage {
     this.unsynced = (await DbHelper.getUnsyncedSignups(AppConfig.stuNo)).length;
     if (this.signups.length === 0) {
       this.msg = '暂无本地报名记录';
+    } else if (this.msg === '暂无本地报名记录') {
+      // 静默同步把记录补进来后, 清掉进页面时那句"暂无本地报名记录", 否则列表有数据却顶着空态提示
+      this.msg = '';
     }
   }
 
@@ -111,7 +114,7 @@ struct MySignupPage {
       for (const s of serverList) {
         // 本地存在 -> 更新状态; 本地不存在(跨设备/RFID自动创建) -> 补全插入
         await DbHelper.upsertSignupFromServer(s.client_id, s.activity_id, s.activity_title,
-          s.stu_no, s.name, s.status, s.checkin, s.hours, s.remark);
+          s.stu_no, s.name, s.status, s.checkin, s.hours, s.remark, s.created_at);
         await DbHelper.markSignupSynced(s.client_id);
         updated++;
       }
@@ -237,7 +240,8 @@ struct MySignupPage {
             Column() {
               ForEach(this.signups, (s: LocalSignup) => {
                 this.item(s)
-              }, (s: LocalSignup) => s.client_id + '-' + s.status.toString() + '-' + s.checkin.toString())
+              }, (s: LocalSignup) => s.client_id + '-' + s.status.toString() + '-' + s.checkin.toString() +
+                '-' + s.hours.toString() + '-' + s.created_at)
             }.padding(14)
           }
           .layoutWeight(1).scrollBar(BarState.Off)

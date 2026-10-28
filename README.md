@@ -48,6 +48,7 @@ chapter03/
 ├── server/                    # 自主 C++ Web 服务器
 │   ├── server.cpp             # 全部服务端逻辑（含解析、校验、Token、事务、日志）
 │   ├── init_db.sql            # MySQL 建库建表 + 演示数据
+│   ├── rename_demo_users.sql  # 演示姓名真实化的一次性迁移脚本（已运行，可留档）
 │   ├── test_api.py            # 26/26 回归测试
 │   ├── verify_demo_data.py    # 演示数据一致性校验（8 项）
 │   ├── verify_v3.py           # 服务端新功能回归（34 项）

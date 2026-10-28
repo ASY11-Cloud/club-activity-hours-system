@@ -443,7 +443,7 @@ struct AuditPage {
               Column() {
                 ForEach(this.rows, (s: SignupInfo) => {
                   this.item(s)
-                }, (s: SignupInfo) => s.id.toString() + '-' + s.status.toString())
+                }, (s: SignupInfo) => s.id.toString() + '-' + s.status.toString() + '-' + s.checkin.toString())
               }.padding({ left: 14, right: 14 })
             }
             .layoutWeight(1).scrollBar(BarState.Off)

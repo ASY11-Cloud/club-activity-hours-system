@@ -399,3 +399,31 @@ hvigorw assembleHap ...                    # BUILD SUCCESSFUL（三次构建均�
 | 刷卡是否需二次审核 | 当前「到场即认定」会跳过人工审核；若评委强调审核流程，可加 `sys_config.signin_need_audit=1`，刷卡只置 `checkin` 不累计学时 | 中，涉及学时口径与文档 |
 | 请求日志写入改队列 | 每个请求 detach 一个线程写 `request_log`，高并发下线程数会涨；改成单消费者队列更稳 | 中，演示规模无感 |
 | 会话持久化 | Token 存内存，服务端重启后所有客户端 401（已做自动清会话提示） | 低，课程演示可接受 |
+
+## 14. v2.5 模拟器实测复查（2026-10-28 19:30-19:45）
+
+这次不只跑接口，而是把 HAP 装进模拟器（127.0.0.1:5555）真机点了一遍：启动 → 进入主界面 → 我的 → 我的报名 → 学时报表，并用 `hdc shell sqlite3` 直接查了应用沙箱里的本地库。查出 5 个只有真机才暴露的问题，已全部修掉。
+
+### 14.1 实测发现的问题与修复
+
+| # | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| 1 | 每次启动日志里都有 SQLite `Error ... duplicate column name: checkin` + 一段 Dfx 异常栈，看着像崩溃 | 迁移用 `try { ALTER } catch {}`，新库建表已含 `checkin`，ALTER 必然抛错 | 先 `PRAGMA table_info(local_signup)` 判断列是否存在，缺列才 ALTER，日志干净 |
+| 2 | 两个页面同时 `aboutToAppear` 时可能并发建库/迁移 | `init()` 只判断 `rdb` 未赋值，未收敛并发 | 加 `static initing: Promise<void>` 单飞，失败后允许重试 |
+| 3 | 本地「报名时间」五条全是同一秒（如 09:57:20），与服务器真实报名时间不符 | upsert 未写 `created_at`，走表默认 `CURRENT_TIMESTAMP` | `upsertSignupFromServer(..., createdAt)` 写入服务器时间；已存在的旧记录同步时校正 |
+| 4 | 同步完成后列表文字不刷新：报名时间仍是旧值（库里的值已更新） | ArkUI `ForEach` 按 key 复用组件，key 只有 `client_id-status-checkin`，字段变了 key 没变 | key 补上 `hours` / `created_at`；同时修主界面活动列表、发布页草稿/已发布列表、审核列表（补 `checkin`）的同类问题 |
+| 5 | 列表已有 5 条记录，顶部仍显示「暂无本地报名记录」 | 进页面先 `refreshLocal()` 置空态提示，静默同步补数据后没清 | 刷新到非空且提示仍是该句时清空 |
+
+### 14.2 实测证据
+
+- 本地库直查：`local_signup` 11 条，李铭 5 条时间为 `10-25 15:00`、`10-26 20:00`、`10-28 12:10`、`09:04:22`，与 MySQL 完全一致
+- 「我的报名」：状态/学时/「已刷卡签到」标记正确（两段式：`已通过 + 已刷卡签到 + 已同步服务器`）
+- 「学时报表」：本地 5.5 / 服务器 5.5，绿色「✔ 双端一致」
+- 启动与页面切换日志无 `duplicate column`、无 `PrintInfoForDbError`、无 JsError
+- 数据基线保持：8 活动 / 19 报名 / 5 人 20.5 学时 / 榜首李铭 5.5 / required_hours=20
+
+### 14.3 顺带确认的既有能力
+
+- HAP 覆盖安装后本地库保留，旧库自动补 `checkin` 列（升级路径有效）
+- 服务端 8000 与模拟器 10.0.2.2 双通道正常，引导页显示「服务器在线」，主界面 8 个活动来自 MySQL
+- `test_api.py` 26/26（跑完已把 `ptest-audit-1` 还原为待审并 `hours/rebuild`，基线未漂移）

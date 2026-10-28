@@ -96,7 +96,7 @@ struct ActivityDetailPage {
         // 再按服务器记录重建, 保证同一活动本地只有一条且状态与服务器一致
         await DbHelper.deleteSignupByActivity(a.id, AppConfig.stuNo);
         await DbHelper.upsertSignupFromServer(s.client_id, s.activity_id, a.title,
-          s.stu_no, s.name, s.status, s.checkin, s.hours, s.remark);
+          s.stu_no, s.name, s.status, s.checkin, s.hours, s.remark, s.created_at);
         await DbHelper.markSignupSynced(s.client_id);
         const signTag: string = s.checkin === 1 ? ' · 已刷卡签到' : '';
         if (s.status === 1) this.myStatus = '已通过(' + s.hours + ' 学时)' + signTag;

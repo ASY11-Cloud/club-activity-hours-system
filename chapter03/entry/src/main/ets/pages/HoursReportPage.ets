@@ -388,7 +388,7 @@ struct HoursReportPage {
         const list = parseSignups(resp);
         for (const s of list) {
           await DbHelper.upsertSignupFromServer(s.client_id, s.activity_id, s.activity_title,
-            s.stu_no, s.name, s.status, s.checkin, s.hours, s.remark);
+            s.stu_no, s.name, s.status, s.checkin, s.hours, s.remark, s.created_at);
           await DbHelper.markSignupSynced(s.client_id);
         }
         total += list.length;

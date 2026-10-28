@@ -15,10 +15,25 @@ const STORE_CONFIG: relationalStore.StoreConfig = {
 
 export class DbHelper {
   private static rdb: relationalStore.RdbStore | null = null;
+  private static initing: Promise<void> | null = null;
 
-  /** 初始化数据库(幂等) */
+  /**
+   * 初始化数据库(幂等 + 并发安全)
+   * 多个页面可能同时 aboutToAppear 调用 init: 用同一个 Promise 收敛,
+   * 避免两次 getRdbStore/建表/迁移并发执行(否则迁移会撞"duplicate column")。
+   */
   static async init(context: common.UIAbilityContext): Promise<void> {
     if (DbHelper.rdb) return;
+    if (DbHelper.initing === null) DbHelper.initing = DbHelper.doInit(context);
+    try {
+      await DbHelper.initing;
+    } catch (e) {
+      DbHelper.initing = null;   // 失败允许下次重试
+      throw e as Error;
+    }
+  }
+
+  private static async doInit(context: common.UIAbilityContext): Promise<void> {
     const store = await relationalStore.getRdbStore(context, STORE_CONFIG);
     await store.executeSql(
       'CREATE TABLE IF NOT EXISTS local_activity (' +
@@ -41,12 +56,17 @@ export class DbHelper {
       'synced INTEGER DEFAULT 0, remark TEXT, ' +
       'created_at TEXT DEFAULT CURRENT_TIMESTAMP)'
     );
-    // 旧版本库升级: v2.3 及以前没有 checkin 列, 已存在的库 CREATE IF NOT EXISTS 不会补列,
-    // 这里补一次(列已存在会抛错, 忽略即可), 保证老设备升级 App 后不丢刷卡签到状态。
-    try {
+    // 旧版本库升级: v2.3 及以前没有 checkin 列, CREATE IF NOT EXISTS 不会补列。
+    // 先查 PRAGMA 判断列是否存在, 只有缺列才 ALTER, 避免每次启动都抛
+    // "duplicate column name" 错误(系统会打 Error 日志 + 抓异常栈, 看着像崩溃)。
+    let hasCheckin = false;
+    const rs = await store.querySql('PRAGMA table_info(local_signup)');
+    while (rs.goToNextRow()) {
+      if (DbHelper.safeStr(rs, 'name') === 'checkin') hasCheckin = true;
+    }
+    rs.close();
+    if (!hasCheckin) {
       await store.executeSql('ALTER TABLE local_signup ADD COLUMN checkin INTEGER DEFAULT 0');
-    } catch (e) {
-      // 列已存在: 正常情况, 无需处理
     }
     DbHelper.rdb = store;
   }
@@ -217,9 +237,13 @@ export class DbHelper {
     return out;
   }
 
-  /** 完整字段补插(服务器记录同步到本地: 不存在则插入, 存在则更新状态) */
+  /**
+   * 完整字段补插(服务器记录同步到本地: 不存在则插入, 存在则更新状态)
+   * createdAt 传服务器报名时间, 保证本地"报名时间"与服务端一致(此前用本地插入时间, 全部显示为同步那一刻)
+   */
   static async upsertSignupFromServer(clientId: string, activityId: number, title: string,
-    stuNo: string, name: string, status: number, checkin: number, hours: number, remark: string): Promise<void> {
+    stuNo: string, name: string, status: number, checkin: number, hours: number, remark: string,
+    createdAt: string): Promise<void> {
     const store = DbHelper.rdb;
     if (!store) return;
     const exist = await DbHelper.getSignupByClientId(clientId);
@@ -236,10 +260,24 @@ export class DbHelper {
         'synced': 1,
         'remark': remark
       };
+      if (createdAt !== '') vb['created_at'] = createdAt;
       await store.insert('local_signup', vb);
     } else {
       await DbHelper.updateSignupStatus(clientId, status, hours, remark, checkin);
+      if (createdAt !== '' && exist.created_at !== createdAt) {
+        await DbHelper.updateSignupCreatedAt(clientId, createdAt);
+      }
     }
+  }
+
+  /** 校正本地报名时间为服务器时间(仅同步时调用) */
+  private static async updateSignupCreatedAt(clientId: string, createdAt: string): Promise<void> {
+    const store = DbHelper.rdb;
+    if (!store) return;
+    const vb: relationalStore.ValuesBucket = { 'created_at': createdAt };
+    const pred = new relationalStore.RdbPredicates('local_signup');
+    pred.equalTo('client_id', clientId);
+    await store.update(vb, pred);
   }
 
   /** 查询本地报名(全部/按人) */

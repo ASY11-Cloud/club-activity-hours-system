@@ -485,7 +485,8 @@ struct ActivityPublishPage {
               } else {
                 ForEach(this.drafts, (d: LocalDraft) => {
                   this.draftItem(d)
-                }, (d: LocalDraft) => d.id.toString() + '-' + d.synced.toString())
+                }, (d: LocalDraft) => d.id.toString() + '-' + d.synced.toString() + '-' + d.title +
+                  '-' + d.hours.toString() + '-' + d.capacity.toString())
               }
             }
             .width('100%').padding(14).backgroundColor(Color.White).borderRadius(14).margin({ top: 10 })
@@ -502,7 +503,8 @@ struct ActivityPublishPage {
               } else {
                 ForEach(this.allActs, (a: ActivityInfo) => {
                   this.actManageItem(a)
-                }, (a: ActivityInfo) => a.id.toString() + '-' + a.status.toString())
+                }, (a: ActivityInfo) => a.id.toString() + '-' + a.status.toString() + '-' + a.title +
+                  '-' + a.hours.toString() + '-' + a.valid_count.toString())
               }
             }
             .width('100%').padding(14).backgroundColor(Color.White).borderRadius(14).margin({ top: 10 })

@@ -233,7 +233,8 @@ struct MainPage {
               ListItem() {
                 this.actItem(a)
               }
-            }, (a: ActivityInfo) => 'act' + a.id.toString())
+            }, (a: ActivityInfo) => 'act' + a.id.toString() + '-' + a.valid_count.toString() +
+              '-' + a.hours.toString() + '-' + a.status.toString() + '-' + (a.expired ? '1' : '0') + '-' + a.title)
 
             ListItem() {
               Row() {
