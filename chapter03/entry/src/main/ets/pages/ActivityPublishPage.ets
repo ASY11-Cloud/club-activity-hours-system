@@ -308,7 +308,8 @@ struct ActivityPublishPage {
             Column({ space: 10 }) {
               TextInput({ text: this.title, placeholder: '活动名称 *' })
                 .onChange((v: string) => this.title = v)
-              TextInput({ text: this.content, placeholder: '活动内容描述' })
+              TextArea({ text: this.content, placeholder: '活动内容描述(支持多行)' })
+                .height(100).fontSize(14)
                 .onChange((v: string) => this.content = v)
               TextInput({ text: this.location, placeholder: '活动地点(如: 教学楼 A-301)' })
                 .onChange((v: string) => this.location = v)
@@ -358,7 +359,7 @@ struct ActivityPublishPage {
             }
             .width('100%').padding(14).backgroundColor(Color.White).borderRadius(14).margin({ top: 10 })
           }
-          .padding(14)
+          .width('100%').padding(14)
         }
         .layoutWeight(1).scrollBar(BarState.Off)
       }

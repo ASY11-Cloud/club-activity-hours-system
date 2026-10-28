@@ -119,7 +119,7 @@ struct HoursReportPage {
           }.layoutWeight(1).padding(12).backgroundColor('#EAF1FF').borderRadius(12)
 
           Column({ space: 3 }) {
-            Text('我的服务器学时').fontSize(11).fontColor('#999999')
+            Text(AppConfig.isAdmin ? '服务器全量学时' : '我的服务器学时').fontSize(11).fontColor('#999999')
             Text(this.serverHours() + '').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#07C160')
             Text('审核通过自动累计').fontSize(11).fontColor('#999999')
           }.layoutWeight(1).padding(12).backgroundColor('#E8F8EF').borderRadius(12)
@@ -160,6 +160,12 @@ struct HoursReportPage {
   }
 
   serverHours(): number {
+    if (AppConfig.isAdmin) {
+      // 管理员视角: 展示全量累计学时
+      let total = 0;
+      for (const r of this.report) total += r.total_hours;
+      return total;
+    }
     for (const r of this.report) {
       if (r.stu_no === AppConfig.stuNo) return r.total_hours;
     }

@@ -112,7 +112,7 @@ struct ServerLogPage {
               ListItem() {
                 this.item(l)
               }
-            }, (l: LogRow) => l.time + l.method + l.path + l.ip)
+            }, (l: LogRow) => l.time + l.method + l.path + l.ip + l.cost_ms)
           }
           .layoutWeight(1)
           .scrollBar(BarState.Off)
