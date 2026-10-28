@@ -2,7 +2,7 @@
  * 社团活动报名与学时认定系统 —— 首页导航(按登录角色显示功能入口)
  * 普通成员: 活动广场 / 我的报名 / 我的学时
  * 管理员:   + 发布活动 / 审核中心 / 服务器日志
- * 未登录:   仅活动广场(浏览需登录, 引导登录)
+ * 未登录:   活动广场 + 设置(可改服务器地址, 引导登录)
  */
 import { router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
@@ -102,13 +102,21 @@ struct Index {
         Column({ space: 5 }) {
           Text('社团活动报名与学时认定系统')
             .fontSize(20).fontWeight(FontWeight.Bold).fontColor(Color.White)
-          Row({ space: 4 }) {
+          Row({ space: 6 }) {
             Text(this.checking ? '检测中...' : (this.serverOk ? '● 服务器在线' : '● 服务器未连接'))
               .fontSize(11).fontColor(this.serverOk ? '#D4F5DD' : '#FFD9D2')
+            if (!this.checking) {
+              Text('点此重试').fontSize(10).fontColor('#FFFFFF')
+                .padding({ left: 6, right: 6, top: 1, bottom: 1 })
+                .backgroundColor('rgba(255,255,255,0.25)').borderRadius(6)
+            }
           }
           .padding({ left: 10, right: 10, top: 3, bottom: 3 })
           .backgroundColor('rgba(255,255,255,0.18)')
           .borderRadius(12)
+          .onClick(() => {
+            if (!this.checking) this.pingServer();
+          })
         }
         .width('100%').padding({ top: 24, bottom: 24 })
         .backgroundColor('#1E6FFF')
@@ -164,13 +172,11 @@ struct Index {
           .onClick(() => this.goLogin())
         }
 
-        // ---- 公共: 活动广场 ----
+        // ---- 公共: 活动广场 + 设置(设置入口登录与否恒显示, 保证未登录也能修改服务器地址) ----
         this.sectionTitle('活动大厅')
         Row({ space: 10 }) {
           this.funcCard('活动广场', '浏览/报名活动', '📋', '#EAF1FF', 'pages/ActivityListPage')
-          if (AppConfig.isLoggedIn) {
-            this.funcCard('设置', '服务器地址/账号', '⚙️', '#EDEBFF', 'pages/SettingsPage')
-          }
+          this.funcCard('设置', '服务器地址/账号', '⚙️', '#EDEBFF', 'pages/SettingsPage')
         }
 
         // ---- 成员功能(普通成员) ----
