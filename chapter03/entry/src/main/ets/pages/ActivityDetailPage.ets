@@ -87,8 +87,14 @@ struct ActivityDetailPage {
 
   async doSignup(): Promise<void> {
     const a = this.activity;
-    // 防重复: 已报名或处理中直接返回(防止双击生成多条本地记录)
-    if (a === null || this.signing || this.signed) return;
+    // 防重复: 已报名(非驳回)或处理中直接返回; 驳回后允许重新报名
+    if (a === null || this.signing) return;
+    if (this.signed && !this.myStatus.startsWith('已驳回')) return;
+    // 满员校验
+    if (a.capacity > 0 && a.signed_count >= a.capacity) {
+      this.msg = '名额已满, 无法报名';
+      return;
+    }
     if (AppConfig.stuNo === '' || AppConfig.stuName === '') {
       this.msg = '请先在「设置」填写学号与姓名';
       return;
@@ -96,7 +102,7 @@ struct ActivityDetailPage {
     this.signing = true;
     this.msg = '正在报名并写入本地 SQLite...';
     try {
-      // 1) 本地落库(离线可查)
+      // 1) 本地落库(离线可查; 驳回后重新报名生成新 client_id, 服务器将原驳回记录重置为待审核)
       const clientId = util.generateRandomUUID();
       await DbHelper.addSignup(clientId, a.id, a.title, AppConfig.stuNo, AppConfig.stuName);
       this.msg = '已写入本地库, 正在同步服务器...';
@@ -205,8 +211,20 @@ struct ActivityDetailPage {
           if (AppConfig.isAdmin) {
             Text('管理员账号无需报名, 请到「审核中心」处理成员报名')
               .fontSize(13).fontColor('#B25E00')
+          } else if (this.signed && this.myStatus.startsWith('已驳回')) {
+            Row({ space: 8 }) {
+              Text('已驳回' + (this.myStatus.length > 4 ? ' · ' + this.myStatus : ''))
+                .fontSize(13).fontColor('#E84026').layoutWeight(1)
+              Button(this.signing ? '处理中...' : '重新报名')
+                .height(36).fontSize(14).backgroundColor('#1E6FFF')
+                .enabled(!this.signing)
+                .onClick(() => this.doSignup())
+            }.width('100%')
           } else if (this.signed) {
             Text('你已报名 · ' + this.myStatus).fontSize(14).fontColor('#07C160')
+          } else if (a.capacity > 0 && a.signed_count >= a.capacity) {
+            Text('名额已满(' + a.signed_count + '/' + a.capacity + ' 人), 无法报名')
+              .fontSize(13).fontColor('#B25E00')
           } else {
             Button(this.signing ? '处理中...' : '立即报名')
               .width('100%').height(44).fontSize(16).backgroundColor('#1E6FFF')

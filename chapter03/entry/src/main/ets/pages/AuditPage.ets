@@ -58,6 +58,28 @@ struct AuditPage {
     this.shown = out;
   }
 
+  /** 审核确认弹窗(通过/驳回均不可逆, 防止误触) */
+  confirmAudit(s: SignupInfo, action: string): void {
+    AlertDialog.show({
+      title: action === 'pass' ? '通过该报名?' : '驳回该报名?',
+      message: action === 'pass'
+        ? s.name + ' 报名「' + s.activity_title + '」\n通过后将自动累计 ' + s.hours + ' 学时'
+        : s.name + ' 报名「' + s.activity_title + '」\n驳回后该成员需重新报名',
+      autoCancel: true,
+      alignment: DialogAlignment.Center,
+      primaryButton: {
+        value: '取消',
+        action: () => {
+        }
+      },
+      secondaryButton: {
+        value: '确定',
+        fontColor: action === 'pass' ? '#07C160' : '#E84026',
+        action: () => this.audit(s, action)
+      }
+    });
+  }
+
   /** 审核: 通过 -> 服务器自动累计学时 */
   async audit(s: SignupInfo, action: string): Promise<void> {
     if (this.busy) return;
@@ -108,9 +130,9 @@ struct AuditPage {
       if (s.status === 0) {
         Row({ space: 10 }) {
           Button('通过(累计' + s.hours + '学时)').layoutWeight(1).height(32).fontSize(13).backgroundColor('#07C160')
-            .onClick(() => this.audit(s, 'pass'))
+            .onClick(() => this.confirmAudit(s, 'pass'))
           Button('驳回').layoutWeight(1).height(32).fontSize(13).backgroundColor('#E84026')
-            .onClick(() => this.audit(s, 'reject'))
+            .onClick(() => this.confirmAudit(s, 'reject'))
         }.width('100%').margin({ top: 8 })
       } else {
         Text(s.status === 1 ? '认定学时: ' + s.hours : ('备注: ' + (s.remark === '' ? '—' : s.remark)))

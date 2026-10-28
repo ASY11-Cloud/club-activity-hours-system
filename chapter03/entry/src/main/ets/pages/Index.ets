@@ -17,11 +17,20 @@ struct Index {
   @State serverOk: boolean = false;
   @State checking: boolean = false;
   @State localCount: number = 0;
+  // 登录态镜像(@State): AppConfig 静态属性变化不会触发 ArkUI 重建,
+  // 登录/退出后必须同步到 @State, 首页才会刷新用户卡与功能入口
+  @State loggedIn: boolean = AppConfig.isLoggedIn;
+  @State isAdmin: boolean = AppConfig.isAdmin;
+  @State name: string = AppConfig.stuName;
+  @State stuNo: string = AppConfig.stuNo;
+  @State roleTxt: string = AppConfig.roleText;
 
   aboutToAppear(): void {
     const ctx = getContext(this) as common.UIAbilityContext;
     AppConfig.init(ctx).then(() => {
       DbHelper.init(ctx).then(() => {
+        // 冷启动: init 完成后才拿到持久化登录态, 必须同步一次
+        this.syncLoginState();
         this.refresh();
       }).catch((e: Error) => {
         this.serverOk = false;
@@ -33,7 +42,18 @@ struct Index {
   }
 
   onPageShow(): void {
+    // 页面重新可见(登录/退出登录返回)时, 重新同步登录态并刷新
+    this.syncLoginState();
     this.refresh();
+  }
+
+  /** 把 AppConfig 登录态镜像到 @State, 保证 UI 强制重建 */
+  syncLoginState(): void {
+    this.loggedIn = AppConfig.isLoggedIn;
+    this.isAdmin = AppConfig.isAdmin;
+    this.name = AppConfig.stuName;
+    this.stuNo = AppConfig.stuNo;
+    this.roleTxt = AppConfig.roleText;
   }
 
   refresh(): void {
@@ -125,22 +145,22 @@ struct Index {
         // 用户卡
         Row() {
           // 头像
-          Text(AppConfig.stuName === '' ? '访' : AppConfig.stuName.substring(0, 1))
+          Text(this.name === '' ? '访' : this.name.substring(0, 1))
             .fontSize(20).fontWeight(FontWeight.Bold).fontColor(Color.White)
             .width(46).height(46).textAlign(TextAlign.Center)
-            .backgroundColor(AppConfig.isAdmin ? '#F5652F' : (AppConfig.isLoggedIn ? '#07C160' : '#AAB2C0'))
+            .backgroundColor(this.isAdmin ? '#F5652F' : (this.loggedIn ? '#07C160' : '#AAB2C0'))
             .borderRadius(23)
           Column({ space: 3 }) {
             Row({ space: 6 }) {
-              Text(AppConfig.stuName === '' ? '未登录' : AppConfig.stuName)
+              Text(this.name === '' ? '未登录' : this.name)
                 .fontSize(16).fontWeight(FontWeight.Bold)
-              Text(AppConfig.roleText)
+              Text(this.roleTxt)
                 .fontSize(10).fontColor(Color.White)
                 .padding({ left: 7, right: 7, top: 2, bottom: 2 })
-                .backgroundColor(AppConfig.isAdmin ? '#F5652F' : (AppConfig.isLoggedIn ? '#07C160' : '#AAB2C0'))
+                .backgroundColor(this.isAdmin ? '#F5652F' : (this.loggedIn ? '#07C160' : '#AAB2C0'))
                 .borderRadius(8)
             }
-            Text(AppConfig.isLoggedIn ? (AppConfig.isAdmin ? '账号: ' + AppConfig.stuNo : '学号: ' + AppConfig.stuNo)
+            Text(this.loggedIn ? (this.isAdmin ? '账号: ' + this.stuNo : '学号: ' + this.stuNo)
               : '登录后按身份进入对应功能')
               .fontSize(11).fontColor('#666666')
           }
@@ -148,7 +168,7 @@ struct Index {
           .layoutWeight(1)
           .margin({ left: 10 })
 
-          Text(AppConfig.isLoggedIn ? '切换 ›' : '登录 ›')
+          Text(this.loggedIn ? '切换 ›' : '登录 ›')
             .fontSize(13).fontColor('#1E6FFF').fontWeight(FontWeight.Medium)
             .onClick(() => this.goLogin())
         }
@@ -157,10 +177,10 @@ struct Index {
         .borderRadius(14)
         .margin({ top: -14, left: 14, right: 14 })
         .shadow({ radius: 10, color: 'rgba(0,0,0,0.08)', offsetY: 3 })
-        .onClick(() => AppConfig.isLoggedIn ? this.go('pages/SettingsPage') : this.goLogin())
+        .onClick(() => this.loggedIn ? this.go('pages/SettingsPage') : this.goLogin())
 
         // ---- 未登录提示 ----
-        if (!AppConfig.isLoggedIn) {
+        if (!this.loggedIn) {
           Column({ space: 8 }) {
             Text('🔒 请先登录以使用完整功能').fontSize(14).fontWeight(FontWeight.Medium)
             Text('普通成员: 报名活动 / 查看我的报名与学时; 管理员: 发布活动 / 审核认定 / 服务器日志')
@@ -180,7 +200,7 @@ struct Index {
         }
 
         // ---- 成员功能(普通成员) ----
-        if (AppConfig.isLoggedIn && !AppConfig.isAdmin) {
+        if (this.loggedIn && !this.isAdmin) {
           this.sectionTitle('成员功能')
           Row({ space: 10 }) {
             this.funcCard('我的报名', '本地记录' + (this.localCount > 0 ? ' ' + this.localCount + '条' : ''), '📌', '#E8F8EF', 'pages/MySignupPage')
@@ -189,7 +209,7 @@ struct Index {
         }
 
         // ---- 管理员功能 ----
-        if (AppConfig.isAdmin) {
+        if (this.isAdmin) {
           this.sectionTitle('管理员功能')
           Row({ space: 10 }) {
             this.funcCard('发布活动', '草稿+同步发布', '📢', '#FFF1E8', 'pages/ActivityPublishPage')
