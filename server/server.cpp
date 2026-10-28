@@ -483,6 +483,16 @@ static string jsonErr(int code, const string& msg) {
   return httpResponse(200, jsonDump(j));
 }
 
+// 循环发送, 保证大响应完整写出(单次 send 可能部分发送)
+static void sendAll(SOCKET sock, const string& data) {
+  size_t off = 0;
+  while (off < data.size()) {
+    int n = send(sock, data.c_str() + off, (int)(data.size() - off), 0);
+    if (n <= 0) break;
+    off += (size_t)n;
+  }
+}
+
 // ---------------------------- 业务处理 ---------------------------------------
 static string nowStr() {
   time_t t = time(nullptr);
@@ -719,14 +729,16 @@ static string handleSignupAdd(const Json& body, const string& loginStuNo, const 
     }
   }
 
-  // 幂等插入: 冲突时保留原记录(client_id 不覆盖, 保证本地 SQLite 同步匹配), 仅取回 id
+  // 幂等插入: client_id 冲突时保留原记录(本地 SQLite 同步匹配), 仅取回 id;
+  // 同一学生重复报名(uk_act_stu 冲突)时: 已驳回记录重置为待审核(重新报名), 其余状态保持不变
   std::ostringstream sql;
   sql << "INSERT INTO signup (client_id,activity_id,stu_no,name,status) VALUES ("
       << dbEscape(c, clientId) << ","
       << activityId << ","
       << dbEscape(c, stuNo) << ","
       << dbEscape(c, name) << ",0) "
-      << "ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id)";
+      << "ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id),client_id=VALUES(client_id),"
+      << "status=IF(status=2,0,status),name=VALUES(name),remark=''";
   if (!dbQuery(c, sql.str(), r, err)) {
     mysql_rollback(c); mysql_autocommit(c, 1); mysql_close(c); return jsonErr(500, err);
   }
@@ -839,25 +851,26 @@ static string handleSignupAudit(const Json& body) {
   double actHours = atof(r.rows[0][3].c_str());
   string actId = r.rows[0][4];
 
+  // 已审核记录禁止重复操作, 防止 hours_total 与 signup 状态不一致
+  if (curStatus != 0) { mysql_close(c); return jsonErr(400, "该记录已审核, 不能重复操作"); }
+
   mysql_autocommit(c, 0);
   bool ok = true;
   if (action == "pass") {
-    if (curStatus != 1) {
-      // 1) 更新报名状态+学时
-      std::ostringstream s1;
-      s1 << "UPDATE signup SET status=1,hours=" << actHours
-         << ",audited_at=NOW(),remark=" << dbEscape(c, remark)
-         << " WHERE id=" << signupId;
-      if (!dbQuery(c, s1.str(), r, err)) ok = false;
-      // 2) 学时汇总自动累计
-      if (ok) {
-        std::ostringstream s2;
-        s2 << "INSERT INTO hours_total (stu_no,name,total_hours,sign_count) VALUES ("
-           << dbEscape(c, stuNo) << "," << dbEscape(c, name) << "," << actHours << ",1) "
-           << "ON DUPLICATE KEY UPDATE total_hours=total_hours+VALUES(total_hours),"
-           << "sign_count=sign_count+1,name=VALUES(name)";
-        if (!dbQuery(c, s2.str(), r, err)) ok = false;
-      }
+    // 1) 更新报名状态+学时
+    std::ostringstream s1;
+    s1 << "UPDATE signup SET status=1,hours=" << actHours
+       << ",audited_at=NOW(),remark=" << dbEscape(c, remark)
+       << " WHERE id=" << signupId;
+    if (!dbQuery(c, s1.str(), r, err)) ok = false;
+    // 2) 学时汇总自动累计
+    if (ok) {
+      std::ostringstream s2;
+      s2 << "INSERT INTO hours_total (stu_no,name,total_hours,sign_count) VALUES ("
+         << dbEscape(c, stuNo) << "," << dbEscape(c, name) << "," << actHours << ",1) "
+         << "ON DUPLICATE KEY UPDATE total_hours=total_hours+VALUES(total_hours),"
+         << "sign_count=sign_count+1,name=VALUES(name)";
+      if (!dbQuery(c, s2.str(), r, err)) ok = false;
     }
   } else { // reject
     std::ostringstream s1;
@@ -993,11 +1006,18 @@ static string handleSignin(const Json& body) {
       << ",hours=" << actHours << ",audited_at=NOW() WHERE id=" << signupId;
     if (!dbQuery(c, s.str(), r, err)) ok = false;
     else needAccumulate = true;
-  } else {
+  } else if (st == 1) {
     // 已通过 -> 仅签到(不重复累计学时)
     std::ostringstream s;
     s << "UPDATE signup SET checkin=1,card_no=" << dbEscape(c, cardNo) << " WHERE id=" << signupId;
     if (!dbQuery(c, s.str(), r, err)) ok = false;
+  } else {
+    // 已驳回 -> 重新通过并认定学时(到场认定)
+    std::ostringstream s;
+    s << "UPDATE signup SET status=1,checkin=1,card_no=" << dbEscape(c, cardNo)
+      << ",hours=" << actHours << ",audited_at=NOW() WHERE id=" << signupId;
+    if (!dbQuery(c, s.str(), r, err)) ok = false;
+    else needAccumulate = true;
   }
 
   // 学时汇总累计(仅首次认定)
@@ -1080,6 +1100,10 @@ static string route(const HttpRequest& req) {
     return jsonOk(d);
   }
 
+  // CORS 预检(OPTIONS 无鉴权, 提前处理; 供浏览器/调试工具跨域使用)
+  if (req.method == "OPTIONS")
+    return httpResponse(200, "", "text/plain");
+
   // ---- 登录(公开) ----
   if (req.method == "POST" && p == "/api/login") {
     Json body; JsonParser jp(req.body);
@@ -1141,9 +1165,6 @@ static string route(const HttpRequest& req) {
     return handleLogs(req.query);
   }
 
-  if (req.method == "OPTIONS")
-    return httpResponse(200, "", "text/plain");
-
   return httpResponse(404, jsonDump(Json::Object()
     .set("code", Json::Num(404)).set("msg", Json::Str("not found"))));
 }
@@ -1190,10 +1211,24 @@ static void handleClient(SOCKET sock, const string& ip) {
       req.headers[k] = v;
     }
   }
-  // 请求体
+  // 请求体(限制大小, 防恶意大包撑爆内存)
   string cl = req.header("Content-Length");
   if (!cl.empty()) {
     size_t need = (size_t)atol(cl.c_str());
+    if (need > 64 * 1024) {
+      // 先读完请求体再响应, 避免连接上残留数据导致对端收到 RST 而读不到 413
+      size_t got = 0;
+      char tmp[4096];
+      while (got < need) {
+        int n = recv(sock, tmp, sizeof(tmp), 0);
+        if (n <= 0) break;
+        got += (size_t)n;
+      }
+      sendAll(sock, httpResponse(413, jsonDump(Json::Object()
+        .set("code", Json::Num(413)).set("msg", Json::Str("request body too large")))));
+      closesocket(sock);
+      return;
+    }
     string bodyPart = raw.substr(hdrEnd + 4);
     while (bodyPart.size() < need) {
       int n = recv(sock, buf, sizeof(buf), 0);
@@ -1207,14 +1242,15 @@ static void handleClient(SOCKET sock, const string& ip) {
   try {
     resp = route(req);
     status = extractCode(resp);
-    detail = req.method + " " + req.path;
+    detail = req.method + " " + req.path + (req.query.empty() ? "" : "?" + req.query);
+    if (detail.size() > 480) detail = detail.substr(0, 480); // 适配日志列宽
   } catch (...) {
     resp = jsonErr(500, "internal error");
     status = 500;
   }
 
   // 发送
-  send(sock, resp.c_str(), (int)resp.size(), 0);
+  sendAll(sock, resp);
   closesocket(sock);
 
   auto t1 = std::chrono::steady_clock::now();
