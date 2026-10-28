@@ -19,3 +19,8 @@ Thumbs.db
 
 # ---- WorkBuddy 工具内部记忆 ----
 .workbuddy/
+
+# ---- WorkBuddy 调试残留截图/临时文件（不入库） ----
+.*.jpeg
+tmp_*.jpeg
+tmp_*.json

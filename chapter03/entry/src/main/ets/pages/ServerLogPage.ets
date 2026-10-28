@@ -9,6 +9,7 @@ import { ApiClient } from '../common/ApiClient';
 import { AppConfig } from '../common/AppConfig';
 import { LogRow, parseLogs, dataOf, numOf } from '../common/Models';
 import { AdminGuardView } from '../common/GuardViews';
+import { Theme } from '../common/Theme';
 
 @Entry
 @Component
@@ -92,9 +93,9 @@ struct ServerLogPage {
   chip(label: string, active: boolean, kind: string, val: string) {
     Text(label)
       .fontSize(11)
-      .fontColor(active ? Color.White : '#333333')
+      .fontColor(active ? Color.White : Theme.textBody)
       .padding({ left: 10, right: 10, top: 4, bottom: 4 })
-      .backgroundColor(active ? '#1E6FFF' : '#E9ECF3')
+      .backgroundColor(active ? Theme.primary : Theme.bgNeutral)
       .borderRadius(12)
       .onClick(() => {
         if (kind === 'level') {
@@ -113,20 +114,20 @@ struct ServerLogPage {
         Row({ space: 8 }) {
           Text(l.method).fontSize(11).fontColor(Color.White)
             .padding({ left: 5, right: 5, top: 1, bottom: 1 })
-            .backgroundColor(l.method === 'POST' ? '#E84026' : '#1E6FFF').borderRadius(4)
+            .backgroundColor(l.method === 'POST' ? Theme.danger : Theme.primary).borderRadius(4)
           Text(l.status.toString()).fontSize(12).fontWeight(FontWeight.Bold)
-            .fontColor(l.status >= 400 ? '#E84026' : '#07C160')
+            .fontColor(l.status >= 400 ? Theme.danger : Theme.success)
           if (l.cost_ms >= 500) {
             Text('慢').fontSize(9).fontColor(Color.White)
               .padding({ left: 4, right: 4, top: 1, bottom: 1 })
-              .backgroundColor('#B25E00').borderRadius(4)
+              .backgroundColor(Theme.warning).borderRadius(4)
           }
         }
-        Text(l.path).fontSize(13).fontColor('#333333')
+        Text(l.path).fontSize(13).fontColor(Theme.textBody)
       }.alignItems(HorizontalAlign.Start).layoutWeight(1)
       Column({ space: 3 }) {
-        Text(l.time).fontSize(11).fontColor('#999999')
-        Text(l.ip + ' · ' + l.cost_ms + 'ms').fontSize(11).fontColor('#999999')
+        Text(l.time).fontSize(11).fontColor(Theme.textTertiary)
+        Text(l.ip + ' · ' + l.cost_ms + 'ms').fontSize(11).fontColor(Theme.textTertiary)
       }.alignItems(HorizontalAlign.End)
     }
     .width('100%').padding(12).backgroundColor(Color.White).borderRadius(12).margin({ bottom: 8 })
@@ -143,14 +144,14 @@ struct ServerLogPage {
         this.deniedView()
       } else {
         Row() {
-          Text('‹ 返回').fontSize(14).fontColor('#1E6FFF')
+          Text('‹ 返回').fontSize(14).fontColor(Theme.primary)
             .padding({ right: 10, top: 2, bottom: 2 })
             .onClick(() => router.back())
           Text('服务器实时日志').fontSize(18).fontWeight(FontWeight.Bold).layoutWeight(1)
           Text(this.auto ? '● 自动刷新' : '○ 手动刷新')
-            .fontSize(12).fontColor(this.auto ? '#07C160' : '#999999')
+            .fontSize(12).fontColor(this.auto ? Theme.success : Theme.textTertiary)
             .onClick(() => this.auto = !this.auto)
-          Button('刷新').fontSize(13).height(30).backgroundColor('#1E6FFF').margin({ left: 8 })
+          Button('刷新').fontSize(13).height(30).backgroundColor(Theme.primary).margin({ left: 8 })
             .onClick(() => this.load())
         }.width('100%').padding({ left: 14, right: 14, top: 12, bottom: 6 })
 
@@ -159,7 +160,7 @@ struct ServerLogPage {
           this.chip('全部', this.level === '', 'level', '')
           this.chip('失败', this.level === 'err', 'level', 'err')
           this.chip('慢请求', this.level === 'slow', 'level', 'slow')
-          Row().width(1).height(14).backgroundColor('#DDDDDD').margin({ left: 2, right: 2 })
+          Row().width(1).height(14).backgroundColor(Theme.divider).margin({ left: 2, right: 2 })
           this.chip('ALL', this.method === '', 'method', '')
           this.chip('GET', this.method === 'GET', 'method', 'GET')
           this.chip('POST', this.method === 'POST', 'method', 'POST')
@@ -174,13 +175,13 @@ struct ServerLogPage {
               this.kw = this.kwInput;
               this.applyFilter();
             })
-          Button('过滤').fontSize(12).height(32).backgroundColor('#1E6FFF')
+          Button('过滤').fontSize(12).height(32).backgroundColor(Theme.primary)
             .onClick(() => {
               this.kw = this.kwInput;
               this.applyFilter();
             })
           if (this.kw !== '') {
-            Button('清除').fontSize(12).height(32).backgroundColor('#999999')
+            Button('清除').fontSize(12).height(32).backgroundColor(Theme.textTertiary)
               .onClick(() => {
                 this.kwInput = '';
                 this.kw = '';
@@ -189,14 +190,14 @@ struct ServerLogPage {
           }
         }.width('100%').padding({ left: 14, right: 14, bottom: 6 })
 
-        Text(this.msg).fontSize(12).fontColor('#999999').width('100%').padding({ left: 14, bottom: 6 })
+        Text(this.msg).fontSize(12).fontColor(Theme.textTertiary).width('100%').padding({ left: 14, bottom: 6 })
 
         if (this.logs.length === 0) {
           Column({ space: 10 }) {
             Text(this.msg === '' ? '加载中...' : '没有符合条件的日志')
-              .fontSize(14).fontColor('#999999')
+              .fontSize(14).fontColor(Theme.textTertiary)
             Text('每当 App 请求服务器, 这里会实时显示(同时写入 MySQL request_log)')
-              .fontSize(12).fontColor('#BBBBBB').textAlign(TextAlign.Center)
+              .fontSize(12).fontColor(Theme.textDisabled).textAlign(TextAlign.Center)
           }.width('100%').margin({ top: 60 }).padding({ left: 30, right: 30 })
         } else {
           List({ space: 0 }) {
@@ -212,6 +213,6 @@ struct ServerLogPage {
         }
       }
     }
-    .width('100%').height('100%').backgroundColor('#F5F7FA')
+    .width('100%').height('100%').backgroundColor(Theme.bgPage)
   }
 }

@@ -9,6 +9,7 @@ import { ApiClient } from '../common/ApiClient';
 import { AppConfig } from '../common/AppConfig';
 import { ActivityInfo, parseActivities } from '../common/Models';
 import { AdminGuardView } from '../common/GuardViews';
+import { Theme } from '../common/Theme';
 
 @Entry
 @Component
@@ -219,15 +220,16 @@ struct ActivityEditPage {
   }
 
   @Builder
-  timeCell(label: string, value: string, isStart: boolean) {
+  timeCell(label: string, isStart: boolean) {
     Row() {
       Column() {
-        Text(label).fontSize(12).fontColor('#999999')
-        Text(value).fontSize(15).fontWeight(FontWeight.Medium).fontColor('#1E6FFF').margin({ top: 2 })
+        Text(label).fontSize(12).fontColor(Theme.textTertiary)
+        Text(isStart ? this.fmtDate(this.startDate) : this.fmtDate(this.endDate))
+          .fontSize(15).fontWeight(FontWeight.Medium).fontColor(Theme.primary).margin({ top: 2 })
       }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-      Text('滚动选择 ›').fontSize(12).fontColor('#1E6FFF')
+      Text('滚动选择 ›').fontSize(12).fontColor(Theme.primary)
     }
-    .width('100%').padding(12).backgroundColor('#F0F5FF').borderRadius(10)
+    .width('100%').padding(12).backgroundColor(Theme.primaryBg).borderRadius(10)
     .onClick(() => {
       if (isStart) this.pickStart(); else this.pickEnd();
     })
@@ -239,7 +241,7 @@ struct ActivityEditPage {
         this.deniedView()
       } else {
         Row() {
-          Text('‹ 返回').fontSize(14).fontColor('#1E6FFF')
+          Text('‹ 返回').fontSize(14).fontColor(Theme.primary)
             .padding({ right: 10, top: 2, bottom: 2 })
             .onClick(() => router.back())
           Text('编辑活动' + (this.activityId > 0 ? ' #' + this.activityId : ''))
@@ -247,7 +249,7 @@ struct ActivityEditPage {
           Text(this.status === 0 ? '已下线' : '已发布')
             .fontSize(11).fontColor(Color.White)
             .padding({ left: 8, right: 8, top: 2, bottom: 2 })
-            .backgroundColor(this.status === 0 ? '#999999' : '#07C160')
+            .backgroundColor(this.status === 0 ? Theme.textTertiary : Theme.success)
             .borderRadius(8)
         }.width('100%').padding({ left: 14, right: 14, top: 12, bottom: 8 })
 
@@ -255,7 +257,7 @@ struct ActivityEditPage {
           Column({ space: 10 }) {
             if (!this.loaded) {
               Text(this.msg === '' ? '加载中...' : this.msg)
-                .fontSize(13).fontColor('#999999').margin({ top: 40 })
+                .fontSize(13).fontColor(Theme.textTertiary).margin({ top: 40 })
             } else {
               TextInput({ text: this.title, placeholder: '活动名称 *' })
                 .onChange((v: string) => this.title = v)
@@ -265,8 +267,8 @@ struct ActivityEditPage {
               TextInput({ text: this.location, placeholder: '活动地点(如: 教学楼 A-301)' })
                 .onChange((v: string) => this.location = v)
 
-              this.timeCell('开始时间', this.fmtDate(this.startDate), true)
-              this.timeCell('结束时间', this.fmtDate(this.endDate), false)
+              this.timeCell('开始时间', true)
+              this.timeCell('结束时间', false)
 
               Row({ space: 10 }) {
                 TextInput({ text: this.hours, placeholder: '学时(如 2.0)' })
@@ -278,26 +280,26 @@ struct ActivityEditPage {
                 .onChange((v: string) => this.publisher = v)
 
               Text('已报名记录与已认定学时不受编辑影响; 历史活动可保留原开始时间')
-                .fontSize(11).fontColor('#999999').width('100%')
+                .fontSize(11).fontColor(Theme.textTertiary).width('100%')
 
               Row({ space: 10 }) {
-                Button('取消').layoutWeight(1).height(40).fontSize(14).backgroundColor('#999999')
+                Button('取消').layoutWeight(1).height(40).fontSize(14).backgroundColor(Theme.textTertiary)
                   .onClick(() => router.back())
                 Button(this.busy ? '保存中...' : '保存修改')
-                  .layoutWeight(1).height(40).fontSize(14).backgroundColor('#1E6FFF')
+                  .layoutWeight(1).height(40).fontSize(14).backgroundColor(Theme.primary)
                   .enabled(!this.busy).onClick(() => this.save())
               }
               if (this.msg !== '') {
-                Text(this.msg).fontSize(12).fontColor('#1E6FFF').textAlign(TextAlign.Center).width('100%')
+                Text(this.msg).fontSize(12).fontColor(Theme.primary).textAlign(TextAlign.Center).width('100%')
               }
             }
           }
           .width('100%').padding(14).backgroundColor(Color.White).borderRadius(14).margin({ top: 4 })
         }
-        .layoutWeight(1).scrollBar(BarState.Off)
+        .layoutWeight(1).scrollBar(BarState.Off).align(Alignment.Top)
         .padding({ left: 14, right: 14 })
       }
     }
-    .width('100%').height('100%').backgroundColor('#F5F7FA')
+    .width('100%').height('100%').backgroundColor(Theme.bgPage)
   }
 }

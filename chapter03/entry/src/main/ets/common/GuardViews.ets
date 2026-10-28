@@ -6,6 +6,7 @@
  */
 import { router } from '@kit.ArkUI';
 import { Nav } from './Nav';
+import { Theme } from './Theme';
 
 @Component
 export struct LoginGuardView {
@@ -13,10 +14,14 @@ export struct LoginGuardView {
 
   build() {
     Column({ space: 12 }) {
-      Text('🔒').fontSize(40)
-      Text('请先登录').fontSize(16).fontWeight(FontWeight.Bold).fontColor('#333333')
-      Text(this.tip).fontSize(12).fontColor('#999999').textAlign(TextAlign.Center)
-      Button('去登录').fontSize(14).height(38).width(160).backgroundColor('#1E6FFF')
+      // 用"字符方块"代替 emoji: emoji 在部分设备上会被渲染成彩色位图或方块
+      Text('登')
+        .fontSize(24).fontWeight(FontWeight.Bold).fontColor(Theme.primary)
+        .textAlign(TextAlign.Center).width(64).height(64)
+        .backgroundColor(Theme.primaryBg).borderRadius(20)
+      Text('请先登录').fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.textBody)
+      Text(this.tip).fontSize(12).fontColor(Theme.textTertiary).textAlign(TextAlign.Center)
+      Button('去登录').fontSize(14).height(38).width(160).backgroundColor(Theme.primary)
         .onClick(() => {
           Nav.resetTo('pages/LandingPage');
         })
@@ -31,10 +36,13 @@ export struct AdminGuardView {
 
   build() {
     Column({ space: 12 }) {
-      Text('🛡').fontSize(40)
-      Text('仅管理员可访问').fontSize(16).fontWeight(FontWeight.Bold).fontColor('#333333')
-      Text(this.tip).fontSize(12).fontColor('#999999').textAlign(TextAlign.Center)
-      Button('返回').fontSize(14).height(38).width(160).backgroundColor('#1E6FFF')
+      Text('管')
+        .fontSize(24).fontWeight(FontWeight.Bold).fontColor(Theme.admin)
+        .textAlign(TextAlign.Center).width(64).height(64)
+        .backgroundColor(Theme.adminBg).borderRadius(20)
+      Text('仅管理员可访问').fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.textBody)
+      Text(this.tip).fontSize(12).fontColor(Theme.textTertiary).textAlign(TextAlign.Center)
+      Button('返回').fontSize(14).height(38).width(160).backgroundColor(Theme.primary)
         .onClick(() => {
           router.back();
         })

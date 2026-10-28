@@ -9,6 +9,7 @@ import { common } from '@kit.AbilityKit';
 import { AppConfig } from '../common/AppConfig';
 import { ApiClient } from '../common/ApiClient';
 import { Nav } from '../common/Nav';
+import { Theme } from '../common/Theme';
 
 @Entry
 @Component
@@ -88,13 +89,13 @@ struct LoginPage {
   roleTab(label: string, r: string, hint: string) {
     Column({ space: 3 }) {
       Text(label).fontSize(15).fontWeight(FontWeight.Bold)
-        .fontColor(this.role === r ? Color.White : '#333333')
+        .fontColor(this.role === r ? Color.White : Theme.textBody)
       Text(hint).fontSize(10)
-        .fontColor(this.role === r ? 'rgba(255,255,255,0.85)' : '#999999')
+        .fontColor(this.role === r ? 'rgba(255,255,255,0.85)' : Theme.textTertiary)
     }
     .layoutWeight(1)
     .padding({ top: 12, bottom: 12 })
-    .backgroundColor(this.role === r ? '#1E6FFF' : '#E9ECF3')
+    .backgroundColor(this.role === r ? Theme.primary : Theme.bgNeutral)
     .borderRadius(12)
     .alignItems(HorizontalAlign.Center)
     .onClick(() => this.switchRole(r))
@@ -112,7 +113,7 @@ struct LoginPage {
               .fontSize(12).fontColor('rgba(255,255,255,0.85)')
           }
           .width('100%').padding({ top: 46, bottom: 34 })
-          .backgroundColor('#1E6FFF')
+          .backgroundColor(Theme.primary)
           .borderRadius({ bottomLeft: 24, bottomRight: 24 })
           .alignItems(HorizontalAlign.Center)
 
@@ -120,7 +121,7 @@ struct LoginPage {
           Column() {
             Text('身份登录').fontSize(17).fontWeight(FontWeight.Bold).width('100%')
             Text('不同身份进入不同的功能(权限由服务端校验)')
-              .fontSize(11).fontColor('#999999').width('100%').margin({ top: 4, bottom: 12 })
+              .fontSize(11).fontColor(Theme.textTertiary).width('100%').margin({ top: 4, bottom: 12 })
 
             // 角色切换
             Row({ space: 10 }) {
@@ -132,14 +133,14 @@ struct LoginPage {
             Column({ space: 12 }) {
               Row({ space: 10 }) {
                 Text(this.role === 'student' ? '学号' : '账号')
-                  .fontSize(14).fontColor('#333333').width(52)
+                  .fontSize(14).fontColor(Theme.textBody).width(52)
                 TextInput({ text: this.account, placeholder: this.role === 'student' ? '如 2023001' : '如 admin' })
                   .layoutWeight(1)
                   .onChange((v: string) => this.account = v)
               }
               Row({ space: 10 }) {
                 Text(this.role === 'student' ? '姓名' : '密码')
-                  .fontSize(14).fontColor('#333333').width(52)
+                  .fontSize(14).fontColor(Theme.textBody).width(52)
                 TextInput({ text: this.secret, placeholder: this.role === 'student' ? '如 张三' : '管理员密码' })
                   .type(this.role === 'admin' ? InputType.Password : InputType.Normal)
                   .layoutWeight(1)
@@ -148,14 +149,14 @@ struct LoginPage {
 
               Button(this.busy ? '登录中...' : '登 录')
                 .width('100%').height(44).fontSize(16).fontColor(Color.White)
-                .backgroundColor('#1E6FFF')
+                .backgroundColor(Theme.primary)
                 .enabled(!this.busy)
                 .margin({ top: 6 })
                 .onClick(() => this.doLogin())
 
               if (this.msg !== '') {
                 Text(this.msg).fontSize(12)
-                  .fontColor(this.msg.includes('成功') ? '#07C160' : '#E84026')
+                  .fontColor(this.msg.includes('成功') ? Theme.success : Theme.danger)
                   .textAlign(TextAlign.Center).width('100%')
               }
             }
@@ -168,9 +169,9 @@ struct LoginPage {
 
           // 未注册/连不上服务器时的出口(原先只有文字提示, 没有可点的入口)
           Row() {
-            Text('还没有账号? 去注册').fontSize(12).fontColor('#1E6FFF')
+            Text('还没有账号? 去注册').fontSize(12).fontColor(Theme.primary)
               .onClick(() => router.pushUrl({ url: 'pages/RegisterPage' }))
-            Text('服务器设置').fontSize(12).fontColor('#666666')
+            Text('服务器设置').fontSize(12).fontColor(Theme.textSecondary)
               .onClick(() => router.pushUrl({ url: 'pages/SettingsPage' }))
           }
           .width('100%').justifyContent(FlexAlign.SpaceBetween)
@@ -180,20 +181,20 @@ struct LoginPage {
           Column({ space: 5 }) {
             Text('演示账号').fontSize(13).fontWeight(FontWeight.Medium).width('100%')
             Text('普通成员: 2023001 张三 / 2023002 李铭')
-              .fontSize(11).fontColor('#666666').width('100%')
+              .fontSize(11).fontColor(Theme.textSecondary).width('100%')
             Text('管理员: admin / admin123')
-              .fontSize(11).fontColor('#666666').width('100%')
+              .fontSize(11).fontColor(Theme.textSecondary).width('100%')
             Text('服务器: 请先到「设置」填写宿主机局域网 IPv4:8000')
-              .fontSize(11).fontColor('#B25E00').width('100%')
+              .fontSize(11).fontColor(Theme.warning).width('100%')
           }
           .width('100%').padding(14).margin({ left: 14, right: 14, top: 12 })
-          .backgroundColor('#F2F4F8').borderRadius(12)
+          .backgroundColor(Theme.bgSubtle).borderRadius(12)
           .alignItems(HorizontalAlign.Start)
         }
         .width('100%')
       }
-      .layoutWeight(1).scrollBar(BarState.Off)
+      .layoutWeight(1).scrollBar(BarState.Off).align(Alignment.Top)
     }
-    .width('100%').height('100%').backgroundColor('#F5F7FA')
+    .width('100%').height('100%').backgroundColor(Theme.bgPage)
   }
 }

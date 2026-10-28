@@ -7,6 +7,7 @@ import { common } from '@kit.AbilityKit';
 import { AppConfig } from '../common/AppConfig';
 import { ApiClient } from '../common/ApiClient';
 import { Nav } from '../common/Nav';
+import { Theme } from '../common/Theme';
 
 @Entry
 @Component
@@ -22,15 +23,81 @@ struct SettingsPage {
   @State stuNo: string = AppConfig.stuNo;
   @State roleTxt: string = AppConfig.roleText;
 
+  // 刷卡调试(模拟 RFID 终端): 没有 ESP32 时也能演示"刷卡 -> 签到 -> 学时"
+  @State cardNo: string = 'A1B2C3D4';
+  @State signinMsg: string = '';
+  @State signinOk: boolean = false;
+  @State signinBusy: boolean = false;
+  @State actNames: string[] = ['选择活动'];
+  @State actIds: number[] = [0];
+  @State actOptions: SelectOption[] = [{ value: '选择活动' }];
+  @State actIndex: number = 0;
+
   aboutToAppear(): void {
     const ctx = getContext(this) as common.UIAbilityContext;
     AppConfig.init(ctx).then(() => {
       this.syncLoginState();
       this.host = AppConfig.serverHost;
       this.port = AppConfig.serverPort;
+      if (AppConfig.isAdmin) this.loadActs();
     }).catch((e: Error) => {
       this.msg = '初始化失败: ' + e.message;
     });
+  }
+
+  /** 可刷卡的活动(未结束且未满), 供模拟刷卡选择 */
+  async loadActs(): Promise<void> {
+    const resp = await ApiClient.get('/api/activity/list?size=50&scope=available');
+    if (resp['code'] !== 0) return;
+    const data = resp['data'] as Record<string, Object>;
+    const list = data['list'] as Array<Record<string, Object>>;
+    if (!list) return;
+    const names: string[] = ['选择活动'];
+    const ids: number[] = [0];
+    const opts: SelectOption[] = [{ value: '选择活动' }];
+    for (const item of list) {
+      const title = item['title'] as string;
+      names.push(title);
+      ids.push(Number(item['id']));
+      const o: SelectOption = { value: title };
+      opts.push(o);
+    }
+    this.actNames = names;
+    this.actIds = ids;
+    this.actOptions = opts;
+    if (this.actIndex >= names.length) this.actIndex = 0;
+  }
+
+  /** 走与 ESP32 完全相同的 /api/signin 接口, 保证演示链路真实 */
+  async doSignin(): Promise<void> {
+    const card = this.cardNo.trim();
+    const aid = this.actIndex < this.actIds.length ? this.actIds[this.actIndex] : 0;
+    if (card === '') {
+      this.signinOk = false;
+      this.signinMsg = '请填写卡号';
+      return;
+    }
+    if (aid <= 0) {
+      this.signinOk = false;
+      this.signinMsg = '请选择要签到的活动';
+      return;
+    }
+    this.signinBusy = true;
+    try {
+      const body: Record<string, Object> = { 'card_no': card, 'activity_id': aid };
+      const resp = await ApiClient.post('/api/signin', body);
+      if (resp['code'] === 0) {
+        const d = resp['data'] as Record<string, Object>;
+        this.signinOk = true;
+        this.signinMsg = '刷卡成功: ' + (d['name'] as string) + ' (' + (d['stu_no'] as string) +
+          ') → 认定 ' + (d['hours'] as number) + ' 学时';
+      } else {
+        this.signinOk = false;
+        this.signinMsg = '刷卡失败: ' + (resp['msg'] as string);
+      }
+    } finally {
+      this.signinBusy = false;
+    }
   }
 
   onPageShow(): void {
@@ -93,11 +160,11 @@ struct SettingsPage {
   build() {
     Column() {
       Row() {
-        Text('‹ 返回').fontSize(14).fontColor('#1E6FFF')
+        Text('‹ 返回').fontSize(14).fontColor(Theme.primary)
           .padding({ right: 10, top: 2, bottom: 2 })
           .onClick(() => router.back())
         Text('设置').fontSize(18).fontWeight(FontWeight.Bold).layoutWeight(1)
-        Button('测试连接').fontSize(12).height(30).backgroundColor('#1E6FFF')
+        Button('测试连接').fontSize(12).height(30).backgroundColor(Theme.primary)
           .enabled(!this.testing)
           .onClick(() => this.testConn())
       }.width('100%').padding({ left: 14, right: 14, top: 12, bottom: 8 })
@@ -108,14 +175,14 @@ struct SettingsPage {
           Column({ space: 10 }) {
             Text('服务器连接(自主 C++ Web 服务器 + MySQL)').fontSize(14).fontWeight(FontWeight.Medium).width('100%')
             Text('模拟器/真机访问宿主机: 填宿主机局域网 IPv4, 例如 10.15.85.109; 模拟器也可用 10.0.2.2; 服务器 bind 0.0.0.0')
-              .fontSize(11).fontColor('#888888').width('100%').lineHeight(17)
+              .fontSize(11).fontColor(Theme.textTertiary).width('100%').lineHeight(17)
             Row({ space: 10 }) {
               TextInput({ text: this.host, placeholder: '服务器 IP' })
                 .layoutWeight(1).onChange((v: string) => this.host = v)
               TextInput({ text: this.port, placeholder: '端口' })
                 .type(InputType.NUMBER_DECIMAL).width(90).onChange((v: string) => this.port = v)
             }
-            Button('保存服务器地址').width('100%').height(38).fontSize(14).backgroundColor('#1E6FFF')
+            Button('保存服务器地址').width('100%').height(38).fontSize(14).backgroundColor(Theme.primary)
               .onClick(() => this.save())
           }
           .width('100%').padding(14).backgroundColor(Color.White).borderRadius(14)
@@ -131,50 +198,88 @@ struct SettingsPage {
                     Text(this.roleTxt)
                       .fontSize(10).fontColor(Color.White)
                       .padding({ left: 7, right: 7, top: 2, bottom: 2 })
-                      .backgroundColor(this.isAdmin ? '#F5652F' : '#07C160')
+                      .backgroundColor(this.isAdmin ? Theme.admin : Theme.success)
                       .borderRadius(8)
                   }
                   Text(this.isAdmin ? '管理员账号: ' + this.stuNo : '学号: ' + this.stuNo)
-                    .fontSize(11).fontColor('#666666')
+                    .fontSize(11).fontColor(Theme.textSecondary)
                   Text('身份由服务端校验(admin_user / student 表), 不可手动伪造')
-                    .fontSize(10).fontColor('#BBBBBB')
+                    .fontSize(10).fontColor(Theme.textDisabled)
                 }.alignItems(HorizontalAlign.Start).layoutWeight(1)
               }
               Button('退出登录').width('100%').height(38).fontSize(14)
-                .backgroundColor('#E84026')
+                .backgroundColor(Theme.danger)
                 .onClick(() => this.doLogout())
             } else {
               Column({ space: 8 }) {
-                Text('当前未登录').fontSize(13).fontColor('#666666')
-                Button('去登录').width('100%').height(38).fontSize(14).backgroundColor('#1E6FFF')
+                Text('当前未登录').fontSize(13).fontColor(Theme.textSecondary)
+                Button('去登录').width('100%').height(38).fontSize(14).backgroundColor(Theme.primary)
                   .onClick(() => router.pushUrl({ url: 'pages/LoginPage' }))
               }.width('100%')
             }
           }
           .width('100%').padding(14).backgroundColor(Color.White).borderRadius(14).margin({ top: 10 })
 
+          // 刷卡调试(模拟 RFID 终端): 真实链路是 ESP32 读卡后调用 /api/signin,
+          // 这里用同一个接口模拟, 答辩没带硬件也能演示"刷卡 -> 签到 -> 学时累计"
+          if (this.isAdmin) {
+            Column({ space: 10 }) {
+              Row() {
+                Text('刷卡调试').fontSize(14).fontWeight(FontWeight.Medium).layoutWeight(1)
+                Text('模拟 RFID 终端 · 仅管理员').fontSize(10).fontColor(Theme.signin)
+              }.width('100%')
+              Text('与 ESP32 调用同一个 /api/signin 接口: 选活动 + 填卡号即可模拟一次刷卡签到, 学时按活动自动认定')
+                .fontSize(11).fontColor(Theme.textTertiary).width('100%').lineHeight(17)
+
+              Row({ space: 8 }) {
+                TextInput({ text: this.cardNo, placeholder: '卡号(如 A1B2C3D4)' })
+                  .layoutWeight(1).height(38).fontSize(13)
+                  .onChange((v: string) => this.cardNo = v)
+                Select(this.actOptions)
+                  .selected(this.actIndex)
+                  .value(this.actIndex < this.actNames.length ? this.actNames[this.actIndex] : '选择活动')
+                  .font({ size: 12 }).width(150)
+                  .onSelect((i: number) => this.actIndex = i)
+              }.width('100%')
+
+              Button(this.signinBusy ? '刷卡处理中...' : '模拟刷卡')
+                .width('100%').height(38).fontSize(14)
+                .backgroundColor(Theme.signin)
+                .enabled(!this.signinBusy)
+                .onClick(() => this.doSignin())
+
+              if (this.signinMsg !== '') {
+                Text(this.signinMsg).fontSize(11)
+                  .fontColor(this.signinOk ? Theme.success : Theme.danger)
+                  .width('100%').lineHeight(17)
+              }
+            }
+            .width('100%').padding(14).margin({ top: 10 })
+            .backgroundColor(Color.White).borderRadius(14)
+          }
+
           if (this.msg !== '') {
-            Text(this.msg).fontSize(12).fontColor('#1E6FFF').textAlign(TextAlign.Center).width('100%').margin({ top: 8 })
+            Text(this.msg).fontSize(12).fontColor(Theme.primary).textAlign(TextAlign.Center).width('100%').margin({ top: 8 })
           }
 
           // 演示账号说明
           Column({ space: 5 }) {
             Text('演示账号').fontSize(13).fontWeight(FontWeight.Medium).width('100%')
             Text('普通成员: 2023001 张三 / 2023002 李铭(登录: 学号+姓名)')
-              .fontSize(11).fontColor('#666666').width('100%')
+              .fontSize(11).fontColor(Theme.textSecondary).width('100%')
             Text('管理员: admin / admin123(登录: 账号+密码)')
-              .fontSize(11).fontColor('#666666').width('100%')
+              .fontSize(11).fontColor(Theme.textSecondary).width('100%')
             Text('RFID 签到卡: 张三 A1B2C3D4 / 李铭 E5F60708(嵌入式扩展项)')
-              .fontSize(11).fontColor('#666666').width('100%')
+              .fontSize(11).fontColor(Theme.textSecondary).width('100%')
           }
           .width('100%').padding(14).margin({ top: 10 })
-          .backgroundColor('#F2F4F8').borderRadius(12)
+          .backgroundColor(Theme.bgSubtle).borderRadius(12)
           .alignItems(HorizontalAlign.Start)
         }
         .padding(14)
       }
-      .layoutWeight(1).scrollBar(BarState.Off)
+      .layoutWeight(1).scrollBar(BarState.Off).align(Alignment.Top)
     }
-    .width('100%').height('100%').backgroundColor('#F5F7FA')
+    .width('100%').height('100%').backgroundColor(Theme.bgPage)
   }
 }

@@ -1,5 +1,11 @@
 /**
- * 社团活动报名与学时认定系统 —— 活动详情 + 报名(普通成员可报名: 本地落库 + 同步服务器)
+ * 社团活动报名与学时认定系统 —— 活动详情 + 报名(v2.5)
+ *
+ * 本轮改的是"操作可见性":
+ *  - 报名按钮从滚动区底部改为**固定底栏**, 首屏不用滑动就能报名;
+ *  - 顶部分开三种失败: 网络/服务器错误(可重试)、活动不存在、未登录;
+ *  - 报名成功后不再只弹一句提示, 而是给出"已提交 → 待审核"的状态卡;
+ *  - 待审核的报名可直接在详情页撤销(释放名额), 驳回的显示理由并允许重报。
  */
 import { router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
@@ -7,41 +13,60 @@ import { util } from '@kit.ArkTS';
 import { ApiClient } from '../common/ApiClient';
 import { DbHelper } from '../common/DbHelper';
 import { AppConfig } from '../common/AppConfig';
-import { ActivityInfo, SignupInfo, parseActivities, parseSignups, statusText } from '../common/Models';
+import { ActivityInfo, SignupInfo, parseActivities, statusText } from '../common/Models';
 import { LoginGuardView } from '../common/GuardViews';
+import { SyncService } from '../common/SyncService';
+import { Theme } from '../common/Theme';
+import { TimeFmt } from '../common/TimeFmt';
+import { StateView } from '../components/StateView';
+
+/** 空白活动对象: 让 act 常驻 @State, 详情视图直接读 this.act 而不是 builder 传参 */
+function blankAct(): ActivityInfo {
+  return {
+    id: 0, title: '', content: '', location: '', start_time: '', end_time: '',
+    hours: 0, capacity: 0, publisher: '', signed_count: 0, passed_count: 0,
+    valid_count: 0, remaining: 0, expired: false, status: 1
+  };
+}
 
 @Entry
 @Component
 struct ActivityDetailPage {
-  @State activity: ActivityInfo | null = null;
+  // 注意: @Builder 的入参是按值传递, 状态变化不会刷新 builder 内部。
+  // 所以详情与底栏都改成直接读 this.act / this.found, 报名后名额才会立刻变。
+  @State act: ActivityInfo = blankAct();
+  @State found: boolean = false;
   @State signed: boolean = false;
   @State signing: boolean = false;
   @State msg: string = '';
   @State myStatus: string = '';
+  @State mySignupStatus: number = -1;   // 服务器上本人的报名状态(-1 无记录)
   @State notLoggedIn: boolean = false;
+  @State loadError: string = '';        // 网络/服务端错误(与"活动不存在"区分)
+  @State loaded: boolean = false;
+  @State justSigned: boolean = false;
 
   aboutToAppear(): void {
     const ctx = getContext(this) as common.UIAbilityContext;
     AppConfig.init(ctx).then(() => DbHelper.init(ctx)).then(() => {
       if (!AppConfig.isLoggedIn) {
-        this.notLoggedIn = true; // 未登录: 引导登录
+        this.notLoggedIn = true;
         return;
       }
       this.loadActivity();
     }).catch((e: Error) => {
-      this.msg = '初始化失败: ' + e.message;
+      this.loadError = '本地初始化失败: ' + e.message;
     });
   }
 
   onPageShow(): void {
-    // 从登录页返回且已登录: 解除未登录守卫并加载
     if (this.notLoggedIn && AppConfig.isLoggedIn) {
       this.notLoggedIn = false;
       this.loadActivity();
       return;
     }
-    // 从其他页面返回: 名额/报名状态可能已变化(审核通过、撤销报名、他人报名), 重新拉取
-    if (this.activity !== null) this.loadActivity();
+    // 从其他页面返回: 名额/报名状态可能已变化, 重新拉取
+    if (this.found) this.loadActivity();
   }
 
   async loadActivity(): Promise<void> {
@@ -54,23 +79,39 @@ struct ActivityDetailPage {
       aid = Number(params['id']);
     }
     if (isNaN(aid) || aid <= 0) {
-      this.msg = '缺少活动参数, 请从活动列表进入';
+      this.loadError = '缺少活动参数, 请从活动列表进入';
+      this.loaded = true;
       return;
     }
     // 管理员带 all=1 拉全量(含已下线), 以便下线后仍能查看/恢复
     const path = AppConfig.isAdmin ? '/api/activity/list?all=1' : '/api/activity/list';
     const resp = await ApiClient.get(path);
-    const list = parseActivities(resp);
+    if (resp['code'] !== 0) {
+      // 关键区别: 这里不是"活动不存在", 而是请求本身失败(服务器/网络)
+      this.loadError = (resp['msg'] as string);
+      this.found = false;
+      this.loaded = true;
+      return;
+    }
+    this.loadError = '';
+    const list: ActivityInfo[] = parseActivities(resp);
+    let found: ActivityInfo | null = null;
     for (const a of list) {
       if (a.id === aid) {
-        this.activity = a;
+        found = a;
         break;
       }
     }
-    if (this.activity !== null) {
-      await this.checkSigned();
+    if (found !== null) {
+      this.act = found;
+      this.found = true;
     } else {
-      this.msg = '活动不存在或已下线';
+      this.act = blankAct();
+      this.found = false;
+    }
+    this.loaded = true;
+    if (this.found) {
+      await this.checkSigned();
     }
   }
 
@@ -79,49 +120,46 @@ struct ActivityDetailPage {
    * 服务器没有但本地有(离线报名未同步)则保留本地并提示未同步。
    */
   async checkSigned(): Promise<void> {
-    const a = this.activity;
-    if (a === null) return;
+    if (!this.found) return;
+    const a = this.act;
     if (AppConfig.stuNo === '' || AppConfig.isAdmin) {
-      // 管理员无报名概念; 未登录/未填写学号时不做判定
       this.signed = false;
+      this.mySignupStatus = -1;
       return;
     }
-    // 1) 先查服务器(权威): 审核通过/驳回后无需手动"同步"即可看到最新状态
-    const resp = await ApiClient.get('/api/signup/list?activity_id=' + a.id);
-    const srv = parseSignups(resp);
-    for (const s of srv) {
-      if (s.activity_id === a.id && s.stu_no === AppConfig.stuNo) {
-        this.signed = true;
-        // 先清掉本地同一活动的旧记录(可能是不同 client_id 的离线/刷卡记录),
-        // 再按服务器记录重建, 保证同一活动本地只有一条且状态与服务器一致
-        await DbHelper.deleteSignupByActivity(a.id, AppConfig.stuNo);
-        await DbHelper.upsertSignupFromServer(s.client_id, s.activity_id, a.title,
-          s.stu_no, s.name, s.status, s.checkin, s.hours, s.remark, s.created_at);
-        await DbHelper.markSignupSynced(s.client_id);
-        const signTag: string = s.checkin === 1 ? ' · 已刷卡签到' : '';
-        if (s.status === 1) this.myStatus = '已通过(' + s.hours + ' 学时)' + signTag;
-        else if (s.status === 2) this.myStatus = '已驳回: ' + s.remark;
-        else this.myStatus = '待审核(已同步)' + signTag;
-        return;
+    const s: SignupInfo | null = await SyncService.syncByActivity(a.id, a.title);
+    if (s !== null) {
+      this.signed = true;
+      this.mySignupStatus = s.status;
+      const signTag: string = s.checkin === 1 ? ' · 已刷卡签到' : '';
+      if (s.status === 1) {
+        this.myStatus = '已通过(' + s.hours + ' 学时)' + signTag;
+      } else if (s.status === 2) {
+        this.myStatus = s.remark === '' ? '未填写理由' : s.remark;
+      } else {
+        this.myStatus = '待审核' + signTag;
       }
+      return;
     }
-    // 2) 服务器没有: 检查本地(离线报名/网络失败暂存), 提示未同步
+    // 服务器没有: 检查本地(离线报名/网络失败暂存)
     const local = await DbHelper.getSignups(AppConfig.stuNo);
-    for (const s of local) {
-      if (s.activity_id === a.id) {
+    for (const l of local) {
+      if (l.activity_id === a.id) {
         this.signed = true;
-        this.myStatus = s.synced === 1 ? statusText(s.status) : '待审核(未同步)';
+        this.mySignupStatus = l.synced === 1 ? l.status : 0;
+        this.myStatus = l.synced === 1 ? statusText(l.status) : '待审核(未同步)';
         return;
       }
     }
+    this.signed = false;
+    this.mySignupStatus = -1;
+    this.myStatus = '';
   }
 
   async doSignup(): Promise<void> {
-    const a = this.activity;
-    // 防重复: 已报名(非驳回)或处理中直接返回; 驳回后允许重新报名
-    if (a === null || this.signing) return;
-    if (this.signed && !this.myStatus.startsWith('已驳回')) return;
-    // 名额/时间窗校验(与服务端同口径: 有效报名数不含已驳回)
+    if (!this.found || this.signing) return;
+    const a = this.act;
+    if (this.signed && this.mySignupStatus !== 2) return;
     if (a.expired) {
       this.msg = '活动已结束, 无法报名';
       return;
@@ -138,10 +176,10 @@ struct ActivityDetailPage {
     this.msg = '正在报名并写入本地 SQLite...';
     try {
       // 驳回后重新报名: 先删除本地旧驳回记录, 保证本地与服务器各一条(双端一致)
-      if (this.myStatus.startsWith('已驳回')) {
+      if (this.mySignupStatus === 2) {
         await DbHelper.deleteSignupByActivity(a.id, AppConfig.stuNo);
       }
-      // 1) 本地落库(离线可查; 驳回后重新报名生成新 client_id, 服务器将原驳回记录重置为待审核)
+      // 1) 本地落库(离线可查)
       const clientId = util.generateRandomUUID();
       await DbHelper.addSignup(clientId, a.id, a.title, AppConfig.stuNo, AppConfig.stuName);
       this.msg = '已写入本地库, 正在同步服务器...';
@@ -155,16 +193,16 @@ struct ActivityDetailPage {
       const resp = await ApiClient.post('/api/signup/add', body);
       if (resp['code'] === 0) {
         await DbHelper.markSignupSynced(clientId);
-        // 服务器返回真实状态(可能是审核/刷卡已通过的重复报名)
         const d = resp['data'] as Record<string, Object>;
-        const st = d['status'] as number;
+        const st = Number(d['status']);
         const ck = (d['checkin'] === undefined || d['checkin'] === null) ? 0 : Number(d['checkin']);
         if (st === 1) {
-          const h = d['hours'] as number;
+          const h = Number(d['hours']);
           this.msg = '该报名已通过(' + h + ' 学时), 学时已累计';
           await DbHelper.updateSignupStatus(clientId, 1, h, '', ck);
         } else {
-          this.msg = '报名成功, 已同步服务器(待管理员审核)';
+          this.msg = '报名成功, 已同步服务器, 等待管理员审核';
+          this.justSigned = true;
         }
       } else {
         this.msg = '服务器同步失败: ' + (resp['msg'] as string) + ' (记录已保留在本地, 可稍后重试)';
@@ -177,10 +215,46 @@ struct ActivityDetailPage {
     }
   }
 
+  /** 撤销本人待审核报名(释放名额; 已通过/已驳回不可撤销) */
+  confirmCancel(): void {
+    if (!this.found) return;
+    const a = this.act;
+    AlertDialog.show({
+      title: '撤销报名?',
+      message: '撤销后名额立即释放, 若仍要参加需重新报名',
+      autoCancel: true,
+      alignment: DialogAlignment.Center,
+      primaryButton: { value: '再想想', action: () => {} },
+      secondaryButton: {
+        value: '撤销',
+        fontColor: Theme.danger,
+        action: () => { this.doCancel(); }
+      }
+    });
+  }
+
+  async doCancel(): Promise<void> {
+    if (!this.found) return;
+    const a = this.act;
+    const body: Record<string, Object> = { 'activity_id': a.id };
+    const resp = await ApiClient.post('/api/signup/cancel', body);
+    if (resp['code'] === 0) {
+      await DbHelper.deleteSignupByActivity(a.id, AppConfig.stuNo);
+      this.signed = false;
+      this.mySignupStatus = -1;
+      this.myStatus = '';
+      this.justSigned = false;
+      this.msg = '已撤销报名, 名额已释放';
+      await this.loadActivity();
+    } else {
+      this.msg = '撤销失败: ' + (resp['msg'] as string);
+    }
+  }
+
   /** 管理员上下线活动(软删除: 下线后不出现在活动广场, 历史报名与学时保留) */
   confirmOffline(): void {
-    const a = this.activity;
-    if (a === null) return;
+    if (!this.found) return;
+    const a = this.act;
     const offline = a.status !== 0;
     AlertDialog.show({
       title: offline ? '下线该活动?' : '恢复上线该活动?',
@@ -192,15 +266,15 @@ struct ActivityDetailPage {
       primaryButton: { value: '取消', action: () => {} },
       secondaryButton: {
         value: offline ? '下线' : '恢复上线',
-        fontColor: offline ? '#E84026' : '#07C160',
+        fontColor: offline ? Theme.danger : Theme.success,
         action: () => { this.offlineActivity(offline ? 0 : 1); }
       }
     });
   }
 
   async offlineActivity(targetStatus: number): Promise<void> {
-    const a = this.activity;
-    if (a === null) return;
+    if (!this.found) return;
+    const a = this.act;
     const body: Record<string, Object> = { 'activity_id': a.id, 'status': targetStatus };
     const resp = await ApiClient.post('/api/activity/status', body);
     if (resp['code'] === 0) {
@@ -215,146 +289,242 @@ struct ActivityDetailPage {
     }
   }
 
+  // ==================== 视图 ====================
+
   @Builder
   deniedView() {
     LoginGuardView({ tip: '活动详情与报名需要登录, 普通成员可报名' })
   }
 
-  /** 顶部返回栏: 二级页面统一提供可见返回入口(不依赖系统返回手势) */
   @Builder
-  navBar(title: string) {
+  navBar() {
     Row({ space: 6 }) {
-      Text('‹ 返回').fontSize(14).fontColor('#1E6FFF')
+      Text('‹ 返回').fontSize(Theme.fsBody).fontColor(Theme.primary)
         .padding({ right: 10, top: 2, bottom: 2 })
         .onClick(() => router.back())
-      Text(title).fontSize(18).fontWeight(FontWeight.Bold).fontColor('#333333').layoutWeight(1)
+      Text('活动详情').fontSize(Theme.fsHeading).fontWeight(FontWeight.Bold)
+        .fontColor(Theme.textBody).layoutWeight(1)
     }
-    .width('100%').padding({ left: 14, right: 14, top: 12, bottom: 8 })
-    .backgroundColor('#F5F7FA')
-  }
-
-  build() {
-    Column() {
-      this.navBar('活动详情')
-      if (this.notLoggedIn) {
-        this.deniedView()
-      } else if (this.activity === null) {
-        this.loadingView()
-      } else {
-        this.detailView(this.activity as ActivityInfo)
-      }
-    }
-    .width('100%').height('100%').backgroundColor('#F5F7FA')
+    .width('100%').padding({ left: Theme.pagePadding, right: Theme.pagePadding, top: 12, bottom: 8 })
+    .backgroundColor(Theme.bgPage)
   }
 
   @Builder
-  loadingView() {
-    Column({ space: 12 }) {
-      LoadingProgress().width(40).height(40).color('#1E6FFF')
-      Text(this.msg === '' ? '加载中...' : this.msg).fontSize(14).fontColor('#999999')
-    }.width('100%').height('100%').justifyContent(FlexAlign.Center)
-  }
-
-  @Builder
-  detailView(a: ActivityInfo) {
-    Scroll() {
-      Column() {
-        // 标题卡
-        Column() {
-          Text(a.title).fontSize(20).fontWeight(FontWeight.Bold).width('100%')
-          Row({ space: 10 }) {
-            Text(a.hours + ' 学时').fontSize(12).fontColor('#1E6FFF')
-              .padding({ left: 8, right: 8, top: 2, bottom: 2 }).backgroundColor('#EAF1FF').borderRadius(8)
-            if (a.capacity > 0) {
-              Text('限 ' + a.capacity + ' 人').fontSize(12).fontColor('#B25E00')
-                .padding({ left: 8, right: 8, top: 2, bottom: 2 }).backgroundColor('#FFF3E0').borderRadius(8)
-            }
-            if (a.expired) {
-              Text('已结束').fontSize(12).fontColor('#E84026')
-                .padding({ left: 8, right: 8, top: 2, bottom: 2 }).backgroundColor('#FDECEA').borderRadius(8)
-            }
-          }.width('100%').margin({ top: 8 })
-        }
-        .width('100%').padding(16).backgroundColor(Color.White).borderRadius(14)
-
-        // 信息
-        Column({ space: 8 }) {
-          this.infoRow('🕐 开始', a.start_time === '' ? '待定' : a.start_time)
-          this.infoRow('🕐 结束', a.end_time === '' ? '待定' : a.end_time)
-          this.infoRow('📍 地点', a.location === '' ? '待定' : a.location)
-          this.infoRow('👤 发布人', a.publisher === '' ? '—' : a.publisher)
-          this.infoRow('📊 报名', a.capacity > 0
-            ? a.valid_count + ' 人已报名 / 上限 ' + a.capacity + ' 人 · 剩余 ' + a.remaining + ' 名额'
-            : a.valid_count + ' 人已报名 · 不限人数')
-        }
-        .width('100%').padding(16).backgroundColor(Color.White).borderRadius(14).margin({ top: 10 })
-
-        // 描述
-        Column() {
-          Text('活动内容').fontSize(15).fontWeight(FontWeight.Medium).width('100%')
-          Text(a.content === '' ? '暂无描述' : a.content)
-            .fontSize(13).fontColor('#555555').width('100%').margin({ top: 8 })
-            .lineHeight(22)
-        }
-        .width('100%').padding(16).backgroundColor(Color.White).borderRadius(14).margin({ top: 10 })
-
-        // 报名区
-        Column({ space: 8 }) {
-          if (AppConfig.isAdmin) {
-            Row({ space: 8 }) {
-              Text(a.status === 0 ? '该活动已下线, 成员端不可见' : '管理员账号无需报名, 请到「审核中心」处理成员报名')
-                .fontSize(13).fontColor('#B25E00').layoutWeight(1)
-            }.width('100%')
-            Row({ space: 10 }) {
-              Button('编辑活动')
-                .layoutWeight(1).height(38).fontSize(14).backgroundColor('#1E6FFF')
-                .onClick(() => router.pushUrl({
-                  url: 'pages/ActivityEditPage',
-                  params: { 'activity_id': a.id }
-                }))
-              Button(a.status === 0 ? '恢复上线' : '下线该活动')
-                .layoutWeight(1).height(38).fontSize(14)
-                .backgroundColor(a.status === 0 ? '#07C160' : '#E84026')
-                .onClick(() => this.confirmOffline())
-            }.width('100%')
-          } else if (this.signed && this.myStatus.startsWith('已驳回')) {
-            Row({ space: 8 }) {
-              Text('已驳回' + (this.myStatus.length > 4 ? ' · ' + this.myStatus : ''))
-                .fontSize(13).fontColor('#E84026').layoutWeight(1)
-              Button(this.signing ? '处理中...' : '重新报名')
-                .height(36).fontSize(14).backgroundColor('#1E6FFF')
-                .enabled(!this.signing)
-                .onClick(() => this.doSignup())
-            }.width('100%')
-          } else if (this.signed) {
-            Text('你已报名 · ' + this.myStatus).fontSize(14).fontColor('#07C160')
-          } else if (a.expired) {
-            Text('活动已结束(' + a.end_time + '), 不可报名').fontSize(13).fontColor('#999999')
-          } else if (a.remaining === 0) {
-            Text('名额已满(' + a.valid_count + '/' + a.capacity + ' 人), 无法报名')
-              .fontSize(13).fontColor('#B25E00')
-          } else {
-            Button(this.signing ? '处理中...' : '立即报名')
-              .width('100%').height(44).fontSize(16).backgroundColor('#1E6FFF')
-              .enabled(!this.signing)
-              .onClick(() => this.doSignup())
-          }
-          if (this.msg !== '') {
-            Text(this.msg).fontSize(12).fontColor('#B25E00').textAlign(TextAlign.Center).width('100%')
-          }
-        }
-        .width('100%').padding(16).backgroundColor(Color.White).borderRadius(14).margin({ top: 10 })
-      }
-      .padding(14)
-    }
-    .layoutWeight(1).scrollBar(BarState.Off)
+  tag(text: string, color: string, bg: string) {
+    Text(text).fontSize(Theme.fsCaption).fontColor(color)
+      .padding({ left: 8, right: 8, top: 2, bottom: 2 })
+      .backgroundColor(bg).borderRadius(Theme.radiusSm)
   }
 
   @Builder
   infoRow(label: string, value: string) {
     Row() {
-      Text(label).fontSize(13).fontColor('#999999').width(70)
-      Text(value).fontSize(13).fontColor('#333333').layoutWeight(1)
-    }.width('100%')
+      Text(label).fontSize(Theme.fsBody).fontColor(Theme.textTertiary).width(64)
+      Text(value).fontSize(Theme.fsBody).fontColor(Theme.textBody).layoutWeight(1)
+    }.width('100%').padding({ top: 5, bottom: 5 })
+  }
+
+  @Builder
+  detailView() {
+    Scroll() {
+      Column({ space: 10 }) {
+        // ---- 标题卡 ----
+        Column({ space: 10 }) {
+          Text(this.act.title).fontSize(20).fontWeight(FontWeight.Bold).fontColor(Theme.textBody).width('100%')
+          Row({ space: 8 }) {
+            this.tag(this.act.hours.toString() + ' 学时', Theme.primary, Theme.primaryBg)
+            if (this.act.capacity > 0) {
+              this.tag('限 ' + this.act.capacity + ' 人', Theme.warning, Theme.warningBg)
+            }
+            if (this.act.expired) {
+              this.tag('已结束', Theme.danger, Theme.dangerBg)
+            } else if (this.signed && this.mySignupStatus === 0) {
+              this.tag('待审核', Theme.warning, Theme.warningBg)
+            } else if (this.signed && this.mySignupStatus === 1) {
+              this.tag('已通过', Theme.success, Theme.successBg)
+            } else if (this.signed && this.mySignupStatus === 2) {
+              this.tag('已驳回', Theme.danger, Theme.dangerBg)
+            }
+          }.width('100%')
+
+          // 报名进度
+          Row({ space: 8 }) {
+            Row() {
+              Row().height(5)
+                .width(this.act.capacity > 0 ? Math.round(this.act.valid_count * 100 / this.act.capacity).toString() + '%' : '0%')
+                .backgroundColor(this.act.remaining === 0 ? Theme.warning : Theme.primary)
+                .borderRadius(3)
+            }
+            .layoutWeight(1).height(5).backgroundColor(Theme.bgNeutral).borderRadius(3)
+
+            Text(this.act.capacity > 0
+              ? this.act.valid_count + ' / ' + this.act.capacity + ' 人'
+              : this.act.valid_count + ' 人已报名')
+              .fontSize(Theme.fsCaption).fontColor(Theme.textTertiary)
+          }.width('100%').margin({ top: 2 })
+        }
+        .width('100%').padding(16).backgroundColor(Theme.bgCard).borderRadius(Theme.radiusMd)
+
+        // ---- 报名结果卡(报名成功后出现, 把"下一步该等什么"说清楚) ----
+        if (this.justSigned && this.signed) {
+          Column({ space: 6 }) {
+            Text('已提交, 等待管理员审核').fontSize(Theme.fsTitle)
+              .fontWeight(FontWeight.Medium).fontColor(Theme.warning)
+            Text('报名已写入本地 SQLite 并同步到服务器; 审核通过后学时自动累计, 可在「我的报名」查看进度')
+              .fontSize(Theme.fsCaption).fontColor(Theme.textSecondary).lineHeight(19)
+          }
+          .width('100%').padding(14).alignItems(HorizontalAlign.Start)
+          .backgroundColor(Theme.warningBg).borderRadius(Theme.radiusMd)
+        }
+
+        // ---- 信息卡 ----
+        Column() {
+          this.infoRow('开始', this.act.start_time === '' ? '待定' : TimeFmt.short(this.act.start_time))
+          this.infoRow('结束', this.act.end_time === '' ? '待定' : TimeFmt.short(this.act.end_time))
+          this.infoRow('地点', this.act.location === '' ? '待定' : this.act.location)
+          this.infoRow('发布人', this.act.publisher === '' ? '—' : this.act.publisher)
+          this.infoRow('当前状态', this.act.expired ? '已结束' : TimeFmt.stage(this.act.start_time, this.act.end_time))
+        }
+        .width('100%').padding(16).backgroundColor(Theme.bgCard).borderRadius(Theme.radiusMd)
+
+        // ---- 内容 ----
+        Column({ space: 8 }) {
+          Text('活动内容').fontSize(Theme.fsTitle).fontWeight(FontWeight.Medium)
+            .fontColor(Theme.textBody).width('100%')
+          Text(this.act.content === '' ? '暂无描述' : this.act.content)
+            .fontSize(Theme.fsBody).fontColor(Theme.textSecondary).width('100%').lineHeight(22)
+        }
+        .width('100%').padding(16).alignItems(HorizontalAlign.Start)
+        .backgroundColor(Theme.bgCard).borderRadius(Theme.radiusMd)
+
+        // ---- 已报名状态(成员) ----
+        if (!AppConfig.isAdmin && this.signed) {
+          Column({ space: 4 }) {
+            Text('我的报名').fontSize(Theme.fsSmall).fontColor(Theme.textTertiary).width('100%')
+            Text(this.myStatus === '' ? '—' : this.myStatus)
+              .fontSize(Theme.fsTitle).fontWeight(FontWeight.Medium)
+              .fontColor(this.mySignupStatus === 1 ? Theme.success
+                : (this.mySignupStatus === 2 ? Theme.danger : Theme.warning))
+              .width('100%')
+            if (this.mySignupStatus === 2) {
+              Text('可按管理员给出的理由修改后重新报名').fontSize(Theme.fsCaption)
+                .fontColor(Theme.textTertiary).width('100%')
+            }
+          }
+          .width('100%').padding(14).alignItems(HorizontalAlign.Start)
+          .backgroundColor(Theme.bgCard).borderRadius(Theme.radiusMd)
+        }
+      }
+      .padding({ left: Theme.pagePadding, right: Theme.pagePadding, bottom: 16 })
+    }
+    .layoutWeight(1).scrollBar(BarState.Off).align(Alignment.Top)
+    .align(Alignment.Top)
+  }
+
+  /** 固定底栏: 主操作永远在首屏可见 */
+  @Builder
+  bottomBar() {
+    Column({ space: 6 }) {
+      if (this.msg !== '') {
+        Text(this.msg)
+          .fontSize(Theme.fsCaption)
+          .fontColor(this.msg.indexOf('失败') >= 0 ? Theme.danger : Theme.textSecondary)
+          .width('100%').textAlign(TextAlign.Center).maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+
+      if (AppConfig.isAdmin) {
+        Text(this.act.status === 0 ? '该活动已下线, 成员端不可见' : '管理员账号无需报名, 请到「审核中心」处理成员报名')
+          .fontSize(Theme.fsCaption).fontColor(Theme.warning)
+          .width('100%').textAlign(TextAlign.Center).margin({ bottom: 2 })
+        Row({ space: 10 }) {
+          Button('编辑活动')
+            .layoutWeight(1).height(42).fontSize(Theme.fsBody)
+            .backgroundColor(Theme.primary)
+            .onClick(() => router.pushUrl({
+              url: 'pages/ActivityEditPage',
+              params: { 'activity_id': this.act.id }
+            }))
+          Button(this.act.status === 0 ? '恢复上线' : '下线该活动')
+            .layoutWeight(1).height(42).fontSize(Theme.fsBody)
+            .backgroundColor(this.act.status === 0 ? Theme.success : Theme.danger)
+            .onClick(() => this.confirmOffline())
+        }.width('100%')
+      } else if (this.signed && this.mySignupStatus === 2) {
+        Row({ space: 10 }) {
+          Text('已驳回').fontSize(Theme.fsBody).fontColor(Theme.danger)
+          Button(this.signing ? '处理中...' : '修改后重新报名')
+            .layoutWeight(1).height(44).fontSize(Theme.fsTitle)
+            .backgroundColor(Theme.primary).enabled(!this.signing)
+            .onClick(() => this.doSignup())
+        }.width('100%')
+      } else if (this.signed) {
+        Row({ space: 10 }) {
+          Text(this.mySignupStatus === 1 ? '已通过, 学时已累计' :
+            (this.mySignupStatus === 0 ? '待管理员审核' : this.myStatus))
+            .fontSize(Theme.fsBody)
+            .fontColor(this.mySignupStatus === 1 ? Theme.success : Theme.warning)
+            .layoutWeight(1)
+          if (this.mySignupStatus === 0) {
+            Button('撤销报名')
+              .height(40).fontSize(Theme.fsBody).fontColor(Theme.danger)
+              .backgroundColor(Theme.dangerBg)
+              .onClick(() => this.confirmCancel())
+          } else if (this.mySignupStatus === 1) {
+            Text('学时报表 ›')
+              .fontSize(Theme.fsSmall).fontColor(Theme.primary)
+              .padding({ left: 8, right: 8, top: 6, bottom: 6 })
+              .onClick(() => router.pushUrl({ url: 'pages/HoursReportPage' }))
+          }
+        }.width('100%')
+      } else if (this.act.expired) {
+        Text('活动已结束(' + TimeFmt.day(this.act.end_time) + '), 不可报名')
+          .fontSize(Theme.fsBody).fontColor(Theme.textTertiary)
+          .width('100%').textAlign(TextAlign.Center).padding({ top: 10, bottom: 10 })
+      } else if (this.act.remaining === 0) {
+        Text('名额已满(' + this.act.valid_count + '/' + this.act.capacity + ' 人), 无法报名')
+          .fontSize(Theme.fsBody).fontColor(Theme.warning)
+          .width('100%').textAlign(TextAlign.Center).padding({ top: 10, bottom: 10 })
+      } else {
+        Button(this.signing ? '正在报名...' : '立即报名')
+          .width('100%').height(46).fontSize(16)
+          .backgroundColor(Theme.primary)
+          .enabled(!this.signing)
+          .onClick(() => this.doSignup())
+      }
+    }
+    .width('100%')
+    .padding({ left: Theme.pagePadding, right: Theme.pagePadding, top: 10, bottom: 14 })
+    .backgroundColor(Theme.bgCard)
+    .border({ width: { top: 0.5 }, color: Theme.divider })
+  }
+
+  build() {
+    Column() {
+      this.navBar()
+      if (this.notLoggedIn) {
+        this.deniedView()
+      } else if (this.loadError !== '') {
+        StateView({
+          kind: 'error',
+          title: '活动加载失败',
+          desc: this.loadError + '\n请确认服务器在线后重试',
+          retryText: '重新加载',
+          onRetry: () => this.loadActivity()
+        })
+      } else if (!this.loaded) {
+        StateView({ kind: 'loading', title: '正在加载活动...' })
+      } else if (!this.found) {
+        StateView({
+          kind: 'empty',
+          title: '活动不存在或已下线',
+          desc: '可能已被管理员下线, 请返回列表刷新后重试'
+        })
+      } else {
+        this.detailView()
+        this.bottomBar()
+      }
+    }
+    .width('100%').height('100%').backgroundColor(Theme.bgPage)
   }
 }

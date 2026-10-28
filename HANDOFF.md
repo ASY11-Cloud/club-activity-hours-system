@@ -427,3 +427,77 @@ hvigorw assembleHap ...                    # BUILD SUCCESSFUL（三次构建均�
 - HAP 覆盖安装后本地库保留，旧库自动补 `checkin` 列（升级路径有效）
 - 服务端 8000 与模拟器 10.0.2.2 双通道正常，引导页显示「服务器在线」，主界面 8 个活动来自 MySQL
 - `test_api.py` 26/26（跑完已把 `ptest-audit-1` 还原为待审并 `hours/rebuild`，基线未漂移）
+
+## 15. v2.6 新增「用户管理」页（2026-10-28 21:00）
+
+应需求「在管理员这里添加一个功能页面，能看到整个系统所有用户的信息，并制作合理的分组查找」，新增管理员专属的用户管理页。
+
+### 15.1 服务端新增接口
+
+- `GET /api/student/list`（仅管理员，`handleStudentList`）
+  - 返回每个学生的：注册状态 `status`(0待审核/1已通过/2已驳回)、学号、姓名、班级 `dept`、RFID `card_no`、注册时间、累计学时 `total_hours`(来自 `hours_total`)、通过次数 `sign_count`、是否达标 `achieved`。
+  - 分组参数 `group`：`all`(默认) / `pending` / `approved` / `rejected` / `achieved`(已通过且学时>=达标线) / `unachieved`(已通过且学时<达标线)。
+  - 关键字 `kw`：按 学号/姓名/班级 模糊匹配，与分组同时生效（全部在 WHERE 里，`total` 与结果一致）。
+  - 同时下发 `group_counts`（六个分组各自的计数，不受 kw 影响，用于分组标签数字）与 `required_hours`（达标线）。
+  - 排序：待审核在前，其余按学时降序。
+
+### 15.2 前端新增页面
+
+- `chapter03/entry/src/main/ets/pages/UserManagePage.ets`
+  - 顶部返回 + 「用户管理」标题 + 「共 N 人」 + 刷新。
+  - 分组标签：**两行三列 Grid**（全部/待审核/已通过/已驳回/已达标/未达标，各带计数），选中态主色高亮。用 Grid 而非横向 Scroll 的原因：横向 Scroll 末尾标签会被屏幕右缘裁切。
+  - 搜索框：按学号/姓名/班级查找。
+  - 用户卡片：头像(状态色) + 姓名 + 状态徽标 + 学号·班级 + 右侧学时摘要 + 达标进度条(仅已通过) + 卡号 + 注册日期。
+  - 状态色：已通过=绿、待审核=橙、已驳回=红，卡片左侧竖条同色。
+  - 复用 `StateView` 三态(加载/空/错误)，非管理员走 `AdminGuardView`。
+
+### 15.3 模型与路由
+
+- `Models.ets` 新增 `StudentInfo`、`StudentGroupCounts` 接口 + `parseStudentList` / `parseStudentGroupCounts` / `studentStatusText`。
+- `main_pages.json` 新增 `pages/UserManagePage`（第 13 项）。
+- `MainPage.ets` 管理面板新增「用户管理」卡片（第二位，主色 admin 橙）。
+
+### 15.4 布局坑（这次踩的）
+
+- ArkUI `width('100%')` + `margin({left,right})` 会溢出：盒子总宽 = 100% + 28px > 父容器，导致卡片右缘文字被裁。改法：**去掉卡片 margin，改在 List 上设 `.padding({left,right})`**，卡片 `width('100%')`。
+- `@Builder` 里不能用 `if (...) { ...; return; }` 语句形式，`build()` 里也一样——只能 `if/else` 条件渲染。
+- 注册时间 `created_at` 是 `YYYY-MM-DD HH:MM:SS` 长串，卡片里只取 `substring(0,10)` 到日，避免右侧溢出。
+
+### 15.5 验证
+
+- 接口：`/api/student/list` 各分组 / `kw=计科` 均返回正确（全部9/待审3/通过5/驳回1/达标0/未达标5，计科5人）。
+- 模拟器实测：管理员登录 → 管理面板见「用户管理」卡片 → 进入页面 → 分组切换(待审核=3人) → 搜索(计科=5人) → 选中态/进度条/卡号/状态色均正确。
+- 数据基线未污染：`verify_demo_data.py` 8/8。
+
+## 16. v2.7 主界面两个渲染坑的根治（2026-10-28 21:10）
+
+追求完美阶段在模拟器实测时抓到两个「只有真机才暴露」的渲染 bug，均为 ArkUI 响应式机制的坑，已根治并在此留档。
+
+### 16.1 `@Builder` 按值传参不随状态刷新 → 「共 0 个」
+
+- **现象**：活动广场标题栏一直显示「共 0 个」，但下方明明列出了 8 个活动。
+- **根因**：`header(title, sub, showSearch)` 的 `sub` 参数是 `@Builder` 的**按值快照**——调用处写 `this.header('活动广场', '共 ' + this.actTotal + ' 个', true)`，`this.actTotal` 在那一刻还是 0，异步加载完成后 `actTotal` 变了，但 `sub` 这个已传入的字符串不会再更新。
+- **修法**：动态值一律改成在 `@Builder` 内部直接读 `this.xxx`（响应式），只有 title/showSearch 这类**静态值**才作为参数传入。即 `header(title, showSearch)` 内部读 `this.actTotal` 拼「共 N 个」。
+- **排查经验**：凡是「`@Builder` 里显示一个会变的数」，都要怀疑是不是把动态值当参数传进去了。同类问题已一并排查：`navItem`/`bigCard`/`rowItem` 的动态值（角标、选中色）都已确认在 Builder 内部读 `this`，参数只剩常量。
+
+### 16.2 Tabs 角标不刷新 → 自绘底部导航
+
+- **现象**：管理员底部「管理」Tab 的红色待办角标要么不显示、要么被 tabBar 裁切（`Stack`/负 margin 都救不回来）。
+- **根因**：`Tabs` 的 `tabBar(CustomBuilder)` 构建器**不随 `@State` 变化重建**，角标数字冻结；且 tabBar 内部是受限布局，`Stack` 定位的角标会被裁掉。
+- **修法**：弃用 `Tabs`，改成**自绘底部导航**：一个 `Row` 里放 `navItem(...)` + 顶层 `Stack` 按 `currentTab` 切换内容视图。角标用「图标 Row 内嵌红底数字」实现，完全受控、随 `pendingSignup+pendingReg` 实时刷新。
+- 导航图标用自绘 SVG（活动=线条、管理=九宫格、我的=人形），不依赖 emoji（emoji 在部分设备渲染成彩色位图或红点）。
+- 顺带：`currentTab` 与 `isAdmin` 决定 tab 数（学生 2 / 管理员 3），`switchTab` 切 Tab 不重置列表（保留分页与滚动位置）。
+
+## 17. v2.8 从零视角复查：颜色 token 化收尾（2026-10-28 21:15）
+
+上一轮规划 16 项已全部落地，本轮以"没用过系统的评委视角"重走全链路，结论：后端安全性/并发防护扎实（登录限流 429、口令加盐哈希+自动升级、报名 FOR UPDATE 行锁+插入后复检+幂等重报、签到 affected_rows 防重复累计学时），前端生命周期与空态完整，无硬伤。
+
+唯一残留：上一轮颜色 token 化漏掉了 12 处硬编码色值，散在 7 个页面：
+- `#888888`(次要说明文字) → `Theme.textTertiary`
+- `#F0F5FF`/`#F8FAFF`(浅蓝底) → `Theme.primaryBg`
+- `#00A884`(导出按钮) → `Theme.report`
+- `#F0FAF4`(浅绿底) → `Theme.successBg`
+- `#DDDDDD`(分隔竖线) → `Theme.divider`
+- `#D4F5DD`/`#FFD9D2`(深底在线/离线状态文字) → 新增 `Theme.onColorSuccess`/`Theme.onColorDanger`
+
+现在全项目已无 16 进制硬编码色值（仅剩 `rgba()` 半透明叠加与 `Theme.xxx` 引用），改主色只动 Theme.ets 一处。编译通过。

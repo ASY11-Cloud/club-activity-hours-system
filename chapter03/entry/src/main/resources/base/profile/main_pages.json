@@ -10,6 +10,7 @@
     "pages/MySignupPage",
     "pages/AuditPage",
     "pages/HoursReportPage",
+    "pages/UserManagePage",
     "pages/ServerLogPage",
     "pages/SettingsPage"
   ]

@@ -37,6 +37,7 @@ export interface SignupInfo {
   audited_at: string;
   activity_title: string;
   activity_hours: number;  // 活动本身的学时(审核通过时服务端按此累计)
+  checkin_at: string;      // 刷卡签到时间(未签到为空)
 }
 
 // 学时排行
@@ -110,6 +111,30 @@ export interface StudentRequest {
   dept: string;
   card_no: string;
   created_at: string;
+}
+
+// 用户管理(全量学生信息: 注册状态 + 学时汇总 + 报名统计)
+export interface StudentInfo {
+  id: number;
+  stu_no: string;
+  name: string;
+  dept: string;
+  card_no: string;
+  status: number;       // 0待审核 1已通过 2已驳回
+  created_at: string;
+  total_hours: number;  // 累计认定学时
+  sign_count: number;   // 通过活动次数
+  achieved: boolean;    // 是否达标(达到系统学时达标线)
+}
+
+// 用户管理分组计数
+export interface StudentGroupCounts {
+  all: number;
+  pending: number;
+  approved: number;
+  rejected: number;
+  achieved: number;
+  unachieved: number;
 }
 
 // ---------- JSON 安全取值工具 ----------
@@ -189,7 +214,8 @@ export function parseSignups(resp: Record<string, Object>): SignupInfo[] {
       created_at: strOf(item, 'created_at'),
       audited_at: strOf(item, 'audited_at'),
       activity_title: strOf(item, 'activity_title'),
-      activity_hours: numOf(item, 'activity_hours')
+      activity_hours: numOf(item, 'activity_hours'),
+      checkin_at: strOf(item, 'checkin_at')
     });
   }
   return out;
@@ -278,6 +304,55 @@ export function parseStudentRequests(resp: Record<string, Object>): StudentReque
     });
   }
   return out;
+}
+
+/** 解析用户管理列表 */
+export function parseStudentList(resp: Record<string, Object>): StudentInfo[] {
+  const out: StudentInfo[] = [];
+  if (resp['code'] !== 0) return out;
+  const data = resp['data'] as Record<string, Object> | null;
+  if (!data || typeof data !== 'object') return out;
+  const list = data['list'] as Array<Record<string, Object>> | null;
+  if (!list) return out;
+  for (const item of list) {
+    out.push({
+      id: numOf(item, 'id'),
+      stu_no: strOf(item, 'stu_no'),
+      name: strOf(item, 'name'),
+      dept: strOf(item, 'dept'),
+      card_no: strOf(item, 'card_no'),
+      status: numOf(item, 'status'),
+      created_at: strOf(item, 'created_at'),
+      total_hours: numOf(item, 'total_hours'),
+      sign_count: numOf(item, 'sign_count'),
+      achieved: boolOf(item, 'achieved')
+    });
+  }
+  return out;
+}
+
+/** 解析用户管理分组计数 */
+export function parseStudentGroupCounts(resp: Record<string, Object>): StudentGroupCounts {
+  const zero: StudentGroupCounts = { all: 0, pending: 0, approved: 0, rejected: 0, achieved: 0, unachieved: 0 };
+  const data = resp['data'] as Record<string, Object> | null;
+  if (!data || typeof data !== 'object') return zero;
+  const gc = data['group_counts'] as Record<string, Object> | null;
+  if (!gc || typeof gc !== 'object') return zero;
+  return {
+    all: numOf(gc, 'all'),
+    pending: numOf(gc, 'pending'),
+    approved: numOf(gc, 'approved'),
+    rejected: numOf(gc, 'rejected'),
+    achieved: numOf(gc, 'achieved'),
+    unachieved: numOf(gc, 'unachieved')
+  };
+}
+
+/** 注册状态文案(学生注册审核) */
+export function studentStatusText(status: number): string {
+  if (status === 1) return '已通过';
+  if (status === 2) return '已驳回';
+  return '待审核';
 }
 
 /** 活动状态文案 */

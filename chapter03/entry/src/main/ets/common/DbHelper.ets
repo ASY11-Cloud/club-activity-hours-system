@@ -356,6 +356,15 @@ export class DbHelper {
     await store.delete(pred);
   }
 
+  /** 删除单条本地报名记录(client_id 为唯一键) —— 全量对齐时清理服务器已不存在的陈旧记录 */
+  static async deleteSignupByClientId(clientId: string): Promise<void> {
+    const store = DbHelper.rdb;
+    if (!store) return;
+    const pred = new relationalStore.RdbPredicates('local_signup');
+    pred.equalTo('client_id', clientId);
+    await store.delete(pred);
+  }
+
   /** 本地学时统计(通过记录聚合) */
   static async localHours(stuNo: string): Promise<number> {
     const list = await DbHelper.getSignups(stuNo);

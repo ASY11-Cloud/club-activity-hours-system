@@ -855,6 +855,121 @@ static string handleStudentRequests() {
   return jsonOk(data);
 }
 
+static string qparam(const string& query, const string& key);
+
+/**
+ * 用户管理(仅管理员): 全量学生信息 + 学时汇总 + 报名统计, 支持分组/关键字/分页。
+ * 分组 group:
+ *   all       全部学生(默认)
+ *   pending   待审核注册(status=0)
+ *   approved  已通过(status=1)
+ *   rejected  已驳回(status=2)
+ *   achieved  已达标(total_hours>=required_hours 且 status=1)
+ *   unachieved 未达标(status=1 但 total_hours<required_hours)
+ * 关键字 kw: 按 学号/姓名/班级 模糊搜索(与分组同时生效)。
+ * 每组返回 group_total(该分组在筛选前的总数)与 total(当前筛选后总数), 供前端分组计数。
+ */
+static string handleStudentList(const string& query) {
+  string group = qparam(query, "group");
+  string kw = qparam(query, "kw");
+  if (group.empty()) group = "all";
+  if (kw.size() > 50) kw = kw.substr(0, 50);
+  int page = atoi(qparam(query, "page").c_str());
+  int size = atoi(qparam(query, "size").c_str());
+  if (page < 1) page = 1;
+  if (size < 0) size = 0;
+  if (size > 200) size = 200;
+
+  MYSQL* c = dbConnect();
+  if (!c) return jsonErr(500, "db connect failed");
+  string err;
+
+  // 达标线(用于 achieved/unachieved 分组)
+  double requiredHours = 0;
+  QueryResult cf;
+  if (dbQuery(c, "SELECT cfg_value FROM sys_config WHERE cfg_key='required_hours'", cf, err) && !cf.rows.empty())
+    requiredHours = atof(cf.rows[0][0].c_str());
+
+  // 基础连接: student 左连 hours_total(可能无学时记录)
+  string from = " FROM student st LEFT JOIN hours_total ht ON st.stu_no=ht.stu_no";
+  string where = " WHERE 1=1";
+  if (group == "pending")       where += " AND st.status=0";
+  else if (group == "approved") where += " AND st.status=1";
+  else if (group == "rejected") where += " AND st.status=2";
+  else if (group == "achieved") where += " AND st.status=1 AND COALESCE(ht.total_hours,0)>=" + std::to_string(requiredHours);
+  else if (group == "unachieved") where += " AND st.status=1 AND COALESCE(ht.total_hours,0)<" + std::to_string(requiredHours);
+  if (!kw.empty()) {
+    string like = dbEscape(c, "%" + kw + "%");
+    where += " AND (st.stu_no LIKE " + like + " OR st.name LIKE " + like +
+             " OR st.dept LIKE " + like + ")";
+  }
+
+  // 各分组计数(不受 kw 影响, 用于分组标签上的数字)
+  Json groupCount = Json::Object();
+  auto cntWhere = [&](const string& g) -> string {
+    if (g == "pending") return " WHERE status=0";
+    if (g == "approved") return " WHERE status=1";
+    if (g == "rejected") return " WHERE status=2";
+    if (g == "achieved") return " WHERE status=1 AND stu_no IN (SELECT stu_no FROM hours_total WHERE total_hours>=" + std::to_string(requiredHours) + ")";
+    if (g == "unachieved") return " WHERE status=1 AND stu_no NOT IN (SELECT stu_no FROM hours_total WHERE total_hours>=" + std::to_string(requiredHours) + ")";
+    return string("");
+  };
+  const char* groups[6] = {"all", "pending", "approved", "rejected", "achieved", "unachieved"};
+  for (int i = 0; i < 6; i++) {
+    QueryResult gc;
+    string w = cntWhere(groups[i]);
+    string sqlc = "SELECT COUNT(*) FROM student" + w;
+    long long n = 0;
+    if (dbQuery(c, sqlc, gc, err) && !gc.rows.empty()) n = atol(gc.rows[0][0].c_str());
+    groupCount.set(groups[i], Json::Num((double)n));
+  }
+
+  // 当前分组(带 kw)总数
+  QueryResult cnt;
+  long long total = 0;
+  if (dbQuery(c, "SELECT COUNT(*) " + from + where, cnt, err) && !cnt.rows.empty())
+    total = atol(cnt.rows[0][0].c_str());
+
+  string sql =
+    "SELECT st.id,st.stu_no,st.name,st.dept,st.card_no,st.status,"
+    "DATE_FORMAT(st.created_at,'%Y-%m-%d %H:%i:%s'),"
+    "COALESCE(ht.total_hours,0),COALESCE(ht.sign_count,0) " + from + where +
+    " ORDER BY st.status=0 DESC, COALESCE(ht.total_hours,0) DESC, st.id ASC";
+  if (size > 0) {
+    std::ostringstream lim;
+    lim << " LIMIT " << size << " OFFSET " << (long long)(page - 1) * size;
+    sql += lim.str();
+  }
+  QueryResult r;
+  if (!dbQuery(c, sql, r, err)) { dbRelease(c); return jsonErr(500, err); }
+
+  Json arr = Json::Array();
+  for (auto& row : r.rows) {
+    Json o = Json::Object();
+    int st = atoi(row[5].c_str());
+    double th = atof(row[7].c_str());
+    o.set("id", Json::Num(atol(row[0].c_str())));
+    o.set("stu_no", Json::Str(row[1]));
+    o.set("name", Json::Str(row[2]));
+    o.set("dept", Json::Str(row[3]));
+    o.set("card_no", Json::Str(row[4]));
+    o.set("status", Json::Num(st));
+    o.set("created_at", Json::Str(row[6]));
+    o.set("total_hours", Json::Num(th));
+    o.set("sign_count", Json::Num(atol(row[8].c_str())));
+    o.set("achieved", Json::Bool(st == 1 && requiredHours > 0 && th >= requiredHours));
+    arr.push(o);
+  }
+  dbRelease(c);
+
+  Json data = Json::Object();
+  data.set("list", arr);
+  data.set("total", Json::Num((double)total));
+  data.set("group_counts", groupCount);
+  data.set("required_hours", Json::Num(requiredHours));
+  return jsonOk(data);
+}
+
 // 注册申请审核(仅管理员): {student_id, action: pass|reject}
 static string handleStudentAudit(const Json& body) {
   int studentId = body.intVal("student_id", -1);
@@ -898,6 +1013,37 @@ static string qparam(const string& query, const string& key) {
 }
 
 // 活动列表(含报名人数): 支持分页(page/size), 管理员可带 all=1 查询含已下线活动
+/**
+ * 管理端待办统计(仅管理员): 待审报名 / 待批注册 / 今日刷卡 / 活动总数
+ * 用途: 管理 Tab 角标与主界面待办横幅 —— 审核是本系统的核心动作,
+ * 不能让管理员靠"主动点进去看"才发现有活要干。
+ */
+static string handleStatsPending() {
+  MYSQL* c = dbConnect();
+  if (!c) return jsonErr(500, "db connect failed");
+  string err;
+  QueryResult r;
+  long long signupPending = 0, regPending = 0, signinToday = 0, actTotal = 0;
+  if (dbQuery(c, "SELECT COUNT(*) FROM signup WHERE status=0", r, err) && !r.rows.empty())
+    signupPending = atol(r.rows[0][0].c_str());
+  if (dbQuery(c, "SELECT COUNT(*) FROM student WHERE status=0", r, err) && !r.rows.empty())
+    regPending = atol(r.rows[0][0].c_str());
+  // checked_at 为空的历史数据(本版本之前刷卡)仍算已签到, 只统计今日新增
+  if (dbQuery(c, "SELECT COUNT(*) FROM signup WHERE checkin=1 AND checked_at IS NOT NULL "
+                 "AND DATE(checked_at)=CURDATE()", r, err) && !r.rows.empty())
+    signinToday = atol(r.rows[0][0].c_str());
+  if (dbQuery(c, "SELECT COUNT(*) FROM activity WHERE status=1", r, err) && !r.rows.empty())
+    actTotal = atol(r.rows[0][0].c_str());
+  dbRelease(c);
+  Json d = Json::Object();
+  d.set("signup_pending", Json::Num((double)signupPending));
+  d.set("register_pending", Json::Num((double)regPending));
+  d.set("signin_today", Json::Num((double)signinToday));
+  d.set("activity_total", Json::Num((double)actTotal));
+  d.set("total_pending", Json::Num((double)(signupPending + regPending)));
+  return jsonOk(d);
+}
+
 static string handleActivityList(const string& query, const string& role) {
   bool withOffline = (role == "admin" && query.find("all=1") != string::npos);
   // 分页: size<=0 表示不分页(向后兼容, 一次返回全部); 上限 200 防止被当作全表扫描入口
@@ -910,6 +1056,31 @@ static string handleActivityList(const string& query, const string& role) {
   MYSQL* c = dbConnect();
   if (!c) return jsonErr(500, "db connect failed");
   string where = withOffline ? "1=1" : "a.status=1";
+  // 列表筛选全部在服务端执行, 保证 total 与筛选结果一致(前端过滤会与分页打架):
+  //   scope=available 未结束且还有名额 / expired 已结束 / mine 我报名过的(不含已驳回)
+  //   kw 按标题或地点模糊搜索
+  string scope = qparam(query, "scope");
+  string kw = qparam(query, "kw");
+  if (kw.size() > 50) kw = kw.substr(0, 50);
+  if (scope == "available") {
+    where += " AND a.end_time>=NOW()";
+    where += " AND (a.capacity=0 OR (SELECT COUNT(*) FROM signup s1 WHERE s1.activity_id=a.id"
+             " AND s1.status<>2) < a.capacity)";
+  } else if (scope == "expired") {
+    where += " AND a.end_time<NOW()";
+  } else if (scope == "mine") {
+    string stu = qparam(query, "stu_no");
+    if (!stu.empty()) {
+      where += " AND a.id IN (SELECT s2.activity_id FROM signup s2 WHERE s2.stu_no=" +
+               dbEscape(c, stu) + " AND s2.status<>2)";
+    } else {
+      where += " AND 1=0"; // 缺少学号不返回全量, 避免"我的活动"变成"全部活动"
+    }
+  }
+  if (!kw.empty()) {
+    string like = dbEscape(c, "%" + kw + "%");
+    where += " AND (a.title LIKE " + like + " OR a.location LIKE " + like + ")";
+  }
   QueryResult cnt;
   string err;
   long long total = 0;
@@ -1242,7 +1413,8 @@ static string handleSignupList(const string& query, const string& forceStuNo) {
     "SELECT s.id,s.client_id,s.activity_id,s.stu_no,s.name,s.status,s.checkin,"
     "s.card_no,s.hours,s.remark,DATE_FORMAT(s.created_at,'%Y-%m-%d %H:%i:%s'),"
     "DATE_FORMAT(s.audited_at,'%Y-%m-%d %H:%i:%s'),a.title,"
-    "COALESCE(a.hours,0) AS activity_hours "
+    "COALESCE(a.hours,0) AS activity_hours,"
+    "DATE_FORMAT(s.checked_at,'%Y-%m-%d %H:%i:%s') "
     "FROM signup s LEFT JOIN activity a ON s.activity_id=a.id "
     "WHERE 1=1" + cond + " ORDER BY s.id DESC";
   if (size > 0) {
@@ -1269,6 +1441,8 @@ static string handleSignupList(const string& query, const string& forceStuNo) {
     o.set("audited_at", Json::Str(row[11]));
     o.set("activity_title", Json::Str(row[12]));
     o.set("activity_hours", Json::Num(atof(row[13].c_str())));
+    // 刷卡签到时间(ESP32 上报时刻): 审核列表与成员端都可展示"几点刷的卡"
+    o.set("checkin_at", Json::Str(row[14]));
     arr.push(o);
   }
   dbRelease(c);
@@ -1289,6 +1463,9 @@ static string handleSignupAudit(const Json& body) {
   if (remark.size() > 200) remark = remark.substr(0, 200); // 长度截断
   if (signupId <= 0 || (action != "pass" && action != "reject"))
     return jsonErr(400, "signup_id & action(pass|reject) required");
+  // 驳回必须给出理由: 成员端会原样显示, 空理由等于"没说为什么", 无法指导他修改后重报
+  if (action == "reject" && remark.size() < 2)
+    return jsonErr(400, "驳回需填写理由(至少 2 个字), 成员会看到这条理由");
 
   MYSQL* c = dbConnect();
   if (!c) return jsonErr(500, "db connect failed");
@@ -1631,7 +1808,7 @@ static string handleSignin(const Json& body) {
   } else if (st == 1) {
     // 已通过 -> 仅签到(不重复累计学时)
     std::ostringstream s;
-    s << "UPDATE signup SET checkin=1,card_no=" << dbEscape(c, cardNo) << " WHERE id=" << signupId;
+    s << "UPDATE signup SET checkin=1,checked_at=NOW(),card_no=" << dbEscape(c, cardNo) << " WHERE id=" << signupId;
     if (!dbQuery(c, s.str(), r, err)) ok = false;
   } else {
     // 未知状态(数据异常): 拒绝处理, 避免误绕过审核
@@ -1719,7 +1896,7 @@ static string route(const HttpRequest& req) {
   if (p == "/api/health") {
     Json d = Json::Object();
     d.set("server", Json::Str("club-system-server"));
-    d.set("version", Json::Str("2.4"));
+    d.set("version", Json::Str("2.5"));
     d.set("time", Json::Str(nowStr()));
     // 数据库连通性: 验收时可直接确认"服务器在线且 MySQL 可用", 前端仍按 code==0 判在线,
     // db=false 只作为附加信息(不改变健康检查的业务 code, 避免数据库抖动时健康检查整体变红)
@@ -1780,6 +1957,12 @@ static string route(const HttpRequest& req) {
     return handleStudentRequests();
   }
 
+  // 用户管理(全量学生 + 分组查找): 仅管理员
+  if (req.method == "GET" && p == "/api/student/list") {
+    if (me.role != "admin") return needAdmin();
+    return handleStudentList(req.query);
+  }
+
   if (req.method == "POST" && p == "/api/student/audit") {
     if (me.role != "admin") return needAdmin();
     Json body; JsonParser jp(req.body);
@@ -1833,9 +2016,11 @@ static string route(const HttpRequest& req) {
   }
 
   // 报名列表: 管理员全量(可用 stu_no/activity_id 过滤), 学生仅本人
+  // 注意: 学生也要把 query 透传下去 —— forceStuNo 已强制本人, 透传后
+  // activity_id / status / kw / page / size 才能生效(详情页按活动查本人报名就靠它)。
   if (req.method == "GET" && p == "/api/signup/list") {
     if (me.role == "admin") return handleSignupList(req.query, "");
-    return handleSignupList("", me.stu_no);
+    return handleSignupList(req.query, me.stu_no);
   }
 
   // 审核: 仅管理员(通过自动累计学时)
@@ -1857,6 +2042,12 @@ static string route(const HttpRequest& req) {
   // 学时报表: 排行公开, 明细按角色
   if (req.method == "GET" && p == "/api/hours/report")
     return handleHoursReport(me.role, me.stu_no);
+
+  // 管理端待办统计(角标/横幅): 仅管理员
+  if (req.method == "GET" && p == "/api/stats/pending") {
+    if (me.role != "admin") return needAdmin();
+    return handleStatsPending();
+  }
 
   // 学时汇总重算(以 signup 为事实来源重建 hours_total): 仅管理员
   if (req.method == "POST" && p == "/api/hours/rebuild") {
@@ -2040,6 +2231,11 @@ static void dbEnsureSchema() {
   // 日志表按时间清理需要索引(已存在时 MySQL 报重复, 直接忽略)
   QueryResult ig;
   dbQuery(c, "CREATE INDEX idx_req_time ON request_log (req_time)", ig, err);
+  // 刷卡签到时间: 老库补列(列已存在时 MySQL 报重复列, 忽略即可)
+  // 验收时可直接展示"几点刷的卡", 比只有一个 checkin=1 更有说服力
+  dbQuery(c, "ALTER TABLE signup ADD COLUMN checked_at DATETIME NULL COMMENT '刷卡签到时间'", ig, err);
+  // 待审报名是管理端最高频查询, 单独建索引避免全表扫描(已存在同样忽略)
+  dbQuery(c, "CREATE INDEX idx_signup_status ON signup (status)", ig, err);
   dbRelease(c);
 }
 

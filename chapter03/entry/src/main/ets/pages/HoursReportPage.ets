@@ -14,6 +14,7 @@ import { LoginGuardView } from '../common/GuardViews';
 import {
   HoursRow, HoursDetail, parseHoursReport, parseHoursDetail, parseSignups, dataOf, numOf, csvCell
 } from '../common/Models';
+import { Theme } from '../common/Theme';
 
 @Entry
 @Component
@@ -152,7 +153,7 @@ struct HoursReportPage {
         } },
         secondaryButton: {
           value: '复制内容',
-          fontColor: '#1E6FFF',
+          fontColor: Theme.primary,
           action: async () => {
             const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, text);
             await pasteboard.getSystemPasteboard().setData(data);
@@ -184,21 +185,21 @@ struct HoursReportPage {
   rankRow(r: HoursRow) {
     Row() {
       Text(r.rank.toString()).fontSize(16).fontWeight(FontWeight.Bold)
-        .fontColor(r.rank <= 3 ? '#E84026' : '#999999').width(36).textAlign(TextAlign.Center)
+        .fontColor(r.rank <= 3 ? Theme.danger : Theme.textTertiary).width(36).textAlign(TextAlign.Center)
       Column({ space: 2 }) {
         Row({ space: 6 }) {
           Text(r.name + '  (' + r.stu_no + ')').fontSize(14).fontWeight(FontWeight.Medium)
           if (r.achieved) {
             Text('达标').fontSize(9).fontColor(Color.White)
               .padding({ left: 5, right: 5, top: 1, bottom: 1 })
-              .backgroundColor('#07C160').borderRadius(6)
+              .backgroundColor(Theme.success).borderRadius(6)
           }
         }
         Text('通过 ' + r.sign_count + ' 次活动' +
           (this.requiredHours > 0 ? (r.achieved ? '' : ' · 距达标 ' + (this.requiredHours - r.total_hours) + ' 学时') : ''))
-          .fontSize(11).fontColor('#999999')
+          .fontSize(11).fontColor(Theme.textTertiary)
       }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-      Text(r.total_hours + ' 学时').fontSize(16).fontWeight(FontWeight.Bold).fontColor('#1E6FFF')
+      Text(r.total_hours + ' 学时').fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.primary)
     }
     .width('100%').padding(12).backgroundColor(Color.White).borderRadius(12).margin({ bottom: 8 })
   }
@@ -208,9 +209,9 @@ struct HoursReportPage {
     Row() {
       Column({ space: 2 }) {
         Text(d.activity).fontSize(14).fontWeight(FontWeight.Medium)
-        Text(d.name + ' · ' + d.audited_at).fontSize(11).fontColor('#999999')
+        Text(d.name + ' · ' + d.audited_at).fontSize(11).fontColor(Theme.textTertiary)
       }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-      Text('+' + d.hours + ' 学时').fontSize(14).fontWeight(FontWeight.Bold).fontColor('#07C160')
+      Text('+' + d.hours + ' 学时').fontSize(14).fontWeight(FontWeight.Bold).fontColor(Theme.success)
     }
     .width('100%').padding(12).backgroundColor(Color.White).borderRadius(12).margin({ bottom: 8 })
   }
@@ -226,16 +227,16 @@ struct HoursReportPage {
         this.deniedView()
       } else {
         Row() {
-          Text('‹ 返回').fontSize(14).fontColor('#1E6FFF')
+          Text('‹ 返回').fontSize(14).fontColor(Theme.primary)
             .padding({ right: 10, top: 2, bottom: 2 })
             .onClick(() => router.back())
           Text('学时统计报表').fontSize(18).fontWeight(FontWeight.Bold).layoutWeight(1)
           Text(AppConfig.isAdmin ? '管理员·全量' : '成员·本人明细')
             .fontSize(10).fontColor(Color.White)
             .padding({ left: 7, right: 7, top: 2, bottom: 2 })
-            .backgroundColor(AppConfig.isAdmin ? '#F5652F' : '#07C160')
+            .backgroundColor(AppConfig.isAdmin ? Theme.admin : Theme.success)
             .borderRadius(8)
-          Button('刷新').fontSize(13).height(30).backgroundColor('#1E6FFF')
+          Button('刷新').fontSize(13).height(30).backgroundColor(Theme.primary)
             .onClick(() => this.load())
         }.width('100%').padding({ left: 14, right: 14, top: 12, bottom: 6 })
 
@@ -243,23 +244,23 @@ struct HoursReportPage {
         if (AppConfig.isAdmin) {
           Column({ space: 8 }) {
             Row({ space: 6 }) {
-              Text('学时达标线').fontSize(11).fontColor('#666666')
+              Text('学时达标线').fontSize(11).fontColor(Theme.textSecondary)
               TextInput({ text: this.requiredInput, placeholder: '0 不设线' })
                 .type(InputType.NUMBER_DECIMAL).height(28).width(76).fontSize(12)
                 .onChange((v: string) => this.requiredInput = v)
-              Text('学时').fontSize(11).fontColor('#666666')
-              Button('保存').fontSize(11).height(26).backgroundColor('#1E6FFF')
+              Text('学时').fontSize(11).fontColor(Theme.textSecondary)
+              Button('保存').fontSize(11).height(26).backgroundColor(Theme.primary)
                 .onClick(() => this.saveRequired())
               Text(this.requiredHours > 0 ? '已达标 ' + this.achievedCount + ' 人' : '未设线')
-                .fontSize(11).fontColor('#999999').layoutWeight(1).textAlign(TextAlign.End)
+                .fontSize(11).fontColor(Theme.textTertiary).layoutWeight(1).textAlign(TextAlign.End)
             }.width('100%')
 
-            Row().width('100%').height(0.5).backgroundColor('#EEEEEE')
+            Row().width('100%').height(0.5).backgroundColor(Theme.divider)
 
             Row({ space: 6 }) {
               Text('汇总由服务端审核事务自动累计, 可一键重算修复历史漂移')
-                .fontSize(10).fontColor('#999999').layoutWeight(1)
-              Button('重算学时').fontSize(11).height(26).backgroundColor('#F5652F')
+                .fontSize(10).fontColor(Theme.textTertiary).layoutWeight(1)
+              Button('重算学时').fontSize(11).height(26).backgroundColor(Theme.admin)
                 .onClick(() => this.rebuild())
             }.width('100%')
           }
@@ -272,38 +273,39 @@ struct HoursReportPage {
           Text(this.requiredHours > 0 && !AppConfig.isAdmin
             ? '达标线 ' + this.requiredHours + ' 学时 · 已达标 ' + this.achievedCount + ' 人'
             : (this.tab === 0 ? '当前: 学时排行' : '当前: 认定明细'))
-            .fontSize(10).fontColor('#999999').layoutWeight(1)
-          Button(this.exporting ? '导出中...' : '导出CSV').fontSize(11).height(26).backgroundColor('#00A884')
+            .fontSize(10).fontColor(Theme.textTertiary).layoutWeight(1)
+          Button(this.exporting ? '导出中...' : '导出CSV').fontSize(11).height(26).backgroundColor(Theme.report)
             .enabled(!this.exporting).onClick(() => this.exportCsv())
         }.width('100%').padding({ left: 14, right: 14, bottom: 6 })
 
         // 本地 vs 服务器 双端对比卡
         Row({ space: 10 }) {
           Column({ space: 3 }) {
-            Text(AppConfig.isAdmin ? '本地 SQLite 全量' : '本地 SQLite 统计').fontSize(11).fontColor('#999999')
-            Text(this.localHours + '').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#1E6FFF')
-            Text('通过 ' + this.localCount + ' 条').fontSize(11).fontColor('#999999')
-          }.layoutWeight(1).padding(12).backgroundColor('#EAF1FF').borderRadius(12)
+            Text(AppConfig.isAdmin ? '本地 SQLite 全量' : '本地 SQLite 统计').fontSize(11).fontColor(Theme.textTertiary)
+            Text(this.localHours + '').fontSize(20).fontWeight(FontWeight.Bold).fontColor(Theme.primary)
+            Text('通过 ' + this.localCount + ' 条').fontSize(11).fontColor(Theme.textTertiary)
+          }.layoutWeight(1).padding(12).backgroundColor(Theme.primaryBg).borderRadius(12)
 
           Column({ space: 3 }) {
-            Text(AppConfig.isAdmin ? '服务器全量学时' : '我的服务器学时').fontSize(11).fontColor('#999999')
+            Text(AppConfig.isAdmin ? '服务器全量学时' : '我的服务器学时').fontSize(11).fontColor(Theme.textTertiary)
             Text((AppConfig.isAdmin ? this.serverTotal : this.serverHours()) + '')
-              .fontSize(20).fontWeight(FontWeight.Bold).fontColor('#07C160')
-            Text(this.serverSubText()).fontSize(11).fontColor('#999999')
-          }.layoutWeight(1).padding(12).backgroundColor('#E8F8EF').borderRadius(12)
+              .fontSize(20).fontWeight(FontWeight.Bold).fontColor(Theme.success)
+            Text(this.serverSubText()).fontSize(11).fontColor(Theme.textTertiary)
+          }.layoutWeight(1).padding(12).backgroundColor(Theme.successBg).borderRadius(12)
         }.width('100%').padding({ left: 14, right: 14, bottom: 8 })
 
         // 双端一致判定: 本地缓存相对服务器可能滞后(审核结果在服务器), 一键校准后再比对
         Row({ space: 8 }) {
           Text(this.bothSame()
-            ? '✔ 双端一致: 本地缓存与服务器学时相同'
-            : '⚠ 本地缓存与服务器差 ' + (Math.round(Math.abs(this.localHours - this.serverMine()) * 10) / 10) +
-              ' 学时(服务器审核后本地未刷新)')
+            ? '双端一致: 学时与记录条数均与服务器相同'
+            : '两端不一致: 差 ' +
+              (Math.round(Math.abs(this.localHours - this.serverMine()) * 10) / 10) + ' 学时 / ' +
+              Math.abs(this.localCount - this.detail.length) + ' 条(服务器审核后本地未刷新)')
             .fontSize(11)
-            .fontColor(this.bothSame() ? '#07C160' : '#B25E00')
+            .fontColor(this.bothSame() ? Theme.success : Theme.warning)
             .layoutWeight(1)
           Button(this.calibrating ? '校准中...' : '校准本地缓存')
-            .fontSize(11).height(26).backgroundColor('#1E6FFF')
+            .fontSize(11).height(26).backgroundColor(Theme.primary)
             .enabled(!this.calibrating)
             .onClick(() => this.calibrate())
         }.width('100%').padding({ left: 14, right: 14, bottom: 8 })
@@ -313,13 +315,13 @@ struct HoursReportPage {
           this.tabBtn('认定明细', 1)
         }.width('100%').padding({ left: 14, right: 14, bottom: 8 })
 
-        Text(this.msg).fontSize(12).fontColor('#999999').width('100%').padding({ left: 14, bottom: 6 })
+        Text(this.msg).fontSize(12).fontColor(Theme.textTertiary).width('100%').padding({ left: 14, bottom: 6 })
 
         Scroll() {
           Column() {
             if (this.tab === 0) {
               if (this.report.length === 0) {
-                Text('暂无学时记录, 审核通过报名后自动累计').fontSize(13).fontColor('#BBBBBB').margin({ top: 40 })
+                Text('暂无学时记录, 审核通过报名后自动累计').fontSize(13).fontColor(Theme.textDisabled).margin({ top: 40 })
               } else {
                 ForEach(this.report, (r: HoursRow) => {
                   this.rankRow(r)
@@ -327,7 +329,7 @@ struct HoursReportPage {
               }
             } else {
               if (this.detail.length === 0) {
-                Text('暂无认定明细').fontSize(13).fontColor('#BBBBBB').margin({ top: 40 })
+                Text('暂无认定明细').fontSize(13).fontColor(Theme.textDisabled).margin({ top: 40 })
               } else {
                 ForEach(this.detail, (d: HoursDetail) => {
                   this.detailRow(d)
@@ -336,10 +338,10 @@ struct HoursReportPage {
             }
           }.padding(14)
         }
-        .layoutWeight(1).scrollBar(BarState.Off)
+        .layoutWeight(1).scrollBar(BarState.Off).align(Alignment.Top)
       }
     }
-    .width('100%').height('100%').backgroundColor('#F5F7FA')
+    .width('100%').height('100%').backgroundColor(Theme.bgPage)
   }
 
   serverHours(): number {
@@ -360,9 +362,10 @@ struct HoursReportPage {
     return AppConfig.isAdmin ? this.serverTotal : this.serverHours();
   }
 
-  /** 双端是否一致(本地 SQLite 缓存聚合 vs 服务器 MySQL 汇总) */
+  /** 双端是否一致: 学时与"已通过记录条数"都对上才算一致(只看学时可能掩盖条数差异) */
   bothSame(): boolean {
-    return Math.abs(this.localHours - this.serverMine()) < 0.05;
+    const hoursSame = Math.abs(this.localHours - this.serverMine()) < 0.05;
+    return hoursSame && this.localCount === this.detail.length;
   }
 
   /**
@@ -404,19 +407,23 @@ struct HoursReportPage {
 
   /** 服务器学时卡副标题: 未设达标线时提示累计口径, 设线后显示达标情况 */
   serverSubText(): string {
-    if (this.requiredHours <= 0) return '审核通过自动累计';
-    if (AppConfig.isAdmin) return '达标 ' + this.achievedCount + '/' + this.report.length + ' 人';
+    const cnt = this.detail.length;
+    if (this.requiredHours <= 0) return '通过 ' + cnt + ' 条';
+    if (AppConfig.isAdmin) {
+      return '通过 ' + cnt + ' 条 · 达标 ' + this.achievedCount + '/' + this.report.length + ' 人';
+    }
     const my = this.serverHours();
-    return my >= this.requiredHours ? '已达标' : '未达标(差 ' + (this.requiredHours - my) + ')';
+    return '通过 ' + cnt + ' 条 · ' +
+      (my >= this.requiredHours ? '已达标' : '差 ' + (this.requiredHours - my) + ' 学时');
   }
 
   @Builder
   tabBtn(label: string, t: number) {
     Text(label)
       .fontSize(12)
-      .fontColor(this.tab === t ? Color.White : '#333333')
+      .fontColor(this.tab === t ? Color.White : Theme.textBody)
       .padding({ left: 14, right: 14, top: 5, bottom: 5 })
-      .backgroundColor(this.tab === t ? '#1E6FFF' : '#E9ECF3')
+      .backgroundColor(this.tab === t ? Theme.primary : Theme.bgNeutral)
       .borderRadius(14)
       .onClick(() => this.tab = t)
   }

@@ -10,6 +10,7 @@ import { DbHelper } from '../common/DbHelper';
 import { AppConfig } from '../common/AppConfig';
 import { LocalDraft, ActivityInfo, parseActivities, toDate } from '../common/Models';
 import { AdminGuardView } from '../common/GuardViews';
+import { Theme } from '../common/Theme';
 
 @Entry
 @Component
@@ -325,7 +326,7 @@ struct ActivityPublishPage {
       primaryButton: { value: '取消', action: () => {} },
       secondaryButton: {
         value: '删除',
-        fontColor: '#E84026',
+        fontColor: Theme.danger,
         action: async () => { await this.removeDraft(id); }
       }
     });
@@ -341,26 +342,26 @@ struct ActivityPublishPage {
     Column() {
       Row() {
         Text(d.title).fontSize(15).fontWeight(FontWeight.Medium).layoutWeight(1)
-        Text(d.synced === 1 ? '✓ 已发布' : '● 草稿')
-          .fontSize(11).fontColor(d.synced === 1 ? '#07C160' : '#E84026')
+        Text(d.synced === 1 ? '已发布' : '● 草稿')
+          .fontSize(11).fontColor(d.synced === 1 ? Theme.success : Theme.danger)
       }.width('100%')
       Text('学时 ' + d.hours + ' | ' + (d.location === '' ? '待定' : d.location) + ' | ' + d.start_time)
-        .fontSize(12).fontColor('#888888').width('100%').margin({ top: 4 })
+        .fontSize(12).fontColor(Theme.textTertiary).width('100%').margin({ top: 4 })
       Row({ space: 10 }) {
         if (d.synced === 0) {
           Button(this.editingDraftId === d.id ? '● 编辑中' : '载入表单')
             .fontSize(12).height(28)
-            .backgroundColor(this.editingDraftId === d.id ? '#B25E00' : '#F5652F')
+            .backgroundColor(this.editingDraftId === d.id ? Theme.warning : Theme.admin)
             .onClick(() => this.loadDraftToForm(d))
-          Button('发布到服务器').fontSize(12).height(28).backgroundColor('#1E6FFF')
+          Button('发布到服务器').fontSize(12).height(28).backgroundColor(Theme.primary)
             .onClick(() => this.publish(d.id, d.title, d.content, d.location, d.start_time,
               d.end_time, d.hours, d.capacity, d.publisher))
         }
-        Button('删除').fontSize(12).height(28).backgroundColor('#E84026')
+        Button('删除').fontSize(12).height(28).backgroundColor(Theme.danger)
           .onClick(() => this.confirmDeleteDraft(d.id, d.title))
       }.width('100%').justifyContent(FlexAlign.End).margin({ top: 8 })
     }
-    .width('100%').padding(12).backgroundColor('#F8FAFF').borderRadius(10).margin({ bottom: 8 })
+    .width('100%').padding(12).backgroundColor(Theme.primaryBg).borderRadius(10).margin({ bottom: 8 })
   }
 
   @Builder
@@ -373,35 +374,36 @@ struct ActivityPublishPage {
           }))
         Text(a.status === 0 ? '已下线' : (a.expired ? '已结束' : '已发布'))
           .fontSize(11)
-          .fontColor(a.status === 0 ? '#999999' : (a.expired ? '#E84026' : '#07C160'))
+          .fontColor(a.status === 0 ? Theme.textTertiary : (a.expired ? Theme.danger : Theme.success))
       }.width('100%')
       Row({ space: 8 }) {
         Text(a.valid_count + ' 人报名 · ' + a.hours + ' 学时 · ' + a.start_time)
-          .fontSize(11).fontColor('#888888').layoutWeight(1)
-        Button('编辑').fontSize(11).height(26).backgroundColor('#1E6FFF')
+          .fontSize(11).fontColor(Theme.textTertiary).layoutWeight(1)
+        Button('编辑').fontSize(11).height(26).backgroundColor(Theme.primary)
           .onClick(() => router.pushUrl({
             url: 'pages/ActivityEditPage',
             params: { 'activity_id': a.id }
           }))
         Button(a.status === 0 ? '恢复上线' : '下线')
           .fontSize(11).height(26)
-          .backgroundColor(a.status === 0 ? '#07C160' : '#E84026')
+          .backgroundColor(a.status === 0 ? Theme.success : Theme.danger)
           .onClick(() => this.toggleStatus(a))
       }.width('100%').margin({ top: 6 })
     }
-    .width('100%').padding(10).backgroundColor('#F8FAFF').borderRadius(10).margin({ bottom: 8 })
+    .width('100%').padding(10).backgroundColor(Theme.primaryBg).borderRadius(10).margin({ bottom: 8 })
   }
 
   @Builder
-  timeCell(label: string, value: string, target: string) {
+  timeCell(label: string, target: string) {
     Row() {
       Column() {
-        Text(label).fontSize(12).fontColor('#999999')
-        Text(value).fontSize(15).fontWeight(FontWeight.Medium).fontColor('#1E6FFF').margin({ top: 2 })
+        Text(label).fontSize(12).fontColor(Theme.textTertiary)
+        Text(target === 'start' ? this.fmtDate(this.startDate) : this.fmtDate(this.endDate))
+          .fontSize(15).fontWeight(FontWeight.Medium).fontColor(Theme.primary).margin({ top: 2 })
       }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-      Text('滚动选择 ›').fontSize(12).fontColor('#1E6FFF')
+      Text('滚动选择 ›').fontSize(12).fontColor(Theme.primary)
     }
-    .width('100%').padding(12).backgroundColor('#F0F5FF').borderRadius(10)
+    .width('100%').padding(12).backgroundColor(Theme.primaryBg).borderRadius(10)
     .onClick(() => {
       if (target === 'start') this.pickStart(); else this.pickEnd();
     })
@@ -418,11 +420,11 @@ struct ActivityPublishPage {
         this.deniedView()
       } else {
         Row() {
-          Text('‹ 返回').fontSize(14).fontColor('#1E6FFF')
+          Text('‹ 返回').fontSize(14).fontColor(Theme.primary)
             .padding({ right: 10, top: 2, bottom: 2 })
             .onClick(() => router.back())
           Text('发布活动').fontSize(18).fontWeight(FontWeight.Bold).layoutWeight(1)
-          Text('👑 管理员').fontSize(12).fontColor('#F5652F')
+          Text('管理员').fontSize(12).fontColor(Theme.admin)
         }.width('100%').padding({ left: 14, right: 14, top: 12, bottom: 8 })
 
         Scroll() {
@@ -438,10 +440,10 @@ struct ActivityPublishPage {
                 .onChange((v: string) => this.location = v)
 
               // 时间滚轮选择(点击弹出 DatePicker + TimePicker)
-              this.timeCell('开始时间', this.fmtDate(this.startDate), 'start')
-              this.timeCell('结束时间', this.fmtDate(this.endDate), 'end')
+              this.timeCell('开始时间', 'start')
+              this.timeCell('结束时间', 'end')
               Text('点击时间卡片通过滚轮选择, 结束必须晚于开始, 开始不得早于当前')
-                .fontSize(11).fontColor('#999999').width('100%')
+                .fontSize(11).fontColor(Theme.textTertiary).width('100%')
 
               Row({ space: 10 }) {
                 TextInput({ text: this.hours, placeholder: '学时(如 2.0)' })
@@ -454,22 +456,22 @@ struct ActivityPublishPage {
 
               Row({ space: 10 }) {
                 Button(this.busy ? '处理中...' : (this.editingDraftId > 0 ? '更新草稿' : '保存草稿(本地 SQLite)'))
-                  .layoutWeight(1).height(40).fontSize(14).backgroundColor('#666666')
+                  .layoutWeight(1).height(40).fontSize(14).backgroundColor(Theme.textSecondary)
                   .enabled(!this.busy).onClick(() => this.saveDraft())
                 Button(this.busy ? '处理中...' : '保存并发布到服务器')
-                  .layoutWeight(1).height(40).fontSize(14).backgroundColor('#1E6FFF')
+                  .layoutWeight(1).height(40).fontSize(14).backgroundColor(Theme.primary)
                   .enabled(!this.busy).onClick(() => this.saveAndPublish())
               }
               if (this.editingDraftId > 0) {
                 Row() {
                   Text('正在编辑草稿 #' + this.editingDraftId + ', 保存将更新原草稿')
-                    .fontSize(11).fontColor('#F5652F').layoutWeight(1)
-                  Text('退出编辑 / 清空表单').fontSize(11).fontColor('#1E6FFF')
+                    .fontSize(11).fontColor(Theme.admin).layoutWeight(1)
+                  Text('退出编辑 / 清空表单').fontSize(11).fontColor(Theme.primary)
                     .onClick(() => this.clearForm())
                 }.width('100%')
               }
               if (this.msg !== '') {
-                Text(this.msg).fontSize(12).fontColor('#1E6FFF').textAlign(TextAlign.Center).width('100%')
+                Text(this.msg).fontSize(12).fontColor(Theme.primary).textAlign(TextAlign.Center).width('100%')
               }
             }
             .width('100%').padding(14).backgroundColor(Color.White).borderRadius(14)
@@ -478,10 +480,10 @@ struct ActivityPublishPage {
             Column() {
               Row() {
                 Text('本地草稿箱(SQLite)').fontSize(15).fontWeight(FontWeight.Bold).layoutWeight(1)
-                Text(this.drafts.length + ' 条').fontSize(12).fontColor('#999999')
+                Text(this.drafts.length + ' 条').fontSize(12).fontColor(Theme.textTertiary)
               }.width('100%').margin({ bottom: 8 })
               if (this.drafts.length === 0) {
-                Text('暂无草稿, 填写上方表单后点击「保存草稿」').fontSize(12).fontColor('#BBBBBB')
+                Text('暂无草稿, 填写上方表单后点击「保存草稿」').fontSize(12).fontColor(Theme.textDisabled)
               } else {
                 ForEach(this.drafts, (d: LocalDraft) => {
                   this.draftItem(d)
@@ -495,11 +497,11 @@ struct ActivityPublishPage {
             Column() {
               Row() {
                 Text('已发布活动(含已下线)').fontSize(15).fontWeight(FontWeight.Bold).layoutWeight(1)
-                Text(this.allActs.length + ' 条').fontSize(12).fontColor('#999999')
+                Text(this.allActs.length + ' 条').fontSize(12).fontColor(Theme.textTertiary)
                   .onClick(() => this.loadAllActivities())
               }.width('100%').margin({ bottom: 8 })
               if (this.allActs.length === 0) {
-                Text('暂无已发布活动, 填写上方表单即可发布').fontSize(12).fontColor('#BBBBBB')
+                Text('暂无已发布活动, 填写上方表单即可发布').fontSize(12).fontColor(Theme.textDisabled)
               } else {
                 ForEach(this.allActs, (a: ActivityInfo) => {
                   this.actManageItem(a)
@@ -511,9 +513,9 @@ struct ActivityPublishPage {
           }
           .padding(14)
         }
-        .layoutWeight(1).scrollBar(BarState.Off)
+        .layoutWeight(1).scrollBar(BarState.Off).align(Alignment.Top)
       }
     }
-    .width('100%').height('100%').backgroundColor('#F5F7FA')
+    .width('100%').height('100%').backgroundColor(Theme.bgPage)
   }
 }

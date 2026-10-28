@@ -70,6 +70,7 @@ CREATE TABLE signup (
   name        VARCHAR(50)  NOT NULL DEFAULT '' COMMENT '姓名',
   status      TINYINT      NOT NULL DEFAULT 0 COMMENT '0=待审核 1=已通过 2=已驳回',
   checkin     TINYINT      NOT NULL DEFAULT 0 COMMENT '0=未签到 1=已刷卡签到(ESP32)',
+  checked_at  DATETIME     NULL COMMENT '刷卡签到时间',
   card_no     VARCHAR(32)  DEFAULT '' COMMENT 'RFID卡号(嵌入式签到)',
   hours       DECIMAL(5,1) NOT NULL DEFAULT 0 COMMENT '认定学时(审核通过=活动学时)',
   remark      VARCHAR(200) DEFAULT '' COMMENT '审核备注',
