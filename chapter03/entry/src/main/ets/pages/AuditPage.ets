@@ -184,7 +184,7 @@ struct AuditPage {
             Column() {
               ForEach(this.shown, (s: SignupInfo) => {
                 this.item(s)
-              }, (s: SignupInfo) => s.id.toString())
+              }, (s: SignupInfo) => s.id.toString() + '-' + s.status.toString())
             }.padding(14)
           }
           .layoutWeight(1).scrollBar(BarState.Off)

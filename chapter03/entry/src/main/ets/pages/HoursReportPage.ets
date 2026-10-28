@@ -142,7 +142,7 @@ struct HoursReportPage {
               } else {
                 ForEach(this.report, (r: HoursRow) => {
                   this.rankRow(r)
-                }, (r: HoursRow) => r.stu_no)
+                }, (r: HoursRow) => r.stu_no + '-' + r.total_hours.toString())
               }
             } else {
               if (this.detail.length === 0) {

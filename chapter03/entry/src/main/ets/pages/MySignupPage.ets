@@ -133,7 +133,7 @@ struct MySignupPage {
             Column() {
               ForEach(this.signups, (s: LocalSignup) => {
                 this.item(s)
-              }, (s: LocalSignup) => s.client_id)
+              }, (s: LocalSignup) => s.client_id + '-' + s.status.toString())
             }.padding(14)
           }
           .layoutWeight(1).scrollBar(BarState.Off)

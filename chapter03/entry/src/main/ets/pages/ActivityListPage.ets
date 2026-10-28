@@ -136,7 +136,7 @@ struct ActivityListPage {
               Column() {
                 ForEach(this.activities, (a: ActivityInfo) => {
                   this.card(a)
-                }, (a: ActivityInfo) => a.id.toString())
+                }, (a: ActivityInfo) => a.id.toString() + '-' + a.signed_count.toString())
               }.padding(14)
             }
             .layoutWeight(1)
