@@ -354,12 +354,12 @@ struct ActivityPublishPage {
               } else {
                 ForEach(this.drafts, (d: LocalDraft) => {
                   this.draftItem(d)
-                }, (d: LocalDraft) => d.id.toString())
+                }, (d: LocalDraft) => d.id.toString() + '-' + d.synced.toString())
               }
             }
             .width('100%').padding(14).backgroundColor(Color.White).borderRadius(14).margin({ top: 10 })
           }
-          .width('100%').padding(14)
+          .padding(14)
         }
         .layoutWeight(1).scrollBar(BarState.Off)
       }

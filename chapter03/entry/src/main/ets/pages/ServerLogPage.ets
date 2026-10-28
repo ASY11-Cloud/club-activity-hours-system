@@ -32,6 +32,16 @@ struct ServerLogPage {
     });
   }
 
+  onPageShow(): void {
+    // 返回页面时恢复自动刷新: aboutToDisappear 会清掉 timer, 需在重新可见时重启
+    if (this.auto && this.timer === -1) {
+      this.timer = setInterval(() => {
+        if (this.auto) this.load();
+      }, 3000);
+    }
+    if (!this.blocked) this.load();
+  }
+
   aboutToDisappear(): void {
     if (this.timer !== -1) {
       clearInterval(this.timer);
