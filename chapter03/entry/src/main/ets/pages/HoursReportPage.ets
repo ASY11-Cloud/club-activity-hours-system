@@ -34,6 +34,8 @@ struct HoursReportPage {
   }
 
   onPageShow(): void {
+    // 从登录页返回且已登录: 解除未登录守卫
+    if (this.notLoggedIn && AppConfig.isLoggedIn) this.notLoggedIn = false;
     if (!this.notLoggedIn) this.load();
   }
 

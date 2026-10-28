@@ -32,6 +32,14 @@ struct ActivityDetailPage {
     });
   }
 
+  onPageShow(): void {
+    // 从登录页返回且已登录: 解除未登录守卫并加载
+    if (this.notLoggedIn && AppConfig.isLoggedIn) {
+      this.notLoggedIn = false;
+      this.loadActivity();
+    }
+  }
+
   async loadActivity(): Promise<void> {
     const params = router.getParams() as Record<string, Object>;
     const aid = params['activity_id'] as number;
@@ -102,6 +110,10 @@ struct ActivityDetailPage {
     this.signing = true;
     this.msg = '正在报名并写入本地 SQLite...';
     try {
+      // 驳回后重新报名: 先删除本地旧驳回记录, 保证本地与服务器各一条(双端一致)
+      if (this.myStatus.startsWith('已驳回')) {
+        await DbHelper.deleteSignupByActivity(a.id, AppConfig.stuNo);
+      }
       // 1) 本地落库(离线可查; 驳回后重新报名生成新 client_id, 服务器将原驳回记录重置为待审核)
       const clientId = util.generateRandomUUID();
       await DbHelper.addSignup(clientId, a.id, a.title, AppConfig.stuNo, AppConfig.stuName);

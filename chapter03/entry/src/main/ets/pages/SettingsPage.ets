@@ -14,15 +14,35 @@ struct SettingsPage {
   @State port: string = '';
   @State msg: string = '';
   @State testing: boolean = false;
+  // 登录态镜像(@State): 从设置页「去登录」登录返回后, onPageShow 同步刷新账号区
+  @State loggedIn: boolean = AppConfig.isLoggedIn;
+  @State isAdmin: boolean = AppConfig.isAdmin;
+  @State name: string = AppConfig.stuName;
+  @State stuNo: string = AppConfig.stuNo;
+  @State roleTxt: string = AppConfig.roleText;
 
   aboutToAppear(): void {
     const ctx = getContext(this) as common.UIAbilityContext;
     AppConfig.init(ctx).then(() => {
+      this.syncLoginState();
       this.host = AppConfig.serverHost;
       this.port = AppConfig.serverPort;
     }).catch((e: Error) => {
       this.msg = '初始化失败: ' + e.message;
     });
+  }
+
+  onPageShow(): void {
+    // 登录/退出登录返回设置页时, 同步登录态并刷新账号区
+    this.syncLoginState();
+  }
+
+  syncLoginState(): void {
+    this.loggedIn = AppConfig.isLoggedIn;
+    this.isAdmin = AppConfig.isAdmin;
+    this.name = AppConfig.stuName;
+    this.stuNo = AppConfig.stuNo;
+    this.roleTxt = AppConfig.roleText;
   }
 
   async save(): Promise<void> {
@@ -76,18 +96,18 @@ struct SettingsPage {
           // 当前账号(只读)
           Column({ space: 8 }) {
             Text('当前账号').fontSize(14).fontWeight(FontWeight.Medium).width('100%')
-            if (AppConfig.isLoggedIn) {
+            if (this.loggedIn) {
               Row({ space: 10 }) {
                 Column({ space: 4 }) {
                   Row({ space: 6 }) {
-                    Text(AppConfig.stuName).fontSize(15).fontWeight(FontWeight.Bold)
-                    Text(AppConfig.roleText)
+                    Text(this.name).fontSize(15).fontWeight(FontWeight.Bold)
+                    Text(this.roleTxt)
                       .fontSize(10).fontColor(Color.White)
                       .padding({ left: 7, right: 7, top: 2, bottom: 2 })
-                      .backgroundColor(AppConfig.isAdmin ? '#F5652F' : '#07C160')
+                      .backgroundColor(this.isAdmin ? '#F5652F' : '#07C160')
                       .borderRadius(8)
                   }
-                  Text(AppConfig.isAdmin ? '管理员账号: ' + AppConfig.stuNo : '学号: ' + AppConfig.stuNo)
+                  Text(this.isAdmin ? '管理员账号: ' + this.stuNo : '学号: ' + this.stuNo)
                     .fontSize(11).fontColor('#666666')
                   Text('身份由服务端校验(admin_user / student 表), 不可手动伪造')
                     .fontSize(10).fontColor('#BBBBBB')

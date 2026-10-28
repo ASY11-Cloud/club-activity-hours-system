@@ -239,6 +239,16 @@ export class DbHelper {
     await store.update(vb, pred);
   }
 
+  /** 删除某活动某人的本地报名记录(驳回后重新报名前清理旧记录, 保证本地与服务器各一条, 双端一致) */
+  static async deleteSignupByActivity(activityId: number, stuNo: string): Promise<void> {
+    const store = DbHelper.rdb;
+    if (!store) return;
+    const pred = new relationalStore.RdbPredicates('local_signup');
+    pred.equalTo('activity_id', activityId);
+    pred.equalTo('stu_no', stuNo);
+    await store.delete(pred);
+  }
+
   /** 本地学时统计(通过记录聚合) */
   static async localHours(stuNo: string): Promise<number> {
     const list = await DbHelper.getSignups(stuNo);
