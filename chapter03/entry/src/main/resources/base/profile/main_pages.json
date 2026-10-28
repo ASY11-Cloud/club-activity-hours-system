@@ -1,0 +1,16 @@
+{
+  "src": [
+    "pages/LandingPage",
+    "pages/MainPage",
+    "pages/LoginPage",
+    "pages/RegisterPage",
+    "pages/ActivityPublishPage",
+    "pages/ActivityEditPage",
+    "pages/ActivityDetailPage",
+    "pages/MySignupPage",
+    "pages/AuditPage",
+    "pages/HoursReportPage",
+    "pages/ServerLogPage",
+    "pages/SettingsPage"
+  ]
+}

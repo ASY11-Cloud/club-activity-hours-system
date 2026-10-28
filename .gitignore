@@ -1,0 +1,21 @@
+# ---- 服务器可执行与运行产物 ----
+server/server.exe
+server/server_prev.exe.bak
+server/build.log
+server/*.dll
+
+# ---- 鸿蒙构建产物（工程内另有 .gitignore 兜底） ----
+chapter03/entry/build/
+chapter03/oh_modules/
+chapter03/.hvigor/
+chapter03/.idea/
+chapter03/build/
+*.hap
+
+# ---- 系统杂项 ----
+Thumbs.db
+.DS_Store
+*.log
+
+# ---- WorkBuddy 工具内部记忆 ----
+.workbuddy/
