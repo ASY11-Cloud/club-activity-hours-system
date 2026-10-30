@@ -139,7 +139,9 @@ struct HoursReportPage {
         '_' + pad(now.getHours()) + pad(now.getMinutes()) + pad(now.getSeconds());
       const name = (this.tab === 0 ? 'hours_rank_' : 'hours_detail_') + stamp + '.csv';
       const path = ctx.filesDir + '/' + name;
-      const text = this.buildCsv();
+      // UTF-8 BOM: 不加的话 Excel(WPS 不受影响)双击打开中文全是乱码,
+      // Excel 只认带 BOM 的 UTF-8, 演示现场用 Excel 打开导出文件会非常尴尬
+      const text = '\uFEFF' + this.buildCsv();
       const file = fileIo.openSync(path, fileIo.OpenMode.CREATE | fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.TRUNC);
       fileIo.writeSync(file.fd, text);
       fileIo.closeSync(file);

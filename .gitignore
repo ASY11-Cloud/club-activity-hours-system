@@ -24,3 +24,5 @@ Thumbs.db
 .*.jpeg
 tmp_*.jpeg
 tmp_*.json
+server_orig.exe
+*.bak

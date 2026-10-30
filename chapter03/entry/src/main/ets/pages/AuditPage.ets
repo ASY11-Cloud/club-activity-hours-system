@@ -35,6 +35,7 @@ struct AuditPage {
   @State loading: boolean = false;
   @State regs: StudentRequest[] = [];
   @State msg: string = '';
+  @State msgError: boolean = false;   // msg 是否为失败提示(染红显示, 成功为灰色)
   @State busy: boolean = false;
   @State blocked: boolean = false;
   // 驳回理由: 内联填写(不可用 AlertDialog, 弹窗放不下输入框)
@@ -118,8 +119,10 @@ struct AuditPage {
       this.total = totalOf(resp);
       this.hasMore = hasMoreOf(resp);
       this.msg = '共 ' + this.total + ' 条记录(服务端筛选, 第 ' + this.page + ' 页)';
+      this.msgError = false;
     } else {
       this.msg = '拉取失败: ' + (resp['msg'] as string);
+      this.msgError = true;
     }
     this.loading = false;
   }
@@ -217,10 +220,14 @@ struct AuditPage {
         this.msg = action === 'pass'
           ? '已通过 ' + s.name + ', 自动累计学时 ' + (data['hours'] as number)
           : '已驳回 ' + s.name + ', 理由已同步给成员';
+        this.msgError = false;
         this.rejectId = -1;
         this.rejectInput = '';
       } else {
+        // 典型场景: 学生在管理员点通过前撤销了报名 —— 服务端 404 的中文原因
+        // 经 ApiClient 透传到这里, 弹 toast + 染红提示, 并刷新列表让该行消失
         this.msg = '审核失败: ' + (resp['msg'] as string);
+        this.msgError = true;
       }
       await this.reloadCurrent();
       await this.loadPendingCount();
@@ -263,6 +270,7 @@ struct AuditPage {
         const resp = await ApiClient.get('/api/signup/list?status=0&size=20&page=1');
         if (resp['code'] !== 0) {
           this.msg = '批量通过失败: ' + (resp['msg'] as string);
+          this.msgError = true;
           return;
         }
         const list: SignupInfo[] = parseSignups(resp);
@@ -272,7 +280,8 @@ struct AuditPage {
           const body: Record<string, Object> = {
             'signup_id': s.id, 'action': 'pass', 'remark': '管理员批量通过'
           };
-          const r = await ApiClient.post('/api/signup/audit', body);
+          // silent: 批量逐条调用, 失败由下方汇总统计展示, 不逐条弹 toast 刷屏
+          const r = await ApiClient.post('/api/signup/audit', body, true);
           if (r['code'] === 0) {
             ok++;
             roundOk++;
@@ -284,6 +293,7 @@ struct AuditPage {
         if (roundOk === 0) break;
       }
       this.msg = '批量通过完成: 成功 ' + ok + ' 条' + (fail > 0 ? ', 失败 ' + fail + ' 条' : '');
+      this.msgError = fail > 0;
       await this.load(true);
       await this.loadPendingCount();
     } finally {
@@ -326,8 +336,11 @@ struct AuditPage {
         this.msg = action === 'pass'
           ? '已同意 ' + r.name + ' 的注册申请, 现在可以登录了'
           : '已拒绝 ' + r.name + ' 的注册申请';
+        this.msgError = false;
       } else {
+        // 该申请可能刚被其他管理员处理过 —— 服务端原因透传展示
         this.msg = '审批失败: ' + (resp['msg'] as string);
+        this.msgError = true;
       }
       await this.loadRegs();
     } finally {
@@ -567,8 +580,10 @@ struct AuditPage {
           }.width('100%').padding({ left: 14, right: 14, bottom: 6 })
 
           Row() {
-            Text(this.msg).fontSize(Theme.fsSmall).fontColor(Theme.textTertiary)
-              .layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            Text(this.msg).fontSize(Theme.fsSmall)
+              .fontColor(this.msgError ? Theme.danger : Theme.textTertiary)
+              .fontWeight(this.msgError ? FontWeight.Medium : FontWeight.Normal)
+              .layoutWeight(1).maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
             if (this.pendingCount > 0) {
               Text(this.batchBusy ? '批量处理中...' : '全部通过(' + this.pendingCount + ')')
                 .fontSize(Theme.fsSmall).fontColor(Theme.success)

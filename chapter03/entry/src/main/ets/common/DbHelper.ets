@@ -356,6 +356,19 @@ export class DbHelper {
     await store.delete(pred);
   }
 
+  /**
+   * 清空某个学号的全部本地报名记录。
+   * 账号注销后必须调用: 否则本机仍留着该生的报名缓存, "我的报名"会显示幽灵数据。
+   * 学生自助注销: 传当前登录学号; 管理员注销: 传被注销的学号(顺带清理本机缓存)。
+   */
+  static async deleteSignupsByStu(stuNo: string): Promise<void> {
+    const store = DbHelper.rdb;
+    if (!store || stuNo === '') return;
+    const pred = new relationalStore.RdbPredicates('local_signup');
+    pred.equalTo('stu_no', stuNo);
+    await store.delete(pred);
+  }
+
   /** 删除单条本地报名记录(client_id 为唯一键) —— 全量对齐时清理服务器已不存在的陈旧记录 */
   static async deleteSignupByClientId(clientId: string): Promise<void> {
     const store = DbHelper.rdb;

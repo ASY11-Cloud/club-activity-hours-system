@@ -617,6 +617,42 @@ static string jsonOk(const Json& data) {
   return httpResponse(200, jsonDump(j));
 }
 
+// 成功但需要向用户回显具体结果(如"删除了几条数据")时使用
+static string jsonOkMsg(const string& msg, const Json& data) {
+  Json j = Json::Object();
+  j.set("code", Json::Num(0));
+  j.set("msg", Json::Str(msg));
+  j.set("data", data);
+  return httpResponse(200, jsonDump(j));
+}
+
+// ---- 破坏性操作的审计留痕 --------------------------------------------
+// 审计说明随响应头下发, 由请求日志管线摘出并写入 detail(服务器日志页可查)。
+// 刻意不用 thread_local: 本项目每个连接一个线程, MinGW 运行时在线程退出时
+// 析构 thread_local 非平凡对象会导致进程崩溃(实测"服务完一个请求即死")。
+static const char* AUDIT_HDR = "X-Audit-Note";
+
+/** 把审计说明插入响应头 */
+static string withAudit(const string& resp, const string& note) {
+  if (note.empty()) return resp;
+  size_t hp = resp.find("\r\n");            // 状态行之后插入
+  if (hp == string::npos) return resp;
+  return resp.substr(0, hp + 2) + AUDIT_HDR + ": " + note + "\r\n" + resp.substr(hp + 2);
+}
+
+/** 摘出并删除审计头(必须在发送响应前调用, 否则会暴露给客户端) */
+static string takeAudit(string& resp) {
+  const string key = string("\r\n") + AUDIT_HDR + ": ";
+  size_t p = resp.find(key);
+  if (p == string::npos) return "";
+  size_t vs = p + key.size();
+  size_t ve = resp.find("\r\n", vs);
+  if (ve == string::npos) return "";
+  string note = resp.substr(vs, ve - vs);
+  resp.erase(p, ve - p);
+  return note;
+}
+
 static string jsonErr(int code, const string& msg) {
   Json j = Json::Object();
   j.set("code", Json::Num(code));
@@ -727,7 +763,7 @@ static string handleLogin(const Json& body) {
     return jsonErr(429, "登录失败次数过多, 请 60 秒后再试");
 
   MYSQL* c = dbConnect();
-  if (!c) return jsonErr(500, "db connect failed");
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
   string err;
   QueryResult r;
   TokenInfo ti;
@@ -806,7 +842,7 @@ static string handleRegister(const Json& body) {
   if (stuNo.size() > 20 || name.size() > 50 || dept.size() > 100)
     return jsonErr(400, "字段过长");
   MYSQL* c = dbConnect();
-  if (!c) return jsonErr(500, "db connect failed");
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
   string err;
   QueryResult r;
   if (!dbQuery(c, "SELECT id,status FROM student WHERE stu_no=" + dbEscape(c, stuNo), r, err)) {
@@ -832,7 +868,7 @@ static string handleRegister(const Json& body) {
 // 注册申请列表(仅管理员): 全部待审核注册申请
 static string handleStudentRequests() {
   MYSQL* c = dbConnect();
-  if (!c) return jsonErr(500, "db connect failed");
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
   QueryResult r;
   string err;
   string sql = "SELECT id,stu_no,name,dept,card_no,DATE_FORMAT(created_at,'%Y-%m-%d %H:%i:%s') "
@@ -881,7 +917,7 @@ static string handleStudentList(const string& query) {
   if (size > 200) size = 200;
 
   MYSQL* c = dbConnect();
-  if (!c) return jsonErr(500, "db connect failed");
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
   string err;
 
   // 达标线(用于 achieved/unachieved 分组)
@@ -977,13 +1013,13 @@ static string handleStudentAudit(const Json& body) {
   if (studentId <= 0 || (action != "pass" && action != "reject"))
     return jsonErr(400, "student_id & action(pass|reject) required");
   MYSQL* c = dbConnect();
-  if (!c) return jsonErr(500, "db connect failed");
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
   string err;
   QueryResult r;
   if (!dbQuery(c, "SELECT id,status FROM student WHERE id=" + std::to_string(studentId), r, err)) {
     dbRelease(c); return jsonErr(500, err);
   }
-  if (r.rows.empty()) { dbRelease(c); return jsonErr(404, "student not found"); }
+  if (r.rows.empty()) { dbRelease(c); return jsonErr(404, "该学生不存在或已注销"); }
   if (atoi(r.rows[0][1].c_str()) != 0) { dbRelease(c); return jsonErr(400, "该申请已审核, 不能重复操作"); }
   // 条件更新(status=0) + 影响行数校验: 并发重复审核时只有一个请求生效
   std::ostringstream s;
@@ -1013,6 +1049,219 @@ static string qparam(const string& query, const string& key) {
 }
 
 // 活动列表(含报名人数): 支持分页(page/size), 管理员可带 all=1 查询含已下线活动
+// =====================================================================
+// 账号注销(学生自助 / 管理员操作)
+// 设计要点:
+//  1) signup、hours_total 都有指向 student(stu_no) 的外键且没有 ON DELETE CASCADE,
+//     直接删主表会被 MySQL 拒绝(1451) -> 必须在事务内按 子表 -> 主表 的顺序删;
+//  2) 删完必须让该学号的历史 token 立刻失效, 否则旧 token 仍能调接口(幽灵登录);
+//  3) 破坏性操作必须可审计: 注销结果写入请求日志 detail, 服务器日志页可查。
+// =====================================================================
+
+/** 学时数值转 1 位小数字符串(4.5 而不是 4.500000) */
+static string fmtHours(double v) {
+  std::ostringstream os;
+  os << std::fixed;
+  os.precision(1);
+  os << v;
+  return os.str();
+}
+
+/**
+ * 注销影响面(供二次确认弹窗如实告知, 不是"确定要注销吗"这种敷衍确认):
+ * 学生只能查自己(忽略传入 stu_no), 管理员必须指定 stu_no。
+ */
+static string handleStudentImpact(const string& query, const string& role, const string& loginStuNo) {
+  string stuNo = (role == "admin") ? qparam(query, "stu_no") : loginStuNo;
+  if (stuNo.empty()) return jsonErr(400, "stu_no required");
+
+  MYSQL* c = dbConnect();
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
+  string err;
+  QueryResult r;
+
+  if (!dbQuery(c, "SELECT name,dept,card_no,status FROM student WHERE stu_no=" + dbEscape(c, stuNo), r, err)) {
+    dbRelease(c); return jsonErr(500, err);
+  }
+  if (r.rows.empty()) { dbRelease(c); return jsonErr(404, "该学号不存在或已注销"); }
+  string name = r.rows[0][0], dept = r.rows[0][1], cardNo = r.rows[0][2];
+  int regStatus = atoi(r.rows[0][3].c_str());
+
+  // 报名统计: 总数 / 已通过 / 待审核 / 已驳回 / 已通过记录携带的学时
+  int total = 0, passed = 0, pending = 0, rejected = 0;
+  double hoursSum = 0;
+  QueryResult rs;
+  if (dbQuery(c, "SELECT COUNT(*),"
+                 "COALESCE(SUM(CASE WHEN status=1 THEN 1 ELSE 0 END),0),"
+                 "COALESCE(SUM(CASE WHEN status=0 THEN 1 ELSE 0 END),0),"
+                 "COALESCE(SUM(CASE WHEN status=2 THEN 1 ELSE 0 END),0),"
+                 "COALESCE(SUM(CASE WHEN status=1 THEN hours ELSE 0 END),0) "
+                 "FROM signup WHERE stu_no=" + dbEscape(c, stuNo), rs, err) && !rs.rows.empty()) {
+    total    = atoi(rs.rows[0][0].c_str());
+    passed   = atoi(rs.rows[0][1].c_str());
+    pending  = atoi(rs.rows[0][2].c_str());
+    rejected = atoi(rs.rows[0][3].c_str());
+    hoursSum = atof(rs.rows[0][4].c_str());
+  }
+
+  // 汇总表口径(可能因历史操作与明细不一致, 一并下发便于前端如实展示)
+  double hoursTotal = 0;
+  int signCount = 0;
+  QueryResult rh;
+  if (dbQuery(c, "SELECT total_hours,sign_count FROM hours_total WHERE stu_no=" + dbEscape(c, stuNo), rh, err)
+      && !rh.rows.empty()) {
+    hoursTotal = atof(rh.rows[0][0].c_str());
+    signCount  = atoi(rh.rows[0][1].c_str());
+  }
+  dbRelease(c);
+
+  Json d = Json::Object();
+  d.set("stu_no", Json::Str(stuNo));
+  d.set("name", Json::Str(name));
+  d.set("dept", Json::Str(dept));
+  d.set("card_no", Json::Str(cardNo));
+  d.set("reg_status", Json::Num(regStatus));
+  d.set("signup_total", Json::Num(total));
+  d.set("signup_passed", Json::Num(passed));
+  d.set("signup_pending", Json::Num(pending));
+  d.set("signup_rejected", Json::Num(rejected));
+  d.set("hours_sum", Json::Num(hoursSum));        // 由报名明细汇总
+  d.set("hours_total", Json::Num(hoursTotal));    // hours_total 表记录值
+  d.set("sign_count", Json::Num(signCount));
+  return jsonOk(d);
+}
+
+/**
+ * 事务内级联删除学生账号: signup -> hours_total -> student。
+ * 失败整体回滚, 保证"要么全删干净, 要么什么都没变"。
+ * @param nSignup       出参: 被删除的报名条数
+ * @param hoursDeleted  出参: 被删除的已认定学时合计
+ */
+static bool dbDeleteStudent(MYSQL* c, const string& stuNo,
+                            int& nSignup, double& hoursDeleted, string& err) {
+  nSignup = 0;
+  hoursDeleted = 0;
+  mysql_autocommit(c, 0);
+
+  // 锁学生行: 串行化"学生自己点注销"与"管理员同时注销"的并发请求
+  QueryResult rLock;
+  if (!dbQuery(c, "SELECT id FROM student WHERE stu_no=" + dbEscape(c, stuNo) + " FOR UPDATE", rLock, err)) {
+    mysql_rollback(c); mysql_autocommit(c, 1); return false;
+  }
+  if (rLock.rows.empty()) {
+    mysql_rollback(c); mysql_autocommit(c, 1);
+    err = "该学号不存在或已注销, 请刷新";
+    return false;
+  }
+
+  // 先统计(删除后就查不到了), 用于回显与审计
+  QueryResult rStat;
+  if (dbQuery(c, "SELECT COUNT(*),COALESCE(SUM(CASE WHEN status=1 THEN hours ELSE 0 END),0) "
+                 "FROM signup WHERE stu_no=" + dbEscape(c, stuNo), rStat, err) && !rStat.rows.empty()) {
+    nSignup = atoi(rStat.rows[0][0].c_str());
+    hoursDeleted = atof(rStat.rows[0][1].c_str());
+  }
+
+  QueryResult r;
+  // 1) 报名记录(外键指向 student 与 activity, 必须先删)
+  if (!dbQuery(c, "DELETE FROM signup WHERE stu_no=" + dbEscape(c, stuNo), r, err)) {
+    mysql_rollback(c); mysql_autocommit(c, 1); return false;
+  }
+  // 2) 学时汇总(外键指向 student, 必须先删)
+  if (!dbQuery(c, "DELETE FROM hours_total WHERE stu_no=" + dbEscape(c, stuNo), r, err)) {
+    mysql_rollback(c); mysql_autocommit(c, 1); return false;
+  }
+  // 3) 学生主表; 影响行数必须为 1, 否则说明已被并发删除
+  if (!dbQuery(c, "DELETE FROM student WHERE stu_no=" + dbEscape(c, stuNo), r, err)) {
+    mysql_rollback(c); mysql_autocommit(c, 1); return false;
+  }
+  if (mysql_affected_rows(c) != 1) {
+    mysql_rollback(c); mysql_autocommit(c, 1);
+    err = "该学号已被注销, 请刷新";
+    return false;
+  }
+
+  mysql_commit(c);
+  mysql_autocommit(c, 1);
+  return true;
+}
+
+/** 清除某个学号的全部已发 token, 返回失效数量(管理员 token 的 stu_no 是账号名, 不会被误伤) */
+static int dropStudentTokens(const string& stuNo) {
+  int n = 0;
+  std::lock_guard<std::mutex> lk(g_tokens_mtx);
+  for (auto it = g_tokens.begin(); it != g_tokens.end(); ) {
+    if (it->second.role == "student" && it->second.stu_no == stuNo) { it = g_tokens.erase(it); n++; }
+    else ++it;
+  }
+  return n;
+}
+
+/** 学生自助注销: 必须输入本人学号确认(不可逆操作, 防误触) */
+static string handleStudentCancel(const Json& body, const TokenInfo& me) {
+  if (me.role != "student")
+    return jsonErr(403, "管理员请到「用户管理」页注销学生账号");
+  string confirm = body.strVal("confirm_stu_no");
+  if (confirm.empty()) return jsonErr(400, "请输入本人学号以确认注销");
+  if (confirm != me.stu_no) return jsonErr(400, "学号不一致, 注销已取消");
+
+  MYSQL* c = dbConnect();
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
+  string err;
+  int n = 0;
+  double hrs = 0;
+  if (!dbDeleteStudent(c, me.stu_no, n, hrs, err)) { dbRelease(c); return jsonErr(409, err); }
+  dbRelease(c);
+
+  int killed = dropStudentTokens(me.stu_no);   // 含当前这次请求所用的 token
+
+  std::ostringstream note;
+  note << "AUDIT 自助注销 stu_no=" << me.stu_no << " name=" << me.name
+       << " 删除报名 " << n << " 条(" << fmtHours(hrs) << " 学时) 失效token " << killed;
+
+  Json d = Json::Object();
+  d.set("stu_no", Json::Str(me.stu_no));
+  d.set("name", Json::Str(me.name));
+  d.set("signup_deleted", Json::Num(n));
+  d.set("hours_deleted", Json::Num(hrs));
+  d.set("token_revoked", Json::Num(killed));
+  return withAudit(
+    jsonOkMsg("账号已注销: 删除报名 " + std::to_string(n) + " 条, " + fmtHours(hrs) + " 学时", d),
+    note.str());
+}
+
+/** 管理员注销指定学生账号 */
+static string handleStudentDelete(const Json& body, const TokenInfo& me) {
+  if (me.role != "admin") return needAdmin();
+  string stuNo = body.strVal("stu_no");
+  string confirm = body.strVal("confirm_stu_no");
+  if (stuNo.empty()) return jsonErr(400, "stu_no required");
+  if (confirm != stuNo) return jsonErr(400, "输入的学号与目标学生不一致, 注销已取消");
+
+  MYSQL* c = dbConnect();
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
+  string err;
+  int n = 0;
+  double hrs = 0;
+  if (!dbDeleteStudent(c, stuNo, n, hrs, err)) { dbRelease(c); return jsonErr(409, err); }
+  dbRelease(c);
+
+  int killed = dropStudentTokens(stuNo);
+
+  std::ostringstream note;
+  note << "AUDIT 管理员注销(操作者=" << me.stu_no << ") stu_no=" << stuNo
+       << " 删除报名 " << n << " 条(" << fmtHours(hrs) << " 学时) 失效token " << killed;
+
+  Json d = Json::Object();
+  d.set("stu_no", Json::Str(stuNo));
+  d.set("signup_deleted", Json::Num(n));
+  d.set("hours_deleted", Json::Num(hrs));
+  d.set("token_revoked", Json::Num(killed));
+  return withAudit(
+    jsonOkMsg("已注销 " + stuNo + ": 删除报名 " + std::to_string(n) + " 条, " + fmtHours(hrs) + " 学时", d),
+    note.str());
+}
+
 /**
  * 管理端待办统计(仅管理员): 待审报名 / 待批注册 / 今日刷卡 / 活动总数
  * 用途: 管理 Tab 角标与主界面待办横幅 —— 审核是本系统的核心动作,
@@ -1020,7 +1269,7 @@ static string qparam(const string& query, const string& key) {
  */
 static string handleStatsPending() {
   MYSQL* c = dbConnect();
-  if (!c) return jsonErr(500, "db connect failed");
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
   string err;
   QueryResult r;
   long long signupPending = 0, regPending = 0, signinToday = 0, actTotal = 0;
@@ -1054,7 +1303,7 @@ static string handleActivityList(const string& query, const string& role) {
   if (size > 200) size = 200;
 
   MYSQL* c = dbConnect();
-  if (!c) return jsonErr(500, "db connect failed");
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
   string where = withOffline ? "1=1" : "a.status=1";
   // 列表筛选全部在服务端执行, 保证 total 与筛选结果一致(前端过滤会与分页打架):
   //   scope=available 未结束且还有名额 / expired 已结束 / mine 我报名过的(不含已驳回)
@@ -1209,7 +1458,7 @@ static string handleActivityAdd(const Json& body) {
   if (!parseActivityForm(body, f, em, false)) return jsonErr(400, em);
 
   MYSQL* c = dbConnect();
-  if (!c) return jsonErr(500, "db connect failed");
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
   std::ostringstream sql;
   sql << "INSERT INTO activity SET " << activitySetSql(c, f) << ",status=1";
   string err;
@@ -1234,13 +1483,13 @@ static string handleActivityUpdate(const Json& body) {
   if (!parseActivityForm(body, f, em, true)) return jsonErr(400, em);
 
   MYSQL* c = dbConnect();
-  if (!c) return jsonErr(500, "db connect failed");
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
   string err;
   QueryResult r;
   if (!dbQuery(c, "SELECT id FROM activity WHERE id=" + std::to_string(id), r, err)) {
     dbRelease(c); return jsonErr(500, err);
   }
-  if (r.rows.empty()) { dbRelease(c); return jsonErr(404, "activity not found"); }
+  if (r.rows.empty()) { dbRelease(c); return jsonErr(404, "活动不存在或已下线"); }
   if (f.capacity > 0) {
     QueryResult rc;
     if (dbQuery(c, "SELECT COUNT(*) FROM signup WHERE activity_id=" + std::to_string(id) +
@@ -1272,7 +1521,7 @@ static string handleSignupAdd(const Json& body, const string& loginStuNo, const 
   string name = loginName;
 
   MYSQL* c = dbConnect();
-  if (!c) return jsonErr(500, "db connect failed");
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
   string err;
   QueryResult r;
 
@@ -1281,10 +1530,10 @@ static string handleSignupAdd(const Json& body, const string& loginStuNo, const 
                   "FROM activity WHERE id=" + std::to_string(activityId), r, err)) {
     dbRelease(c); return jsonErr(500, err);
   }
-  if (r.rows.empty()) { dbRelease(c); return jsonErr(404, "activity not found"); }
+  if (r.rows.empty()) { dbRelease(c); return jsonErr(404, "活动不存在或已下线"); }
   int cap = atoi(r.rows[0][1].c_str());
   int actStatus = atoi(r.rows[0][3].c_str());
-  if (actStatus != 1) { dbRelease(c); return jsonErr(400, "activity not open"); }
+  if (actStatus != 1) { dbRelease(c); return jsonErr(400, "活动未开放报名"); }
   // 已结束的活动不再接受报名(原先可对任意历史活动报名)
   long long endTs = r.rows[0][4].empty() ? 0 : parseLocalTime(r.rows[0][4]);
   if (endTs > 0 && endTs < nowMs()) { dbRelease(c); return jsonErr(400, "活动已结束, 无法报名"); }
@@ -1318,7 +1567,7 @@ static string handleSignupAdd(const Json& body, const string& loginStuNo, const 
     int cnt = atoi(r2.rows[0][0].c_str());
     if (cnt >= cap) {
       mysql_rollback(c); mysql_autocommit(c, 1); dbRelease(c);
-      return jsonErr(403, "activity full");
+      return jsonErr(403, "名额已满, 无法报名");
     }
   }
 
@@ -1345,7 +1594,7 @@ static string handleSignupAdd(const Json& body, const string& loginStuNo, const 
                     " AND status<>2", r3, err) ||
         atoi(r3.rows[0][0].c_str()) > cap) {
       mysql_rollback(c); mysql_autocommit(c, 1); dbRelease(c);
-      return jsonErr(403, "activity full");
+      return jsonErr(403, "名额已满, 无法报名");
     }
   }
   mysql_commit(c);
@@ -1392,7 +1641,7 @@ static string handleSignupList(const string& query, const string& forceStuNo) {
   }
 
   MYSQL* c = dbConnect();
-  if (!c) return jsonErr(500, "db connect failed");
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
   string cond;
   if (activityId > 0) cond += " AND s.activity_id=" + std::to_string(activityId);
   if (status >= 0)    cond += " AND s.status=" + std::to_string(status);
@@ -1468,7 +1717,7 @@ static string handleSignupAudit(const Json& body) {
     return jsonErr(400, "驳回需填写理由(至少 2 个字), 成员会看到这条理由");
 
   MYSQL* c = dbConnect();
-  if (!c) return jsonErr(500, "db connect failed");
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
   string err;
   QueryResult r;
 
@@ -1481,7 +1730,7 @@ static string handleSignupAudit(const Json& body) {
     mysql_rollback(c); mysql_autocommit(c, 1); dbRelease(c); return jsonErr(500, err);
   }
   if (r.rows.empty()) {
-    mysql_rollback(c); mysql_autocommit(c, 1); dbRelease(c); return jsonErr(404, "signup not found");
+    mysql_rollback(c); mysql_autocommit(c, 1); dbRelease(c); return jsonErr(404, "该报名已被学生撤销或不存在, 请刷新列表");
   }
   string stuNo = r.rows[0][0], name = r.rows[0][1];
   int curStatus = atoi(r.rows[0][2].c_str());
@@ -1538,7 +1787,7 @@ static string handleSignupAudit(const Json& body) {
 // 学时统计报表(排行公开给登录用户; 明细: 管理员全量 / 学生仅本人)
 static string handleHoursReport(const string& role, const string& stuNo) {
   MYSQL* c = dbConnect();
-  if (!c) return jsonErr(500, "db connect failed");
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
   QueryResult r;
   string err;
   // 学时达标线(系统配置): 报表直接给出"是否达标"结论, 而不是只给一个累计数
@@ -1603,7 +1852,7 @@ static string handleHoursReport(const string& role, const string& stuNo) {
 // 读取系统配置(登录可见): 目前只有学时达标线, 后续新增项无需改接口
 static string handleConfigGet() {
   MYSQL* c = dbConnect();
-  if (!c) return jsonErr(500, "db connect failed");
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
   QueryResult r;
   string err;
   if (!dbQuery(c, "SELECT cfg_key,cfg_value FROM sys_config", r, err)) {
@@ -1625,7 +1874,7 @@ static string handleConfigSet(const Json& body) {
   double req = body.numVal("required_hours", -1);
   if (req < 0 || req > 999) return jsonErr(400, "required_hours 应在 [0,999] 范围内(0 表示不设达标线)");
   MYSQL* c = dbConnect();
-  if (!c) return jsonErr(500, "db connect failed");
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
   std::ostringstream s;
   s << "INSERT INTO sys_config (cfg_key,cfg_value) VALUES ('required_hours','" << req << "') "
     << "ON DUPLICATE KEY UPDATE cfg_value=VALUES(cfg_value)";
@@ -1642,7 +1891,7 @@ static string handleConfigSet(const Json& body) {
 // 用途: 历史数据手工改动/异常中断导致的汇总漂移可以一键修复, 保证报表与实际认定一致。
 static string handleHoursRebuild() {
   MYSQL* c = dbConnect();
-  if (!c) return jsonErr(500, "db connect failed");
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
   string err;
   QueryResult r;
   mysql_autocommit(c, 0);
@@ -1675,7 +1924,7 @@ static string handleActivityStatus(const Json& body) {
   if (actId <= 0 || (status != 0 && status != 1))
     return jsonErr(400, "activity_id & status(0|1) required");
   MYSQL* c = dbConnect();
-  if (!c) return jsonErr(500, "db connect failed");
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
   string err;
   QueryResult r;
   if (!dbQuery(c, "UPDATE activity SET status=" + std::to_string(status) +
@@ -1688,7 +1937,7 @@ static string handleActivityStatus(const Json& body) {
     if (!dbQuery(c, "SELECT id FROM activity WHERE id=" + std::to_string(actId), chk, err)) {
       dbRelease(c); return jsonErr(500, err);
     }
-    if (chk.rows.empty()) { dbRelease(c); return jsonErr(404, "activity not found"); }
+    if (chk.rows.empty()) { dbRelease(c); return jsonErr(404, "活动不存在或已下线"); }
   }
   dbRelease(c);
   Json data = Json::Object();
@@ -1705,7 +1954,7 @@ static string handleSignupCancel(const Json& body, const string& loginStuNo) {
   if (signupId <= 0 && activityId <= 0)
     return jsonErr(400, "signup_id or activity_id required");
   MYSQL* c = dbConnect();
-  if (!c) return jsonErr(500, "db connect failed");
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
   string err;
   QueryResult r;
   string sql = signupId > 0
@@ -1741,7 +1990,7 @@ static string handleSignin(const Json& body) {
     return jsonErr(400, "card_no & activity_id required");
 
   MYSQL* c = dbConnect();
-  if (!c) return jsonErr(500, "db connect failed");
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
   string err;
   QueryResult r;
 
@@ -1749,7 +1998,7 @@ static string handleSignin(const Json& body) {
   if (!dbQuery(c, "SELECT stu_no,name FROM student WHERE card_no=" + dbEscape(c, cardNo), r, err)) {
     dbRelease(c); return jsonErr(500, err);
   }
-  if (r.rows.empty()) { dbRelease(c); return jsonErr(404, "card not bound"); }
+  if (r.rows.empty()) { dbRelease(c); return jsonErr(404, "卡号未绑定任何成员"); }
   string stuNo = r.rows[0][0], name = r.rows[0][1];
 
   // 2) 活动学时与状态(已下线/已结束活动不可刷卡认定学时)
@@ -1757,10 +2006,10 @@ static string handleSignin(const Json& body) {
                   std::to_string(activityId), r, err)) {
     dbRelease(c); return jsonErr(500, err);
   }
-  if (r.rows.empty()) { dbRelease(c); return jsonErr(404, "activity not found"); }
+  if (r.rows.empty()) { dbRelease(c); return jsonErr(404, "活动不存在或已下线"); }
   double actHours = atof(r.rows[0][0].c_str());
   int actStatus = atoi(r.rows[0][1].c_str());
-  if (actStatus != 1) { dbRelease(c); return jsonErr(400, "activity not open"); }
+  if (actStatus != 1) { dbRelease(c); return jsonErr(400, "活动未开放报名"); }
   long long endTs = r.rows[0][2].empty() ? 0 : parseLocalTime(r.rows[0][2]);
   if (endTs > 0 && endTs < nowMs()) { dbRelease(c); return jsonErr(400, "活动已结束, 不能再刷卡认定学时"); }
 
@@ -1896,7 +2145,7 @@ static string route(const HttpRequest& req) {
   if (p == "/api/health") {
     Json d = Json::Object();
     d.set("server", Json::Str("club-system-server"));
-    d.set("version", Json::Str("2.5"));
+    d.set("version", Json::Str("3.0"));
     d.set("time", Json::Str(nowStr()));
     // 数据库连通性: 验收时可直接确认"服务器在线且 MySQL 可用", 前端仍按 code==0 判在线,
     // db=false 只作为附加信息(不改变健康检查的业务 code, 避免数据库抖动时健康检查整体变红)
@@ -1961,6 +2210,25 @@ static string route(const HttpRequest& req) {
   if (req.method == "GET" && p == "/api/student/list") {
     if (me.role != "admin") return needAdmin();
     return handleStudentList(req.query);
+  }
+
+  // 注销影响面预览: 学生查自己, 管理员查指定学号(二次确认弹窗据此如实告知后果)
+  if (req.method == "GET" && p == "/api/student/impact")
+    return handleStudentImpact(req.query, me.role, me.stu_no);
+
+  // 学生自助注销: {confirm_stu_no} 必须与本人学号一致
+  if (req.method == "POST" && p == "/api/student/cancel") {
+    Json body; JsonParser jp(req.body);
+    if (!jp.parse(body) || body.t != Json::OBJ) return jsonErr(400, "bad json");
+    return handleStudentCancel(body, me);
+  }
+
+  // 管理员注销学生账号: {stu_no, confirm_stu_no}
+  if (req.method == "POST" && p == "/api/student/delete") {
+    if (me.role != "admin") return needAdmin();
+    Json body; JsonParser jp(req.body);
+    if (!jp.parse(body) || body.t != Json::OBJ) return jsonErr(400, "bad json");
+    return handleStudentDelete(body, me);
   }
 
   if (req.method == "POST" && p == "/api/student/audit") {
@@ -2157,10 +2425,12 @@ static bool serveOne(SOCKET sock, string& carry, const string& ip) {
   try {
     resp = route(req);
     status = extractCode(resp);
+    string audit = takeAudit(resp);      // 摘出注销等破坏性操作的审计说明
     detail = req.method + " " + req.path + (req.query.empty() ? "" : "?" + req.query);
+    if (!audit.empty()) detail += " | " + audit;               // 留痕
     if (detail.size() > 480) detail = detail.substr(0, 480); // 适配日志列宽
   } catch (...) {
-    resp = jsonErr(500, "internal error");
+    resp = jsonErr(500, "服务器内部错误, 请查看服务端日志");
     status = 500;
   }
   // 响应头里的 Connection 与实际行为保持一致(否则客户端等待/提前关闭)

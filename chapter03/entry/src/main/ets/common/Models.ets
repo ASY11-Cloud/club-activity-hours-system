@@ -405,3 +405,35 @@ export function csvCell(v: string): string {
   }
   return v;
 }
+
+/** 注销影响面: 供二次确认弹窗如实告知"将删除什么", 而不是只问一句"确定吗" */
+export interface CancelImpact {
+  stu_no: string;
+  name: string;
+  dept: string;
+  reg_status: number;     // 0待审核 1已通过 2已驳回
+  signup_total: number;   // 报名总条数
+  signup_passed: number;  // 其中已通过
+  signup_pending: number;
+  signup_rejected: number;
+  hours_sum: number;      // 由报名明细汇总的学时
+  hours_total: number;    // hours_total 表记录值
+}
+
+/** 解析注销影响面; 失败返回 null(学号不存在时服务端返回 404) */
+export function parseCancelImpact(resp: Record<string, Object>): CancelImpact | null {
+  const d = dataOf(resp);
+  if (d === null) return null;
+  return {
+    stu_no: strOf(d, 'stu_no'),
+    name: strOf(d, 'name'),
+    dept: strOf(d, 'dept'),
+    reg_status: numOf(d, 'reg_status'),
+    signup_total: numOf(d, 'signup_total'),
+    signup_passed: numOf(d, 'signup_passed'),
+    signup_pending: numOf(d, 'signup_pending'),
+    signup_rejected: numOf(d, 'signup_rejected'),
+    hours_sum: numOf(d, 'hours_sum'),
+    hours_total: numOf(d, 'hours_total')
+  };
+}

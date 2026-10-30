@@ -6,6 +6,8 @@ import { router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { AppConfig } from '../common/AppConfig';
 import { ApiClient } from '../common/ApiClient';
+import { DbHelper } from '../common/DbHelper';
+import { CancelImpact, parseCancelImpact } from '../common/Models';
 import { Nav } from '../common/Nav';
 import { Theme } from '../common/Theme';
 
@@ -32,6 +34,15 @@ struct SettingsPage {
   @State actIds: number[] = [0];
   @State actOptions: SelectOption[] = [{ value: '选择活动' }];
   @State actIndex: number = 0;
+
+  // ---- 注销账号(危险操作) ----
+  // 流程: 点"注销账号" -> 先拉影响面 -> 展示将删除的数据 -> 输入本人学号 -> 确认
+  @State cancelOpen: boolean = false;
+  @State cancelImpact: CancelImpact | null = null;
+  @State cancelLoading: boolean = false;
+  @State cancelInput: string = '';
+  @State cancelErr: string = '';
+  @State cancelBusy: boolean = false;
 
   aboutToAppear(): void {
     const ctx = getContext(this) as common.UIAbilityContext;
@@ -146,6 +157,53 @@ struct SettingsPage {
     this.testing = false;
   }
 
+  // ==================== 注销账号 ====================
+
+  /** 展开注销面板并拉取影响面(先让人看清"会删掉什么", 再决定) */
+  async openCancel(): Promise<void> {
+    this.cancelOpen = true;
+    this.cancelInput = '';
+    this.cancelErr = '';
+    this.cancelLoading = true;
+    const resp = await ApiClient.get('/api/student/impact');
+    this.cancelLoading = false;
+    if (resp['code'] !== 0) {
+      this.cancelErr = (resp['msg'] as string) + ' (可能是网络问题, 稍后重试)';
+      return;
+    }
+    this.cancelImpact = parseCancelImpact(resp);
+  }
+
+  /** 输入学号与本人一致才允许提交(不可逆操作, 防误触) */
+  cancelReady(): boolean {
+    return this.cancelImpact !== null && this.cancelInput.trim() === AppConfig.stuNo;
+  }
+
+  async doCancelAccount(): Promise<void> {
+    if (!this.cancelReady() || this.cancelBusy) return;
+    this.cancelBusy = true;
+    this.cancelErr = '';
+    const body: Record<string, Object> = { 'confirm_stu_no': this.cancelInput.trim() };
+    const resp = await ApiClient.post('/api/student/cancel', body);
+    this.cancelBusy = false;
+    if (resp['code'] !== 0) {
+      this.cancelErr = resp['msg'] as string;
+      return;
+    }
+    // 服务端已删干净且让 token 失效; 本机必须同步清: 报名缓存 + 会话, 否则留下幽灵数据
+    try {
+      await DbHelper.init(getContext(this) as common.UIAbilityContext);
+      await DbHelper.deleteSignupsByStu(AppConfig.stuNo);
+    } catch (e) {
+      // 本地清理失败不影响服务端注销结果, 但要让用户知道
+    }
+    await AppConfig.logout();
+    this.msg = '账号已注销';
+    setTimeout(() => {
+      Nav.resetTo('pages/LandingPage');
+    }, 600);
+  }
+
   async doLogout(): Promise<void> {
     // 先通知服务端注销 Token(立即失效, 避免旧 Token 24 小时内仍可用), 再清理本地会话
     await ApiClient.post('/api/logout', {});
@@ -220,6 +278,75 @@ struct SettingsPage {
           }
           .width('100%').padding(14).backgroundColor(Color.White).borderRadius(14).margin({ top: 10 })
 
+          // ---- 注销账号(仅普通成员): 不可逆操作, 单独成区并如实列出后果 ----
+          if (this.loggedIn && !this.isAdmin) {
+            Column({ space: 10 }) {
+              Row() {
+                Text('危险操作').fontSize(14).fontWeight(FontWeight.Medium).layoutWeight(1)
+                  .fontColor(Theme.danger)
+              }.width('100%')
+
+              if (!this.cancelOpen) {
+                Text('注销后将永久删除本账号及其报名记录与已认定学时, 且无法恢复')
+                  .fontSize(11).fontColor(Theme.textTertiary).width('100%').lineHeight(17)
+                Button('注销账号')
+                  .width('100%').height(38).fontSize(14)
+                  .fontColor(Theme.danger)
+                  .backgroundColor(Theme.dangerBg)
+                  .borderRadius(Theme.radiusSm)
+                  .onClick(() => this.openCancel())
+              } else if (this.cancelLoading) {
+                Text('正在统计将删除的数据...').fontSize(12).fontColor(Theme.textTertiary).width('100%')
+              } else if (this.cancelImpact !== null) {
+                // 如实列出影响面: 条数 / 学时 / 不可恢复
+                Column({ space: 6 }) {
+                  Text('将删除: ' + this.cancelImpact.stu_no + ' ' + this.cancelImpact.name +
+                    (this.cancelImpact.dept !== '' ? ' · ' + this.cancelImpact.dept : ''))
+                    .fontSize(12).fontWeight(FontWeight.Medium).fontColor(Theme.textBody).width('100%')
+                  Text('· 报名记录 ' + this.cancelImpact.signup_total + ' 条' +
+                    (this.cancelImpact.signup_passed > 0 ? '(其中已通过 ' + this.cancelImpact.signup_passed + ' 条)' : ''))
+                    .fontSize(11).fontColor(Theme.textSecondary).width('100%')
+                  Text('· 已认定学时 ' + this.cancelImpact.hours_sum.toFixed(1) + ' 学时')
+                    .fontSize(11).fontColor(Theme.danger).width('100%')
+                  Text('· 注销后学号可重新注册, 但原学时与报名记录不会恢复')
+                    .fontSize(11).fontColor(Theme.textTertiary).width('100%')
+                }
+                .width('100%').padding(10).backgroundColor(Theme.dangerBg).borderRadius(Theme.radiusSm)
+                .alignItems(HorizontalAlign.Start)
+
+                TextInput({ text: this.cancelInput, placeholder: '输入本人学号 ' + this.stuNo + ' 以确认' })
+                  .height(38).fontSize(13).width('100%')
+                  .onChange((v: string) => { this.cancelInput = v; this.cancelErr = ''; })
+
+                Row({ space: 10 }) {
+                  Button('取消')
+                    .layoutWeight(1).height(36).fontSize(13)
+                    .fontColor(Theme.textSecondary).backgroundColor(Theme.bgSubtle)
+                    .onClick(() => { this.cancelOpen = false; this.cancelInput = ''; this.cancelErr = ''; })
+                  Button(this.cancelBusy ? '注销中...' : '确认注销')
+                    .layoutWeight(1).height(36).fontSize(13)
+                    .backgroundColor(this.cancelReady() ? Theme.danger : Theme.bgNeutral)
+                    .fontColor(this.cancelReady() ? Theme.textOnPrimary : Theme.textDisabled)
+                    .enabled(this.cancelReady() && !this.cancelBusy)
+                    .onClick(() => this.doCancelAccount())
+                }.width('100%')
+              } else {
+                Text('无法获取账号信息').fontSize(12).fontColor(Theme.danger).width('100%')
+              }
+
+              if (this.cancelErr !== '') {
+                Text(this.cancelErr).fontSize(11).fontColor(Theme.danger).width('100%').lineHeight(17)
+              }
+            }
+            .width('100%').padding(14).margin({ top: 10 })
+            .backgroundColor(Color.White).borderRadius(14)
+            .border({ width: 1, color: Theme.dangerBg })
+          } else if (this.loggedIn && this.isAdmin) {
+            Text('管理员账号不支持自助注销; 如需注销学生账号, 请到「管理 → 用户管理」操作')
+              .fontSize(11).fontColor(Theme.textTertiary).width('100%').lineHeight(17)
+              .padding(14).margin({ top: 10 })
+              .backgroundColor(Theme.bgSubtle).borderRadius(12)
+          }
           // 刷卡调试(模拟 RFID 终端): 真实链路是 ESP32 读卡后调用 /api/signin,
           // 这里用同一个接口模拟, 答辩没带硬件也能演示"刷卡 -> 签到 -> 学时累计"
           if (this.isAdmin) {
