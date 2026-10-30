@@ -501,3 +501,100 @@ hvigorw assembleHap ...                    # BUILD SUCCESSFUL（三次构建均�
 - `#D4F5DD`/`#FFD9D2`(深底在线/离线状态文字) → 新增 `Theme.onColorSuccess`/`Theme.onColorDanger`
 
 现在全项目已无 16 进制硬编码色值（仅剩 `rgba()` 半透明叠加与 `Theme.xxx` 引用），改主色只动 Theme.ets 一处。编译通过。
+
+## 18. v2.6 账号注销功能（2026-10-28，依据工作记录重建）
+
+> 本节曾在文档覆盖事故中丢失且未提交过 git，2026-10-30 依据工作记录重建；细节以代码与 `test_cancel_api.py` 为准。
+
+### 18.1 接口（server.cpp）
+- `GET /api/student/impact`：学生查自己 / 管理员带 `stu_no`；返回 `signup_total/passed/pending/rejected`、`hours_sum/hours_total`、`reg_status`，供前端"将删除什么"如实展示。
+- `POST /api/student/cancel`：仅学生本人；`confirm_stu_no` 必须等于本人学号（不可逆防误触）。
+- `POST /api/student/delete`：仅管理员；`stu_no + confirm_stu_no` 双参数一致才执行。
+- 事务内按 **signup → hours_total → student** 顺序级联删除；`SELECT ... FOR UPDATE` 锁学生行串行化"学生自助"与"管理员同时注销"；`mysql_affected_rows != 1` 视为已被并发删除，整体回滚。
+- `dropStudentTokens(stu_no)` 清该学号全部 token（管理员 token 的 stu_no 是账号名，不会误伤）。
+- `jsonOkMsg(msg, data)` 为此新增；学号注销后可重新注册。
+
+### 18.2 审计落库机制
+处理器把说明写进**响应头 `X-Audit-Note`**，管线 `takeAudit()` 摘出拼到 `request_log.detail`（`AUDIT 自助注销/管理员注销 + 学号姓名 + 删除条数/学时/失效 token 数`），detail 上限 480 字符。
+
+### 18.3 前端
+`SettingsPage` 危险操作区（仅普通成员）→ 拉影响面 → 输本人学号 → 确认后清本地报名缓存(`DbHelper.deleteSignupsByStu`) + 退登录回引导页；`UserManagePage` 卡片右下"注销"→ 内联确认面板；`Models.ets` 新增 `StudentInfo/StudentGroupCounts/CancelImpact` 及解析函数；`Theme.ets` 新增 `onColorSuccess/onColorDanger`。
+
+### 18.4 测试与基线
+`test_cancel_api.py` 22 项（影响面、确认校验、越权、级联、旧 token 401、无孤儿、学号可复用、管理员注销）；`verify_cancel.py` 4 项（无孤儿/汇总自洽/学时总额一致/基线打印）。基线 8 活动/19 报名/5 人 20.5 学时。
+
+### 18.5 验证后清理
+`verify_v3.py` 会留测试活动：先 `DELETE signup`（JOIN activity 按标题）→ `DELETE activity` → 再调 `POST /api/hours/rebuild` 把学时按已通过报名重建回 20.5（只删记录不回滚学时会漂移）。`test_api.py` 26 项会真实审核 `ptest-audit-1` 使张三 +2.0 学时，跑完按 9.6 还原。
+
+### 18.6 thread_local 环境坑（重要，勿再踩）
+**MinGW 4.9 (TDM) 的 emutls：`thread_local` 非平凡对象在线程退出析构时崩溃**。本项目曾用 `static thread_local string g_auditNote` 传请求级审计说明 → 服务端"处理完一个请求就死"且无日志。**本项目禁止用 thread_local 传请求级状态**，改用响应头 `X-Audit-Note` + `takeAudit()`。
+A/B 定位法：`git show HEAD:server/server.cpp` 编旧版对比。**必须放 `server/` 目录编译运行**——`/tmp` 下缺 `libmysql.dll` 会 exit 127，极易误判为崩溃。
+
+## 19. 操作失败反馈体系（v3.0 阶段, 2026-10-30）
+
+### 19.1 起因与诊断
+用户报告: 管理员审核时学生已撤销报名, 点"通过"没有任何提醒。排查发现三层问题:
+1. **服务端英文消息**: `jsonErr(404, "signup not found")` 这类消息虽会透传到前端, 但用户看不懂; `db connect failed` 等 22 处同样不友好。
+2. **展示太弱**: AuditPage 失败提示和成功提示同为灰色小字(maxLines(1)), 感知不到。
+3. **401 防线失效(更严重的隐性 bug)**: 服务端约定"业务错误也走 HTTP 200, 真正 code 在 body 里", 因此 token 过期后返回的是 `HTTP 200 + {code:401}`, 而 ApiClient 只对 **HTTP 401** 清登录态 —— 该分支永远不会命中, 界面一直显示"已登录", 点什么都静默失败。
+
+### 19.2 修复内容
+- **ApiClient.ets**: ① 解析 HTTP 200 响应后若 body code==401 且本地有 token → `AppConfig.logout()`(修 401 防线); ② HTTP 4xx/5xx 时尝试解析响应体 JSON 透传服务端 msg(不再压成 "HTTP 404"); ③ **POST 失败默认弹全局 toast**(promptAction, 3s, bottom 120), 新增 `post(path, body, silentToast=false)` 第三参, 批量场景传 true 防刷屏; ④ 连接失败提示改为可操作的中文。
+- **server.cpp**: 用户可见英文消息全部中文化 —— signup not found → "该报名已被学生撤销或不存在, 请刷新列表"、activity full → "名额已满, 无法报名"、activity not open → "活动未开放报名"、activity not found → "活动不存在或已下线"、student not found、card not bound、internal error、22 处 db connect failed → "数据库连接失败, 请检查 MySQL 服务"。编程错误类(bad json 等)保留英文。注意 server.cpp 是 UTF-8, 用 Python 批量替换时带断言防止误替换。
+- **AuditPage.ets**: 新增 `msgError` 状态, 失败消息染红(danger)加粗且 maxLines(2); 批量通过逐条调用传 silent=true。
+
+### 19.3 验证
+- 场景复现 6/6: 学生报名 → 管理员拉列表 → 学生撤销 → 管理员用旧快照点通过 → 收到中文 404 提示, 学生学时/报名数无变化, 无名额泄漏。
+- 回归: test_cancel_api 22/22、verify_cancel 4/4(基线 8/19/5/20.5)、verify_demo_data 8/8。
+- HAP 构建成功(BUILD SUCCESSFUL)。
+
+### 19.4 环境坑(本轮新增)
+- Git Bash 里 `(./server.exe &)` 子 shell 后台进程**随命令结束被回收**, health 能过但下一条命令时已死, 易误判为"启动即崩"。必须用工具的 run_in_background(对应独立后台任务)或让用户双击 `start_server.bat`。
+
+
+## 20. 版本界定：项目进入 v3.0（2026-10-30）
+
+> 用户指示：往后版本号推进为 **v3.0**。此前版本已归档：`v1.0`（第一版）、`v2.0`（第二版最终版）。
+> 后续新功能一律按 **v3.x** 记版本号，不要再写 v2.9/v2.x。
+
+### 20.1 已归入 v3.0 的内容
+
+- **账号注销功能**（第三版核心，已实现并验证）：
+  - 接口：`GET /api/student/impact`（影响面预览）、`POST /api/student/cancel`（学生自助，`confirm_stu_no` 必须等于本人学号）、`POST /api/student/delete`（管理员，`stu_no + confirm_stu_no`）
+  - 机制：事务内锁学生行（串行化自助/管理员并发注销）、级联删除学生行+报名+学时、注销后旧 Token 立即失效、学号可重新注册、注销动作写请求日志审计（`AUDIT 自助注销 / 管理员注销`）
+  - 前端：`SettingsPage.ets` 学生自助注销、`UserManagePage.ets` 管理员注销，二次确认弹窗展示影响面
+  - 测试：`test_cancel_api.py` 22/22、`verify_cancel.py` 4/4
+- **操作失败反馈体系**（第 19 节）：ApiClient body `code==401` 清会话、全局 toast、服务端 22 处消息中文化、AuditPage 错误红字加粗
+
+### 20.2 文档状态（交接方已恢复，勿再整体覆盖）
+
+- `README.md`、`VERSION.md`、`使用说明文档.docx` 曾被删除，已从 git 历史恢复
+- 本文件 1–17 节曾被覆盖丢失（只剩 19 节），已合并恢复：现含 **1–17 + 19 + 20 节**
+- **写文档请追加而非整体覆盖**，覆盖会丢历史；改 HANDOFF 前先读尾部确认最新节号
+
+### 20.3 版本约定
+
+- 版本说明统一维护在根目录 `VERSION.md`（含 v2.0 归档说明与 v3.0 实现记录）
+- 破坏性数据操作（注销/物理删除）必须写审计日志并在 HANDOFF 记明影响面
+
+## 21. P1/P2 并发权限专项验收 + CSV BOM 修复（v3.0 阶段, 2026-10-30）
+
+### 20.1 起因
+外部评审建议(豆包)列出测试方向矩阵。评估后: 部分已覆盖(注销已有 22 项、并发审核已有防护)、部分过时("注销未实现"已不成立), 可接口化的高价值项集中为 P1 并发/权限 + P2 状态机边界。
+
+### 20.2 新增 server/test_p1p2.py —— 26 项, 自建自清理不动演示基线
+P1: 越权矩阵(学生 token 打 7 个管理接口全 403) / 伪造 stu_no(body 塞别人学号被忽略, 归属登录者) /
+满员竞态(容量 1 两学生并发恰 1 成, valid_count<=1) / 并发重复审核(2 路并发恰 1 成, 学时恰好 +2.0 一次) /
+刷卡 5 连刷(学时只加一次, 单条已通过记录) / 未绑卡 404 / 登出后旧 token 401 / 随机 token 401。
+P2: 已结束活动拒报名 / 已下线拒报名 / 结束<=开始发布被拒(等号也拒) / 编辑允许历史时间 /
+已通过不可撤销 / 驳回存备注→重报复位待审且备注清空 / 容量 0 不限 / 达标线 999 全员未达标→恢复 0 / 分页 total 与行数一致。
+结果: 26/26 通过。注意登录节流按 type:account 内存计数, 未在本脚本测(会锁 60s, 接口已确认存在: 761 行 429)。
+
+### 20.3 CSV BOM 修复(豆包怀疑属实)
+HoursReportPage.exportCsv 原样写 UTF-8 无 BOM, Excel 双击打开中文乱码(WPS 正常)。
+修复: `const text = '\uFEFF' + this.buildCsv()`。HAP 重新构建通过。
+
+### 20.4 结论: 服务端并发与权限防护全部有效
+报名(活动行 FOR UPDATE+插入后复检) / 审核(报名行 FOR UPDATE+条件 UPDATE+affected_rows) /
+刷卡(needAccumulate 仅首次认定) / 鉴权(每个管理接口 needAdmin) / stu_no 一律取登录态。
+演示前回归清单: verify_demo_data(8) + verify_cancel(4) + verify_ui_contract(48) + test_p1p2(26)。
