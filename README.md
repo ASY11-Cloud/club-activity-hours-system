@@ -35,8 +35,10 @@
 MySQL 8.0 (club_system: admin_user / student / activity / signup / hours_total / request_log / sys_config)
 ```
 
-- 双角色权限：**管理员**（发布 / 审核 / 学时全量 / 服务器日志）与**普通成员**（报名 / 我的报名 / 本人学时），服务端 Token 统一校验 + App 页面级守卫；登录支持**失败节流**（同账号 60 秒内失败 5 次临时拒绝，防口令暴力猜测），退出登录同时**注销服务端 Token**
+- 双角色权限：**管理员**（发布 / 审核报名与注册 / 用户管理 / 学时全量 / 服务器日志）与**普通成员**（报名 / 我的报名 / 本人学时 / 注销本人账号），服务端 Token 统一校验 + App 页面级守卫；登录支持**失败节流**（同账号 60 秒内失败 5 次临时拒绝，防口令暴力猜测），退出登录同时**注销服务端 Token**
 - 数据一致性三层保证：本地唯一 `client_id` 幂等 + 服务端唯一键（`uk_client`、`uk_act_stu`）去重 + 事务化容量 / 学时累计（审核、刷卡均为“锁行 + 条件更新 + 影响行数校验”）
+- 账号注销：学生自助 / 管理员代注销，事务级联删除报名 + 学时 + 账号，回收全部 Token，审计留痕，学号可复用
+- 失败可解释：所有写操作失败均返回中文原因并弹 toast，登录失效自动清会话（详见 HANDOFF 第 19 节）
 
 ## 目录结构
 
@@ -44,20 +46,25 @@ MySQL 8.0 (club_system: admin_user / student / activity / signup / hours_total /
 chapter03/
 ├── chapter03/                 # 鸿蒙工程（DevEco Studio 打开此目录）
 │   └── entry/src/main/ets/    # 页面与数据层源码
-│       ├── common/            # ApiClient / AppConfig / DbHelper / Models / GuardViews / Nav
-│       └── pages/             # 引导页、登录注册、主界面(活动/管理/我的 Tab)、详情、发布/编辑、审核、学时报表、日志、设置
+│       ├── common/            # ApiClient / AppConfig / DbHelper / Models / GuardViews / Nav / Theme
+│       └── pages/             # 引导页、登录注册、主界面(活动/管理/我的 Tab)、详情、发布/编辑、审核(报名+注册)、用户管理、学时报表、日志、设置
 ├── server/                    # 自主 C++ Web 服务器
 │   ├── server.cpp             # 全部服务端逻辑（含解析、校验、Token、事务、日志）
 │   ├── init_db.sql            # MySQL 建库建表 + 演示数据
 │   ├── rename_demo_users.sql  # 演示姓名真实化的一次性迁移脚本（已运行，可留档）
-│   ├── test_api.py            # 26/26 回归测试
-│   ├── verify_demo_data.py    # 演示数据一致性校验（8 项）
+│   ├── start_server.bat       # 一键启动（自检 MySQL → server.exe 8000），日常推荐
+│   ├── test_api.py            # 26/26 回归测试（会真实审核，跑完需还原）
+│   ├── test_cancel_api.py     # 注销接口 22 项（自建自清理）
+│   ├── test_p1p2.py           # 并发与权限 26 项（自建自清理）
+│   ├── verify_demo_data.py    # 演示数据一致性校验（8 项，只读）
+│   ├── verify_cancel.py       # 注销后数据一致性（4 项，只读）
 │   ├── verify_v3.py           # 服务端新功能回归（34 项）
 │   ├── verify_ui_contract.py  # App 读取字段契约测试（48 项）
 │   └── build.bat              # 编译脚本
 ├── esp32_rfid/rfid_esp32.ino  # ESP32 + MFRC522 刷卡签到固件
-├── docs/使用说明.md            # 操作手册与验收流程（可读版）
-├── HANDOFF.md                 # 本轮改动交接（改了什么 / 为什么 / 怎么验）
+├── docs/使用说明.md            # 操作手册与验收流程（可读版，与 docx 同源）
+├── HANDOFF.md                 # 改动交接（改了什么 / 为什么 / 怎么验）
+├── VERSION.md                 # 版本演进（v1.0 → v2.0 → v3.0）
 └── 使用说明文档.docx           # 使用说明 Word 版（含验收演示流程与 FAQ）
 ```
 
@@ -67,10 +74,14 @@ chapter03/
 2. 编译服务端：运行 `server\build.bat`（自动探测可用的 g++，`-std=c++14`；本机 PATH 中的 MinGW 若为 win32 线程模型会因缺少 `std::thread` 被自动跳过，实际使用 Dev-C++ 自带 TDM g++），运行 `server.exe`（监听 0.0.0.0:8000）
 3. 构建鸿蒙 App：`hvigorw assembleHap --mode module -p product=default --no-daemon`，产物 `entry-default-unsigned.hap`
 4. 安装运行：`hdc install -r entry-default-unsigned.hap`，模拟器默认服务器地址 `10.0.2.2:8000`
-5. 回归测试：`python server\test_api.py`（默认不改动演示数据；如需重置数据加 `--reset`）
-   - `python server\verify_demo_data.py 8000` 演示数据一致性
+5. 回归测试（**演示前建议全跑一遍**）：
+   - `python server\verify_demo_data.py` 演示基线（8 活动 / 19 报名 / 5 人 / 20.5 学时，只读）
+   - `python server\verify_cancel.py` 注销后数据一致性（无孤儿 / 汇总相符，只读）
+   - `python server\verify_ui_contract.py` App 读取字段契约（48 项，只读）
+   - `python server\test_p1p2.py` 并发与权限专项（26 项，越权 / 满员竞态 / 重复审核 / 刷卡连刷，自建自清理）
+   - `python server\test_cancel_api.py` 注销接口全链路（22 项，自建自清理）
+   - `python server\test_api.py` 基础回归（**会真实审核 `ptest-audit-1`，跑完需按 HANDOFF 9.6 还原**）
    - `python server\verify_v3.py 8000` 服务端新功能（会创建并清理测试活动）
-   - `python server\verify_ui_contract.py 8000` App 读取字段契约
 
 ## 接口一览（自主 C++ 服务器）
 

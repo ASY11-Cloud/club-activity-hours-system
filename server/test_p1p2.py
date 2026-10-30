@@ -87,7 +87,9 @@ a1 = add_act(at, 'P1满员竞态', dt(minutes=5), dt(days=2), capacity=1)
 a2 = add_act(at, 'P1容量不限', dt(minutes=5), dt(days=2), capacity=0)
 a3 = add_act(at, 'P2已结束', dt(minutes=5), dt(days=2), capacity=10)
 a4 = add_act(at, 'P1刷卡重复', dt(minutes=1), dt(days=2), capacity=10)
-check('setup activities created', None not in (a1, a2, a3, a4))
+# A5 专用于"驳回后重报": 独立活动且不限人数, 避免复用 a1(容量 1 已被竞态测试占位)造成偶发失败
+a5 = add_act(at, 'P2驳回重报', dt(minutes=5), dt(days=2), capacity=0)
+check('setup activities created', None not in (a1, a2, a3, a4, a5))
 # A3 通过"编辑"改为过去时间段(编辑允许历史时间, 发布不允许 —— 本身就是一条 P2 用例)
 _, r = api('/api/activity/update', {'activity_id': a3, 'title': 'P2已结束', 'content': '',
                                     'location': '测试场地', 'start_time': dt(days=-3),
@@ -205,13 +207,13 @@ try:
                                      'end_time': dt(days=1), 'hours': 1.0, 'capacity': 0,
                                      'publisher': '系统管理员'}, token=at)
     check('end==start rejected on publish', r['code'] == 400, r.get('msg', ''))
-    # 12) 驳回后重报: 状态复位待审 + 旧备注清空
-    _, r = api('/api/signup/add', {'client_id': 'rej-1', 'activity_id': a1}, token=tB)
-    rid = int(sql("SELECT id FROM signup WHERE activity_id=%d AND stu_no='2029102'" % a1))
+    # 12) 驳回后重报: 状态复位待审 + 旧备注清空 (用独立活动 a5, 不复用竞态活动)
+    _, r = api('/api/signup/add', {'client_id': 'rej-1', 'activity_id': a5}, token=tB)
+    rid = int(sql("SELECT id FROM signup WHERE activity_id=%d AND stu_no='2029102'" % a5))
     api('/api/signup/audit', {'signup_id': rid, 'action': 'reject', 'remark': '理由不充分测试'}, token=at)
     rmk = sql("SELECT remark FROM signup WHERE id=%d" % rid)
     check('reject stores remark', '不充分' in rmk, rmk)
-    _, r = api('/api/signup/add', {'client_id': 'rej-2', 'activity_id': a1}, token=tB)
+    _, r = api('/api/signup/add', {'client_id': 'rej-2', 'activity_id': a5}, token=tB)
     check('re-signup after reject ok', r['code'] == 0, r.get('msg', ''))
     # 重报后复位待审; remark 清空(mysql CLI 对行尾空列可能不输出, 空串/NULL 均视为已清)
     parts = sql("SELECT status,remark FROM signup WHERE id=%d" % rid).split('\t')
@@ -238,7 +240,7 @@ finally:
     # ---------- 清理: 删学生(级联删报名/学时) + 删测试活动 ----------
     for no, name, card in STU:
         api('/api/student/delete', {'stu_no': no, 'confirm_stu_no': no}, token=at)
-    ids = ','.join(str(x) for x in (a1, a2, a3, a4) if x)
+    ids = ','.join(str(x) for x in (a1, a2, a3, a4, a5) if x)
     sql("DELETE FROM activity WHERE id IN (%s)" % ids)
     sql("DELETE FROM sys_config WHERE 1=0")  # no-op, 保持连接习惯
     left = sql("SELECT COUNT(*) FROM student WHERE stu_no LIKE '20291%'")
