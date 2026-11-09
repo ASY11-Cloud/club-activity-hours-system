@@ -65,9 +65,13 @@ chapter03/
 │   ├── verify_cancel.py       # 注销后数据一致性（7 项，只读）
 │   ├── verify_v3.py           # 服务端新功能回归（45 项）
 │   ├── verify_ui_contract.py  # App 读取字段契约测试（53 项）
+│   ├── testdata_seed.sql      # 边界测试数据（id≥9000 / 学号 T9xxx，与基线隔离）
+│   ├── testdata_clean.sql     # 测试数据清理（幂等，清理后基线复原）
+│   ├── verify_test_data.ps1   # 结构/落库/接口/基线 四阶段核验（83 项，无 Python 可用）
 │   └── build.bat              # 编译脚本
 ├── esp32_rfid/rfid_esp32.ino  # ESP32 + MFRC522 刷卡签到固件
 ├── docs/使用说明.md            # 操作手册与验收流程（可读版，与 docx 同源）
+├── docs/数据一致性核验-v3.2.md # 测试数据设计与 83 项核验结果、两处边界缺陷修复记录
 ├── HANDOFF.md                 # 改动交接（改了什么 / 为什么 / 怎么验）
 ├── VERSION.md                 # 版本演进（v1.0 → v2.0 → v3.0 → v3.1 → v3.2）
 └── 使用说明文档.docx           # 使用说明 Word 版（v3.2，含分类规则 / 签到码 / 预警 / 深色章节 与验收 FAQ）
@@ -87,6 +91,7 @@ chapter03/
    - `python server\test_cancel_api.py` 注销接口全链路（30 项，含名额回补，自建自清理）
    - `python server\test_api.py` 基础回归（**会真实审核 `ptest-audit-1`，跑完需按 HANDOFF 9.6 还原**）
    - `python server\verify_v3.py 8000` 服务端新功能（会创建并清理测试活动）
+   - **无 Python 时的数据核验**：依次执行 `testdata_seed.sql` → `verify_test_data.ps1 -Stage schema/seed` → 重启服务端 → `-Stage api` → `testdata_clean.sql` → `-Stage baseline`（83 项，见 `docs/数据一致性核验-v3.2.md`）
 
 ## 接口一览（自主 C++ 服务器）
 

@@ -2761,19 +2761,22 @@ static string handleSigninOut(const Json& body, const TokenInfo& me) {
   if (!dbQuery(c, "UPDATE signup SET signout_at=NOW() WHERE id=" + std::to_string(signupId), r, err))
     return fail(500, err);
 
-  // 折算规则: 实际在场 / 计划时长, 上限 1.0, 下限 0.5 学时(到场即认定, 不允许 0)
+  // 折算规则: 实际在场 / 计划时长, 上限 1.0; 按 0.5 学时步进取整, 下限 0.5(到场即认定)。
+  // 仅在"计划时长 > 0 且活动本身有学时"时生效:
+  //   - 0 学时活动(导入/历史数据)不能因为下限被抬成 0.5, 否则等于凭空发学时;
+  //   - 零时长活动(start=end)没有计划时长, 折算没有意义, 保留审核时的学时。
   double newHours = curHours;
   double minutes = 0;
-  if (checkedTs > 0 && sTs > 0 && eTs > sTs) {
+  if (checkedTs > 0 && sTs > 0 && eTs > sTs && actHours > 0) {
     double planned = (double)(eTs - sTs) / 60000.0;
     double actual  = (double)(now - checkedTs) / 60000.0;
     if (actual < 0) actual = 0;
     if (actual > planned) actual = planned;
     minutes = actual;
     newHours = actHours * (planned > 0 ? actual / planned : 1.0);
-    if (newHours > actHours) newHours = actHours;
-    newHours = roundHours(newHours);
+    newHours = std::floor(newHours * 2.0 + 0.5) / 2.0;   // 0.5 步进
     if (newHours < 0.5) newHours = 0.5;
+    if (newHours > actHours) newHours = actHours;
   }
 
   if (st == 1 && fabs(newHours - curHours) >= 0.05) {

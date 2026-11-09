@@ -967,3 +967,56 @@ SELECT a.title FROM signup s JOIN activity a ON s.activity_id=a.id
 - **接口只增不改**：`verify_ui_contract.py` 已放行并断言 `category` / `taken` / `signout_at` 类型；
 - **文档四处同步**：`docs/使用说明.md` §5.3/5.5/5.6/5.7/5.13/5.14、`README.md` 功能与接口表、`VERSION.md` v3.2 段与 v4 待办、本文件 §27/§28；`使用说明文档.docx` 由 md 重新生成；
 - **本轮实测**：服务端零警告编译 + 常驻 8000；PowerShell 冒烟 22 项全绿（冲突 409 / taken 自洽 / 签到码 / 签退折算 / 类别上限 / 预警权限 / 基线）；App `assembleHap` BUILD SUCCESSFUL 0 error。本机 `python` 仍是 Store 存根，7 个 Python 脚本未实跑，逻辑已按实测接口口径对齐。
+
+## 29. v3.2 补丁：边界测试数据 + 数据一致性核验（2026-11-09）
+
+### 29.1 为什么要单独造测试数据
+
+演示库只有 19 条"好数据"：全部合法类别、全部正常时间、`taken` 全对、`category` 全非空。这种数据**测不出** v3.2 新增的兼容分支（老快照为空、时间缺失、0 学时、满员、漂移计数）。因此新增一套**与基线隔离**的测试数据集，把边界一次性压出来。
+
+隔离靠命名空间，不靠"记得删"：
+
+| 表 | 测试命名空间 |
+|---|---|
+| activity | id 9001–9010 |
+| student | 学号 `T9001`–`T9008` |
+| signup | id 9001–9010、`client_id` 前缀 `tdata-` |
+| hours_total | 学号 `T9%` |
+
+`testdata_clean.sql` 只按这四个条件删，并复位自增与 `rule.skill.*`，所以**清理后必然回到基线**（已用 14 项断言复核）。
+
+### 29.2 测试数据覆盖了什么
+
+10 个活动分别对应：0 学时+不限容量、满员（capacity=2 已占 2）、时间窗 NULL、已结束、已下线、零时长（start=end）、特殊字符/emoji/4 字节标题、4.5 学时大额、时间重叠 A/B。8 个学生覆盖：正常、待审核、已驳回、长姓名、无班级、零学时、学时临界、小写卡号。10 条报名覆盖：三种状态、刷卡签到未签退、零时长已签到、类别快照为空（2 条）、冲突基准。
+
+另外**故意把 7 个活动的 `taken` 写错**（99 和 0），用来验证 `dbEnsureSchema` 的启动对账——这是"漏改点长期漂移"的唯一兜底。
+
+### 29.3 执行顺序（关键：重启在 seed 与 api 之间）
+
+```
+testdata_seed.sql
+verify_test_data.ps1 -Stage schema   # 11 项
+verify_test_data.ps1 -Stage seed     # 10 项（确认漂移/空快照确实入库）
+restart server.exe                   # 触发 taken 对账 + category 回填
+verify_test_data.ps1 -Stage api      # 48 项（真实接口打全部边界）
+testdata_clean.sql
+verify_test_data.ps1 -Stage baseline # 14 项（基线复原）
+```
+
+### 29.4 核验结果与两处修复
+
+83 项断言全绿。过程中确认了两个**真实缺陷**（不是测试脚本写错）：
+
+1. **0 学时活动签退凭空发 0.5 学时**：折算先算 0，再被"下限 0.5"抬走。修法：折算条件加 `actHours > 0`；导入/历史 0 学时活动签退后保持 0。
+2. **签退折算步进与文档不一致**：文档写"0.5 学时步进"，代码用 `roundHours()`（0.1）。修法：`floor(x*2+0.5)/2` 后再夹 `[0.5, 活动学时]`；用例把签到时间前移 50 分钟，4.5×50/120=1.875 → **2.0**（旧实现会记 1.9）。
+
+其余"异常"经核实都是预期行为：`taken` 漂移被启动修正、空类别快照被回填、`remaining=-1` 表示不限、零时长活动不折算。
+
+### 29.5 本机没有 Python 的替代方案
+
+`python` 是 Microsoft Store 存根（`python -V` → 9009），所以核验入口写成 `verify_test_data.ps1`：用 `mysql.exe` 直查 + `Invoke-RestMethod` 打接口。踩坑两条（后来者直接抄结论）：
+
+- PowerShell 5.1 读**无 BOM 的 UTF-8 脚本**会按 ANSI 解析，中文断言串直接导致语法错误 → `.ps1` 必须存 UTF-8 **BOM**；
+- 函数返回单个字符串时 `$rows[0]` 取到的是**首字符**（不是首行）→ 先 `@()` 包一层再 `[string]`，否则 `COUNT(*)=10` 会被读成 `1`。
+
+报告全文：`docs/数据一致性核验-v3.2.md`。
