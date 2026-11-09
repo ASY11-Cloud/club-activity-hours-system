@@ -26,6 +26,7 @@ CREATE TABLE admin_user (
 -- ---------------------------------------------------------------------
 -- 1. 学生表
 -- ---------------------------------------------------------------------
+DROP TABLE IF EXISTS appeal;
 DROP TABLE IF EXISTS request_log;
 DROP TABLE IF EXISTS hours_total;
 DROP TABLE IF EXISTS signup;
@@ -106,6 +107,29 @@ CREATE TABLE hours_total (
   updated_at  DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   CONSTRAINT fk_hours_student FOREIGN KEY (stu_no) REFERENCES student(stu_no)
 ) ENGINE=InnoDB COMMENT='学时汇总表';
+
+-- ---------------------------------------------------------------------
+-- 4.5 学时申诉表 (v4.0): 学生对已通过认定发起申诉, 管理员复核并调整学时
+--     同一报名同时只允许一条待处理申诉(由学生行锁串行化 + 业务校验保证)
+-- ---------------------------------------------------------------------
+CREATE TABLE appeal (
+  id           INT AUTO_INCREMENT PRIMARY KEY,
+  stu_no       VARCHAR(20)  NOT NULL COMMENT '申诉人学号',
+  signup_id    INT          NOT NULL COMMENT '被申诉的报名记录',
+  reason       VARCHAR(500) NOT NULL COMMENT '申诉理由',
+  status       TINYINT      NOT NULL DEFAULT 0 COMMENT '0待处理 1已通过 2已驳回',
+  reply        VARCHAR(500) NOT NULL DEFAULT '' COMMENT '管理员答复/驳回原因',
+  hours_before DECIMAL(5,1) NOT NULL DEFAULT 0 COMMENT '申诉前认定学时',
+  hours_after  DECIMAL(5,1) NULL COMMENT '复核后认定学时(驳回为空)',
+  created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+  handled_at   DATETIME NULL,
+  handler      VARCHAR(50) NOT NULL DEFAULT '' COMMENT '处理人',
+  KEY idx_stu (stu_no),
+  KEY idx_status (status),
+  KEY idx_signup (signup_id),
+  CONSTRAINT fk_appeal_signup  FOREIGN KEY (signup_id) REFERENCES signup(id),
+  CONSTRAINT fk_appeal_student FOREIGN KEY (stu_no)    REFERENCES student(stu_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='学时申诉表(v4.0)';
 
 -- ---------------------------------------------------------------------
 -- 5. 服务端请求日志表 (服务器控制台/接口实时可查)

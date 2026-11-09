@@ -1020,3 +1020,63 @@ verify_test_data.ps1 -Stage baseline # 14 项（基线复原）
 - 函数返回单个字符串时 `$rows[0]` 取到的是**首字符**（不是首行）→ 先 `@()` 包一层再 `[string]`，否则 `COUNT(*)=10` 会被读成 `1`。
 
 报告全文：`docs/数据一致性核验-v3.2.md`。
+
+## 30. v4.0：申诉闭环 / 规则可视化 / 异常检测（2026-11-09）
+
+计划见 `docs/V4-PLAN.md`，验收脚本 `server/verify_v4.ps1`（45 项全绿）。三件事都围绕"学时认定可信"，不引入新依赖。
+
+### 30.1 学时申诉：为什么不是简单加一张表
+
+- **并发**：`appeal/add` 与 `appeal/audit` 都按"学生行 → 申诉/报名行"加锁，和报名/审核同序，避免 ABBA；处理用 `UPDATE ... WHERE status=0` + 影响行数判断，两位管理员同时点只生效一次（实测第二次返回 409）。
+- **调学时**：通过后不是"总额 += 差额"，而是按该生 `signup` 明细 **重算** `hours_total`（`INSERT ... SELECT SUM(hours) ... ON DUPLICATE KEY UPDATE`）。差额法在历史已漂移时会放大误差，重算法自带修复。
+- **重复申诉**：没建 `(signup_id,status)` 唯一键——那会让"驳回后再次申诉"永远失败。改为学生行锁串行化 + `SELECT ... WHERE signup_id=? AND status=0` 预检；并发后到者拿 409。
+- **App 本地没有服务端 signup.id**：`LocalSignup.id` 是本地自增。申诉前用 `/api/signup/list?activity_id=` 查本人已通过记录拿服务端 id，避免改本地库结构。
+
+### 30.2 规则接口：先校验后落库
+
+`handleConfigSet` 原实现只认 `required_hours`，且默认值 `-1` 会让"只传 rules"的请求直接 400。重写后：
+
+- `required_hours` 与 `rules` 均可选，但至少给一个；
+- 所有类别/规则项/数值先校验进内存 `vector<KV>`，全通过才开事务逐条 upsert；
+- 这样不存在"前 3 类改了、第 4 类报错"的半配置状态；
+- `GET` 保留原来的平铺 `rule.<cat>.<key>`（老客户端），新增结构化 `rules`（新客户端）。
+
+### 30.3 异常检测：一个 SQL 模式的坑
+
+批量签到最初写成：
+
+```sql
+GROUP BY a.id, FLOOR(UNIX_TIMESTAMP(s.checked_at)/600)
+```
+
+`only_full_group_by` 报 1055：SELECT 里的 `DATE_FORMAT(FROM_UNIXTIME(FLOOR(...)))` 与 GROUP BY 表达式被认为"不等价"。改成 `SELECT ... AS w ... GROUP BY a.id,w` 即可（MySQL 允许按别名分组）。**dbQuery 失败时该段会静默为空**，所以第一次跑验收是 43/45，批量签到用例把这个问题抓了出来。
+
+同样值得记住的还有建表坑：`appeal` 最初写 `DEFAULT CHARSET=utf8mb4`，而 `student` 是库级 `utf8mb4_unicode_ci`，外键直接报 **3780 incompatible**。显式写 `COLLATE=utf8mb4_unicode_ci` 才通过；`dbEnsureSchema` 的建表失败是静默的，靠验收脚本查表存在性才发现。
+
+### 30.4 App 侧改动
+
+| 页面 | 改动 |
+|---|---|
+| `MySignupPage` | 已通过记录增加"学时申诉"内联输入与状态回显；进页面拉一次申诉列表 |
+| `AuditPage` | 新增第三个模式"学时申诉"：待处理角标、通过面板（可填 0~活动学时）、驳回面板（必填理由）、已处理结果 |
+| `SettingsPage` | 管理员"学时规则"卡片：七大类 × 两列输入，前端先校验 0~999 整数再提交 |
+| `HoursReportPage` | 新增"异常检测"页签：三个计数块 + 三类明细 + CSV 导出 |
+| `Models.ets` | `AppealInfo` / 三类异常接口与解析函数 |
+
+App 构建 `assembleHap` 0 error；UI 未在模拟器实测（本轮无设备），逻辑与接口字段已由 `verify_v4.ps1` 覆盖。
+
+### 30.5 文档工具的变化
+
+`tools/md2docx.ps1` 已从"Word COM + HTML"改为**纯 OOXML 打包**（ZipArchive）。原因：Word 在非交互会话里会卡在隐藏对话框，进程存活但永远不产出文件（本次连续复现两次）。新实现秒级完成、可重复，输出含 Heading 样式、表头深蓝底、隔行浅底、代码块灰底与页脚页码。**md 改完直接跑脚本重建 docx**：
+
+```bat
+powershell -ExecutionPolicy Bypass -File tools\md2docx.ps1 -Md docs\使用说明.md -Docx 使用说明文档.docx
+```
+
+### 30.6 验收结果
+
+- `verify_v4.ps1`：权限 6 + 申诉 14 + 规则 8 + 异常 6 + 清理/基线 11 = **45 项全绿**；
+- 申诉用例覆盖：越权（管理员发起、学生处理）、他人报名、理由过短、重复待处理、通过调学时、汇总重算、重复处理、驳回必填理由、驳回不改学时；
+- 规则用例覆盖：结构化下发、七大类齐全、未知类别/负数拒绝、设置 1.5 后审核裁剪到 1.5、复位 0；
+- 异常用例覆盖：5 条 10 分钟内签到命中 burst、30 小时未签退命中、学时 5>4 命中；清理后异常归零；
+- 基线：8 活动 / 19 报名 / 5 人 / 20.5 学时 / 李铭 5.5 / 待审 3。

@@ -12,7 +12,8 @@ import { AppConfig } from '../common/AppConfig';
 import { AdminGuardView } from '../common/GuardViews';
 import {
   SignupInfo, parseSignups, statusText, StudentRequest, parseStudentRequests,
-  ActivityInfo, parseActivities, totalOf, hasMoreOf, categoryText
+  ActivityInfo, parseActivities, totalOf, hasMoreOf, categoryText,
+  AppealInfo, parseAppeals
 } from '../common/Models';
 import { Theme } from '../common/Theme';
 import { TimeFmt } from '../common/TimeFmt';
@@ -45,6 +46,16 @@ struct AuditPage {
   @State rejectInput: string = '';
   @State pendingCount: number = 0;   // 待审报名总数, 用于"全部通过(N)"
   @State batchBusy: boolean = false;
+  // ---- v4.0 学时申诉 ----
+  @State appeals: AppealInfo[] = [];
+  @State appealTotal: number = 0;
+  @State appealPending: number = 0;
+  @State appealFilter: number = 0;      // 默认只看待处理
+  @State appealBusy: boolean = false;
+  @State apPanelId: number = -1;        // 正在处理(展开输入)的申诉 id
+  @State apPanelAction: string = '';    // pass | reject
+  @State apReply: string = '';
+  @State apHours: string = '';
   private readonly PAGE_SIZE: number = 20;
 
   aboutToAppear(): void {
@@ -58,6 +69,7 @@ struct AuditPage {
       this.load(true);
       this.loadRegs();
       this.loadPendingCount();
+      this.loadAppeals();
     }).catch((e: Error) => {
       this.msg = '初始化失败: ' + e.message;
     });
@@ -68,6 +80,7 @@ struct AuditPage {
       this.load(true);
       this.loadRegs();
       this.loadPendingCount();
+      this.loadAppeals();
     }
   }
 
@@ -77,6 +90,76 @@ struct AuditPage {
     if (resp['code'] !== 0) return;
     const d = resp['data'] as Record<string, Object>;
     this.pendingCount = Number(d['signup_pending']);
+  }
+
+  // ==================== v4.0 学时申诉 ====================
+
+  async loadAppeals(): Promise<void> {
+    let q = '/api/appeal/list?page=1&size=50';
+    if (this.appealFilter >= 0) q += '&status=' + this.appealFilter.toString();
+    const resp = await ApiClient.get(q);
+    if (resp['code'] === 0) {
+      this.appeals = parseAppeals(resp);
+      this.appealTotal = totalOf(resp);
+    }
+    const p = await ApiClient.get('/api/appeal/list?status=0&page=1&size=1');
+    if (p['code'] === 0) this.appealPending = totalOf(p);
+  }
+
+  pendingAppeals(): number {
+    let n = 0;
+    for (const a of this.appeals) if (a.status === 0) n++;
+    return n;
+  }
+
+  startAppealAudit(a: AppealInfo, action: string): void {
+    this.apPanelId = a.id;
+    this.apPanelAction = action;
+    this.apReply = '';
+    this.apHours = a.signup_hours.toString();
+    this.msg = '';
+    this.msgError = false;
+  }
+
+  async submitAppealAudit(a: AppealInfo): Promise<void> {
+    if (this.appealBusy) return;
+    if (this.apPanelAction === 'reject' && this.apReply.trim().length < 2) {
+      this.msg = '驳回需填写原因(至少 2 个字), 学生端会看到';
+      this.msgError = true;
+      return;
+    }
+    const hours = Number(this.apHours);
+    if (this.apPanelAction === 'pass') {
+      if (isNaN(hours) || hours < 0 || hours > a.activity_hours) {
+        this.msg = '调整学时应在 0 ~ ' + a.activity_hours.toString() + ' 之间';
+        this.msgError = true;
+        return;
+      }
+    }
+    this.appealBusy = true;
+    const body: Record<string, Object> = {
+      'appeal_id': a.id,
+      'action': this.apPanelAction,
+      'reply': this.apReply.trim()
+    };
+    if (this.apPanelAction === 'pass') body['hours'] = hours;
+    const resp = await ApiClient.post('/api/appeal/audit', body);
+    this.appealBusy = false;
+    if (resp['code'] === 0) {
+      const d = resp['data'] as Record<string, Object>;
+      const after = Number(d['hours_after']);
+      this.msg = this.apPanelAction === 'pass'
+        ? '申诉已通过, 认定学时调整为 ' + after + ' 学时'
+        : '申诉已驳回';
+      this.msgError = false;
+      this.apPanelId = -1;
+      this.apReply = '';
+      await this.loadAppeals();
+      await this.load(false);   // 学时变化同步刷新报名列表
+    } else {
+      this.msg = '处理失败: ' + (resp['msg'] as string);
+      this.msgError = true;
+    }
   }
 
   /** 活动下拉选项(含已下线, 便于筛选历史活动的报名) */
@@ -483,6 +566,100 @@ struct AuditPage {
     .width('100%').padding(12).backgroundColor(Theme.bgCard).borderRadius(12).margin({ bottom: 8 })
   }
 
+  appealStatusText(s: number): string {
+    if (s === 1) return '已通过';
+    if (s === 2) return '已驳回';
+    return '待处理';
+  }
+
+  appealColor(s: number): ResourceColor {
+    if (s === 1) return Theme.success;
+    if (s === 2) return Theme.danger;
+    return Theme.warning;
+  }
+
+  appealBg(s: number): ResourceColor {
+    if (s === 1) return Theme.successBg;
+    if (s === 2) return Theme.dangerBg;
+    return Theme.warningBg;
+  }
+
+  @Builder
+  appealItem(a: AppealInfo) {
+    Column({ space: 6 }) {
+      Row() {
+        Column({ space: 2 }) {
+          Text(a.name).fontSize(15).fontWeight(FontWeight.Medium)
+          Text(a.stu_no).fontSize(12).fontColor(Theme.textTertiary)
+        }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+        Text(this.appealStatusText(a.status))
+          .fontSize(12).fontColor(this.appealColor(a.status))
+          .padding({ left: 8, right: 8, top: 2, bottom: 2 })
+          .backgroundColor(this.appealBg(a.status)).borderRadius(8)
+      }.width('100%')
+
+      Text('活动: ' + a.activity_title).fontSize(Theme.fsBody).fontColor(Theme.textBody)
+        .width('100%').margin({ top: 4 })
+      Text('申诉前认定 ' + a.hours_before + ' 学时 · 活动学时 ' + a.activity_hours)
+        .fontSize(Theme.fsCaption).fontColor(Theme.textTertiary).width('100%')
+      Text('理由: ' + a.reason).fontSize(Theme.fsSmall).fontColor(Theme.textSecondary)
+        .width('100%').padding(8).backgroundColor(Theme.bgSubtle).borderRadius(Theme.radiusSm)
+
+      if (a.status === 0) {
+        if (this.apPanelId === a.id) {
+          Column({ space: 8 }) {
+            if (this.apPanelAction === 'pass') {
+              Row({ space: 8 }) {
+                Text('认定学时').fontSize(12).fontColor(Theme.textSecondary)
+                TextInput({ text: this.apHours, placeholder: '0 ~ ' + a.activity_hours.toString() })
+                  .type(InputType.NUMBER_DECIMAL).layoutWeight(1).height(36).fontSize(13)
+                  .onChange((v: string) => this.apHours = v)
+              }.width('100%')
+            }
+            TextInput({ text: this.apReply,
+              placeholder: this.apPanelAction === 'pass' ? '答复(选填)' : '驳回原因(必填, 学生可见)' })
+              .height(36).fontSize(13).width('100%')
+              .onChange((v: string) => this.apReply = v)
+            Row({ space: 10 }) {
+              Button('取消').layoutWeight(1).height(34).fontSize(Theme.fsSmall)
+                .backgroundColor(Theme.bgNeutral).fontColor(Theme.textSecondary)
+                .onClick(() => { this.apPanelId = -1; this.apReply = ''; })
+              Button(this.appealBusy ? '提交中...' : (this.apPanelAction === 'pass' ? '确认通过' : '确认驳回'))
+                .layoutWeight(1).height(34).fontSize(Theme.fsSmall)
+                .backgroundColor(this.apPanelAction === 'pass' ? Theme.success : Theme.danger)
+                .enabled(!this.appealBusy)
+                .onClick(() => this.submitAppealAudit(a))
+            }.width('100%')
+          }
+          .width('100%').padding(10).margin({ top: 4 })
+          .backgroundColor(Theme.primaryBg).borderRadius(Theme.radiusSm)
+        } else {
+          Row({ space: 10 }) {
+            Button('通过并调整学时')
+              .layoutWeight(1).height(34).fontSize(Theme.fsSmall)
+              .backgroundColor(Theme.success)
+              .onClick(() => this.startAppealAudit(a, 'pass'))
+            Button('驳回')
+              .layoutWeight(1).height(34).fontSize(Theme.fsSmall)
+              .backgroundColor(Theme.dangerBg).fontColor(Theme.danger)
+              .onClick(() => this.startAppealAudit(a, 'reject'))
+          }.width('100%').margin({ top: 6 })
+        }
+      } else {
+        Column({ space: 3 }) {
+          Text(a.status === 1
+            ? '复核结果: ' + a.hours_after + ' 学时'
+            : '驳回原因: ' + (a.reply === '' ? '—' : a.reply))
+            .fontSize(Theme.fsSmall)
+            .fontColor(a.status === 1 ? Theme.success : Theme.danger).width('100%')
+          Text('处理: ' + a.handler + ' · ' + TimeFmt.short(a.handled_at))
+            .fontSize(Theme.fsCaption).fontColor(Theme.textDisabled).width('100%')
+        }.width('100%').margin({ top: 4 })
+      }
+    }
+    .width('100%').padding(12).backgroundColor(Theme.bgCard).borderRadius(12).margin({ bottom: 8 })
+  }
+
   @Builder
   deniedView() {
     AdminGuardView({ tip: '审核中心仅限管理员, 请以管理员身份登录后访问' })
@@ -496,6 +673,10 @@ struct AuditPage {
       if (m === 1 && this.regs.length > 0) {
         Text(this.regs.length + ' 条待审批').fontSize(9)
           .fontColor(this.mode === m ? 'rgba(255,255,255,0.85)' : Theme.admin)
+      }
+      if (m === 2 && this.appealPending > 0) {
+        Text(this.appealPending + ' 条待处理').fontSize(9)
+          .fontColor(this.mode === m ? 'rgba(255,255,255,0.85)' : Theme.warning)
       }
     }
     .layoutWeight(1)
@@ -520,6 +701,22 @@ struct AuditPage {
         if (this.filter === f) return;
         this.filter = f;
         this.load(true);   // 状态筛选在服务端执行, 切换后回到第 1 页
+      })
+  }
+
+  @Builder
+  appealFilterBtn(label: string, f: number) {
+    Text(label)
+      .fontSize(12)
+      .fontColor(this.appealFilter === f ? Theme.textOnPrimary : Theme.textBody)
+      .padding({ left: 12, right: 12, top: 5, bottom: 5 })
+      .backgroundColor(this.appealFilter === f ? Theme.primary : Theme.bgNeutral)
+      .borderRadius(14)
+      .onClick(() => {
+        if (this.appealFilter === f) return;
+        this.appealFilter = f;
+        this.apPanelId = -1;
+        this.loadAppeals();
       })
   }
 
@@ -555,6 +752,7 @@ struct AuditPage {
             .onClick(() => {
               this.load(true);
               this.loadRegs();
+              this.loadAppeals();
             })
         }.width('100%').padding({ left: 14, right: 14, top: 12, bottom: 8 })
 
@@ -562,6 +760,7 @@ struct AuditPage {
         Row({ space: 10 }) {
           this.modeBtn('报名审核', 0)
           this.modeBtn('注册申请', 1)
+          this.modeBtn('学时申诉', 2)
         }.width('100%').padding({ left: 14, right: 14, bottom: 8 })
 
         if (this.mode === 0) {
@@ -645,7 +844,7 @@ struct AuditPage {
           }
 
           this.pager()
-        } else {
+        } else if (this.mode === 1) {
           // ---- 注册申请 ----
           Text(this.regs.length === 0 ? '暂无待审批的注册申请' : '共 ' + this.regs.length + ' 条注册申请待审批')
             .fontSize(12).fontColor(Theme.textTertiary).width('100%').padding({ left: 14, bottom: 6 })
@@ -662,6 +861,35 @@ struct AuditPage {
                   this.regItem(r)
                 }, (r: StudentRequest) => r.id.toString() + '-' + r.stu_no)
               }.padding(14)
+            }
+            .layoutWeight(1).scrollBar(BarState.Off).align(Alignment.Top)
+          }
+        } else {
+          // ---- 学时申诉(v4.0): 学生在"我的报名"发起, 管理员在这里复核 ----
+          Row({ space: 8 }) {
+            this.appealFilterBtn('待处理', 0)
+            this.appealFilterBtn('已通过', 1)
+            this.appealFilterBtn('已驳回', 2)
+            this.appealFilterBtn('全部', -1)
+          }.width('100%').padding({ left: 14, right: 14, bottom: 6 })
+
+          Text('共 ' + this.appealTotal + ' 条申诉' +
+            (this.appealPending > 0 ? ' · 待处理 ' + this.appealPending + ' 条' : ''))
+            .fontSize(12).fontColor(Theme.textTertiary).width('100%').padding({ left: 14, bottom: 6 })
+
+          if (this.appeals.length === 0) {
+            Column({ space: 6 }) {
+              Text('暂无符合条件的申诉').fontSize(14).fontColor(Theme.textTertiary)
+              Text('成员在「我的报名」对已通过记录点「学时申诉」后会出现在这里')
+                .fontSize(11).fontColor(Theme.textDisabled)
+            }.width('100%').margin({ top: 50 })
+          } else {
+            Scroll() {
+              Column() {
+                ForEach(this.appeals, (a: AppealInfo) => {
+                  this.appealItem(a)
+                }, (a: AppealInfo) => a.id.toString() + '-' + a.status.toString() + '-' + a.hours_after.toString())
+              }.padding({ left: 14, right: 14 })
             }
             .layoutWeight(1).scrollBar(BarState.Off).align(Alignment.Top)
           }

@@ -13,7 +13,9 @@ import { AppConfig } from '../common/AppConfig';
 import { LoginGuardView } from '../common/GuardViews';
 import {
   HoursRow, HoursDetail, CategoryStat, WarningRow, parseHoursReport, parseHoursDetail,
-  parseCategoryStats, parseWarningList, parseSignups, dataOf, numOf, csvCell, categoryText
+  parseCategoryStats, parseWarningList, parseSignups, dataOf, numOf, csvCell, categoryText,
+  AnomalyBurst, AnomalyNotOut, AnomalyExceed,
+  parseAnomalyBurst, parseAnomalyNotOut, parseAnomalyExceed
 } from '../common/Models';
 import { Theme } from '../common/Theme';
 
@@ -24,6 +26,10 @@ struct HoursReportPage {
   @State detail: HoursDetail[] = [];
   @State categoryStats: CategoryStat[] = [];   // 分类学时汇总(条形图)
   @State warnList: WarningRow[] = [];          // 学分预警名单(管理员)
+  // v4.0 签到异常检测(管理员)
+  @State burst: AnomalyBurst[] = [];
+  @State notOut: AnomalyNotOut[] = [];
+  @State exceed: AnomalyExceed[] = [];
   @State localHours: number = 0;
   @State localCount: number = 0;
   @State serverTotal: number = 0;      // 服务端合计学时(管理员=全量, 成员=本人排行行求和等价)
@@ -76,6 +82,17 @@ struct HoursReportPage {
     if (AppConfig.isAdmin) {
       const w = await ApiClient.get('/api/report/warning');
       this.warnList = w['code'] === 0 ? parseWarningList(w) : [];
+      // 签到异常检测(v4.0): 批量签到 / 长期未签退 / 学时超限
+      const an = await ApiClient.get('/api/report/anomaly');
+      if (an['code'] === 0) {
+        this.burst = parseAnomalyBurst(an);
+        this.notOut = parseAnomalyNotOut(an);
+        this.exceed = parseAnomalyExceed(an);
+      } else {
+        this.burst = [];
+        this.notOut = [];
+        this.exceed = [];
+      }
     }
     // 本地统计(双端对比): 管理员统计本机全部成员记录, 成员只统计本人
     try {
@@ -124,6 +141,20 @@ struct HoursReportPage {
         lines.push([w.stu_no, w.name, w.dept, w.total_hours.toString(), w.sign_count.toString(),
           w.gap.toString(), w.last_activity_at].map((s: string) => csvCell(s)).join(','));
       }
+    } else if (this.tab === 3) {
+      lines.push('类型,活动,学号,姓名,数量/学时,时间');
+      for (const b of this.burst) {
+        lines.push(['批量签到', b.activity_title, '', '', b.count.toString(), b.window_start]
+          .map((s: string) => csvCell(s)).join(','));
+      }
+      for (const n of this.notOut) {
+        lines.push(['签到未签退', n.activity_title, n.stu_no, n.name,
+          n.hours.toString(), n.checked_at].map((s: string) => csvCell(s)).join(','));
+      }
+      for (const e of this.exceed) {
+        lines.push(['学时超限', e.activity_title, e.stu_no, e.name,
+          e.hours.toString(), ''].map((s: string) => csvCell(s)).join(','));
+      }
     } else {
       lines.push('学号,姓名,活动,类别,认定学时,认定时间');
       for (const d of this.detail) {
@@ -149,7 +180,11 @@ struct HoursReportPage {
    */
   async exportCsv(): Promise<void> {
     if (this.exporting) return;
-    const rows = this.tab === 0 ? this.report.length : (this.tab === 1 ? this.detail.length : this.warnList.length);
+    let rows = 0;
+    if (this.tab === 0) rows = this.report.length;
+    else if (this.tab === 1) rows = this.detail.length;
+    else if (this.tab === 2) rows = this.warnList.length;
+    else rows = this.burst.length + this.notOut.length + this.exceed.length;
     if (rows === 0) {
       this.msg = '当前页没有数据可导出';
       return;
@@ -419,6 +454,7 @@ struct HoursReportPage {
           this.tabBtn('认定明细', 1)
           if (AppConfig.isAdmin) {
             this.tabBtn('学分预警', 2)
+            this.tabBtn('异常检测', 3)
           }
         }.width('100%').padding({ left: 14, right: 14, bottom: 8 })
 
@@ -441,6 +477,44 @@ struct HoursReportPage {
                 ForEach(this.warnList, (w: WarningRow) => {
                   this.warnRow(w)
                 }, (w: WarningRow) => w.stu_no + '-' + w.gap.toString())
+              }
+            } else if (this.tab === 3) {
+              Text('只读检测: 批量签到(同活动 10 分钟内 ≥5 人) / 签到超 24 小时未签退 / 认定学时大于活动学时')
+                .fontSize(11).fontColor(Theme.textTertiary).width('100%').lineHeight(17).margin({ bottom: 8 })
+              Row({ space: 8 }) {
+                this.anomalyChip('批量签到', this.burst.length, Theme.danger)
+                this.anomalyChip('未签退', this.notOut.length, Theme.warning)
+                this.anomalyChip('学时超限', this.exceed.length, Theme.report)
+              }.width('100%').margin({ bottom: 10 })
+
+              if (this.burst.length + this.notOut.length + this.exceed.length === 0) {
+                Text('暂未发现异常').fontSize(13).fontColor(Theme.textDisabled).margin({ top: 30 })
+              } else {
+                if (this.burst.length > 0) {
+                  Text('① 批量签到').fontSize(13).fontWeight(FontWeight.Medium).width('100%').margin({ bottom: 4 })
+                  ForEach(this.burst, (b: AnomalyBurst) => {
+                    this.anomalyLine(b.activity_title + ' · ' + b.window_start,
+                      '涉及 ' + b.students + '（' + b.count + ' 条）', b.count.toString() + ' 条', Theme.danger)
+                  }, (b: AnomalyBurst) => b.activity_id.toString() + b.window_start)
+                }
+                if (this.notOut.length > 0) {
+                  Text('② 签到后长期未签退(学时按全额认定)').fontSize(13).fontWeight(FontWeight.Medium)
+                    .width('100%').margin({ top: 8, bottom: 4 })
+                  ForEach(this.notOut, (n: AnomalyNotOut) => {
+                    this.anomalyLine(n.name + ' · ' + n.activity_title,
+                      '签到 ' + n.checked_at + ' · 已等待 ' + n.hours_waiting + ' 小时',
+                      '暂记 ' + n.hours + ' 学时', Theme.warning)
+                  }, (n: AnomalyNotOut) => n.signup_id.toString())
+                }
+                if (this.exceed.length > 0) {
+                  Text('③ 认定学时大于活动学时').fontSize(13).fontWeight(FontWeight.Medium)
+                    .width('100%').margin({ top: 8, bottom: 4 })
+                  ForEach(this.exceed, (e: AnomalyExceed) => {
+                    this.anomalyLine(e.name + ' · ' + e.activity_title,
+                      '活动 ' + e.activity_hours + ' 学时, 认定 ' + e.hours + ' 学时',
+                      '超 ' + (e.hours - e.activity_hours).toFixed(1), Theme.report)
+                  }, (e: AnomalyExceed) => e.signup_id.toString())
+                }
               }
             } else {
               if (this.detail.length === 0) {
@@ -545,6 +619,31 @@ struct HoursReportPage {
     const my = this.serverHours();
     return '通过 ' + cnt + ' 条 · ' +
       (my >= this.requiredHours ? '已达标' : '差 ' + (this.requiredHours - my) + ' 学时');
+  }
+
+  @Builder
+  anomalyChip(label: string, n: number, color: ResourceColor) {
+    Column({ space: 2 }) {
+      Text(n.toString()).fontSize(16).fontWeight(FontWeight.Bold).fontColor(color)
+      Text(label).fontSize(10).fontColor(Theme.textTertiary)
+    }
+    .layoutWeight(1).padding(8).backgroundColor(Theme.bgCard)
+    .borderRadius(Theme.radiusSm).alignItems(HorizontalAlign.Center)
+  }
+
+  @Builder
+  anomalyLine(title: string, sub: string, tag: string, color: ResourceColor) {
+    Column({ space: 3 }) {
+      Row({ space: 6 }) {
+        Text(title).fontSize(13).fontColor(Theme.textBody).layoutWeight(1)
+          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(tag).fontSize(11).fontColor(color)
+      }.width('100%')
+      Text(sub).fontSize(11).fontColor(Theme.textTertiary).width('100%')
+        .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+    }
+    .width('100%').padding(10).backgroundColor(Theme.bgCard)
+    .borderRadius(Theme.radiusSm).margin({ bottom: 6 })
   }
 
   @Builder

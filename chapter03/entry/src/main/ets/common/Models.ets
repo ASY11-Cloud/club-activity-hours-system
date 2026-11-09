@@ -84,6 +84,56 @@ export interface WarningRow {
   last_activity_at: string; // 最近一次认定时间(空 = 从未认定)
 }
 
+// 学时申诉(v4.0)
+export interface AppealInfo {
+  id: number;
+  stu_no: string;
+  name: string;
+  signup_id: number;
+  activity_id: number;
+  activity_title: string;
+  activity_hours: number;
+  signup_hours: number;
+  reason: string;
+  status: number;        // 0待处理 1已通过 2已驳回
+  reply: string;
+  hours_before: number;
+  hours_after: number;   // -1 表示未调整(驳回)
+  created_at: string;
+  handled_at: string;
+  handler: string;
+}
+
+// 签到异常(v4.0): 同一活动短时间批量签到
+export interface AnomalyBurst {
+  activity_id: number;
+  activity_title: string;
+  window_start: string;
+  count: number;
+  students: string;
+}
+
+// 签到异常: 签到后长期未签退
+export interface AnomalyNotOut {
+  signup_id: number;
+  stu_no: string;
+  name: string;
+  activity_title: string;
+  checked_at: string;
+  hours_waiting: number;
+  hours: number;
+}
+
+// 签到异常: 认定学时大于活动学时
+export interface AnomalyExceed {
+  signup_id: number;
+  stu_no: string;
+  name: string;
+  activity_title: string;
+  hours: number;
+  activity_hours: number;
+}
+
 // ---------- 活动类别(七大类) ----------
 export const CATEGORY_KEYS: string[] = ['thought', 'practice', 'volunteer', 'innovation', 'sports', 'social', 'skill'];
 export const CATEGORY_LABELS: string[] = ['思想成长', '实践实习', '志愿公益', '创新创业', '文体活动', '社会工作', '技能特长'];
@@ -345,6 +395,98 @@ export function parseWarningList(resp: Record<string, Object>): WarningRow[] {
       sign_count: numOf(item, 'sign_count'),
       gap: numOf(item, 'gap'),
       last_activity_at: strOf(item, 'last_activity_at')
+    });
+  }
+  return out;
+}
+
+/** 解析学时申诉列表(v4.0) */
+export function parseAppeals(resp: Record<string, Object>): AppealInfo[] {
+  const out: AppealInfo[] = [];
+  if (resp['code'] !== 0) return out;
+  const data = resp['data'] as Record<string, Object> | null;
+  if (!data || typeof data !== 'object') return out;
+  const list = data['list'] as Array<Record<string, Object>> | null;
+  if (!list) return out;
+  for (const item of list) {
+    out.push({
+      id: numOf(item, 'id'),
+      stu_no: strOf(item, 'stu_no'),
+      name: strOf(item, 'name'),
+      signup_id: numOf(item, 'signup_id'),
+      activity_id: numOf(item, 'activity_id'),
+      activity_title: strOf(item, 'activity_title'),
+      activity_hours: numOf(item, 'activity_hours'),
+      signup_hours: numOf(item, 'signup_hours'),
+      reason: strOf(item, 'reason'),
+      status: numOf(item, 'status'),
+      reply: strOf(item, 'reply'),
+      hours_before: numOf(item, 'hours_before'),
+      hours_after: numOf(item, 'hours_after', -1),
+      created_at: strOf(item, 'created_at'),
+      handled_at: strOf(item, 'handled_at'),
+      handler: strOf(item, 'handler')
+    });
+  }
+  return out;
+}
+
+/** 解析签到异常上报(v4.0): 三个数组分别解析 */
+export function parseAnomalyBurst(resp: Record<string, Object>): AnomalyBurst[] {
+  const out: AnomalyBurst[] = [];
+  if (resp['code'] !== 0) return out;
+  const data = resp['data'] as Record<string, Object> | null;
+  if (!data || typeof data !== 'object') return out;
+  const list = data['burst'] as Array<Record<string, Object>> | null;
+  if (!list) return out;
+  for (const item of list) {
+    out.push({
+      activity_id: numOf(item, 'activity_id'),
+      activity_title: strOf(item, 'activity_title'),
+      window_start: strOf(item, 'window_start'),
+      count: numOf(item, 'count'),
+      students: strOf(item, 'students')
+    });
+  }
+  return out;
+}
+
+export function parseAnomalyNotOut(resp: Record<string, Object>): AnomalyNotOut[] {
+  const out: AnomalyNotOut[] = [];
+  if (resp['code'] !== 0) return out;
+  const data = resp['data'] as Record<string, Object> | null;
+  if (!data || typeof data !== 'object') return out;
+  const list = data['not_signed_out'] as Array<Record<string, Object>> | null;
+  if (!list) return out;
+  for (const item of list) {
+    out.push({
+      signup_id: numOf(item, 'signup_id'),
+      stu_no: strOf(item, 'stu_no'),
+      name: strOf(item, 'name'),
+      activity_title: strOf(item, 'activity_title'),
+      checked_at: strOf(item, 'checked_at'),
+      hours_waiting: numOf(item, 'hours_waiting'),
+      hours: numOf(item, 'hours')
+    });
+  }
+  return out;
+}
+
+export function parseAnomalyExceed(resp: Record<string, Object>): AnomalyExceed[] {
+  const out: AnomalyExceed[] = [];
+  if (resp['code'] !== 0) return out;
+  const data = resp['data'] as Record<string, Object> | null;
+  if (!data || typeof data !== 'object') return out;
+  const list = data['hours_exceed'] as Array<Record<string, Object>> | null;
+  if (!list) return out;
+  for (const item of list) {
+    out.push({
+      signup_id: numOf(item, 'signup_id'),
+      stu_no: strOf(item, 'stu_no'),
+      name: strOf(item, 'name'),
+      activity_title: strOf(item, 'activity_title'),
+      hours: numOf(item, 'hours'),
+      activity_hours: numOf(item, 'activity_hours')
     });
   }
   return out;

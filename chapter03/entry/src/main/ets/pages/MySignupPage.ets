@@ -13,7 +13,7 @@ import { common } from '@kit.AbilityKit';
 import { ApiClient } from '../common/ApiClient';
 import { DbHelper } from '../common/DbHelper';
 import { AppConfig } from '../common/AppConfig';
-import { LocalSignup, statusText } from '../common/Models';
+import { LocalSignup, statusText, AppealInfo, parseAppeals, parseSignups, SignupInfo } from '../common/Models';
 import { LoginGuardView } from '../common/GuardViews';
 import { SyncService, SyncResult } from '../common/SyncService';
 import { Theme } from '../common/Theme';
@@ -29,6 +29,11 @@ struct MySignupPage {
   @State notLoggedIn: boolean = false;
   @State unsynced: number = 0;
   @State loaded: boolean = false;
+  // ---- v4.0 学时申诉 ----
+  @State appeals: AppealInfo[] = [];
+  @State appealFor: number = 0;        // 正在填理由的活动 id(0 = 未展开)
+  @State appealReason: string = '';
+  @State appealBusy: boolean = false;
 
   aboutToAppear(): void {
     const ctx = getContext(this) as common.UIAbilityContext;
@@ -59,6 +64,7 @@ struct MySignupPage {
     }
     this.signups = await DbHelper.getSignups(AppConfig.stuNo);
     this.unsynced = (await DbHelper.getUnsyncedSignups(AppConfig.stuNo)).length;
+    await this.loadAppeals();
     this.loaded = true;
     if (this.signups.length === 0) {
       this.msg = '暂无本地报名记录';
@@ -199,6 +205,87 @@ struct MySignupPage {
     return Theme.warningBg;
   }
 
+  // ==================== v4.0 学时申诉 ====================
+
+  async loadAppeals(): Promise<void> {
+    const resp = await ApiClient.get('/api/appeal/list?size=200');
+    if (resp['code'] === 0) this.appeals = parseAppeals(resp);
+  }
+
+  /** 按活动找本人的申诉记录(本地只缓存 activity_id, 不存服务端 signup id) */
+  appealOf(activityId: number): AppealInfo | null {
+    for (const a of this.appeals) {
+      if (a.activity_id === activityId) return a;
+    }
+    return null;
+  }
+
+  appealStatus(activityId: number): number {
+    const a = this.appealOf(activityId);
+    return a === null ? -1 : a.status;
+  }
+
+  appealKey(activityId: number): string {
+    const a = this.appealOf(activityId);
+    return a === null ? 'none' : a.status.toString() + '-' + a.hours_after.toString();
+  }
+
+  appealText(activityId: number): string {
+    const a = this.appealOf(activityId);
+    if (a === null) return '';
+    if (a.status === 0) return '申诉处理中, 请等待管理员复核';
+    if (a.status === 1) {
+      const h = a.hours_after >= 0 ? a.hours_after : a.signup_hours;
+      return '申诉已通过: 认定学时调整为 ' + h + ' 学时';
+    }
+    return '申诉已驳回' + (a.reply === '' ? '' : ': ' + a.reply);
+  }
+
+  openAppeal(s: LocalSignup): void {
+    this.appealFor = s.activity_id;
+    this.appealReason = '';
+    this.msg = '';
+  }
+
+  async submitAppeal(s: LocalSignup): Promise<void> {
+    const reason = this.appealReason.trim();
+    if (reason.length < 5) {
+      this.msg = '请填写申诉理由(至少 5 个字), 管理员会看到';
+      return;
+    }
+    if (this.appealBusy) return;
+    this.appealBusy = true;
+    try {
+      // 本地表只有活动 id, 申诉要服务端 signup.id: 先按活动查本人已通过记录
+      const lr = await ApiClient.get('/api/signup/list?activity_id=' + s.activity_id.toString() + '&size=10');
+      let sid = 0;
+      if (lr['code'] === 0) {
+        const rows: SignupInfo[] = parseSignups(lr);
+        for (const r of rows) {
+          if (r.stu_no === AppConfig.stuNo && r.status === 1) sid = r.id;
+        }
+      }
+      if (sid <= 0) {
+        this.msg = '未找到服务器上的已通过记录, 请先同步';
+        return;
+      }
+      const resp = await ApiClient.post('/api/appeal/add', {
+        'signup_id': sid,
+        'reason': reason
+      });
+      if (resp['code'] === 0) {
+        this.msg = '申诉已提交, 管理员复核后会通知结果';
+        this.appealFor = 0;
+        this.appealReason = '';
+        await this.loadAppeals();
+      } else {
+        this.msg = '申诉失败: ' + (resp['msg'] as string);
+      }
+    } finally {
+      this.appealBusy = false;
+    }
+  }
+
   // ==================== 视图 ====================
 
   @Builder
@@ -232,6 +319,40 @@ struct MySignupPage {
           .fontSize(Theme.fsSmall).fontColor(Theme.danger)
           .width('100%').padding(8)
           .backgroundColor(Theme.dangerBg).borderRadius(Theme.radiusSm)
+      }
+
+      // 学时申诉(v4.0): 仅已通过记录可申诉; 已提交则回显状态, 不再重复入口
+      if (s.status === 1) {
+        if (this.appealOf(s.activity_id) !== null) {
+          Text(this.appealText(s.activity_id))
+            .fontSize(Theme.fsCaption)
+            .fontColor(this.appealStatus(s.activity_id) === 1 ? Theme.success : Theme.textTertiary)
+            .width('100%')
+        } else if (this.appealFor === s.activity_id) {
+          Column({ space: 8 }) {
+            TextInput({ text: this.appealReason, placeholder: '申诉理由(至少 5 个字), 如签到时长被少算' })
+              .height(38).fontSize(Theme.fsSmall).width('100%')
+              .backgroundColor(Theme.bgCard).borderRadius(Theme.radiusSm)
+              .onChange((v: string) => this.appealReason = v)
+            Row({ space: 10 }) {
+              Button('取消').layoutWeight(1).height(32).fontSize(Theme.fsCaption)
+                .backgroundColor(Theme.bgNeutral).fontColor(Theme.textSecondary)
+                .onClick(() => { this.appealFor = 0; this.appealReason = ''; })
+              Button(this.appealBusy ? '提交中...' : '提交申诉')
+                .layoutWeight(1).height(32).fontSize(Theme.fsCaption)
+                .backgroundColor(Theme.primary).enabled(!this.appealBusy)
+                .onClick(() => this.submitAppeal(s))
+            }.width('100%')
+          }
+          .width('100%').padding(8).margin({ top: 4 })
+          .backgroundColor(Theme.primaryBg).borderRadius(Theme.radiusSm)
+        } else {
+          Button('学时申诉')
+            .fontSize(Theme.fsCaption).height(26)
+            .fontColor(Theme.primary).backgroundColor(Theme.primaryBg)
+            .borderRadius(13).margin({ top: 2 })
+            .onClick(() => this.openAppeal(s))
+        }
       }
 
       Row() {
@@ -355,7 +476,8 @@ struct MySignupPage {
               ForEach(this.signups, (s: LocalSignup) => {
                 this.item(s)
               }, (s: LocalSignup) => s.client_id + '-' + s.status.toString() + '-' + s.checkin.toString() +
-                '-' + s.hours.toString() + '-' + s.synced.toString() + '-' + s.remark + '-' + s.created_at)
+                '-' + s.hours.toString() + '-' + s.synced.toString() + '-' + s.remark + '-' + s.created_at +
+                '-' + this.appealKey(s.activity_id))
             }.padding({ left: Theme.pagePadding, right: Theme.pagePadding, bottom: 14 })
           }
           .layoutWeight(1).scrollBar(BarState.Off).align(Alignment.Top)

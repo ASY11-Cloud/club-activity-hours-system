@@ -6,7 +6,7 @@
 
 > 版本演进与 v2.0 相对 v1.0 的升级说明见 [`VERSION.md`](VERSION.md)；归档分支：`v1.0`（第一版）、`v2.0`（第二版最终版，同 main）。
 > 本轮改动明细、为什么改、验证方式与环境坑，见 [`HANDOFF.md`](HANDOFF.md)。
-> 操作步骤与验收演示见 [`docs/使用说明.md`](docs/使用说明.md)（Word 版 `使用说明文档.docx`，与 md 同源，均对应 v3.2）。
+> 操作步骤与验收演示见 [`docs/使用说明.md`](docs/使用说明.md)（Word 版 `使用说明文档.docx`，与 md 同源，均对应 v4.0）。
 
 ## 功能总览
 
@@ -26,6 +26,9 @@
 - 现场签到：管理员出示 **60 秒轮换签到码**（HMAC-SHA256 + 启动随机密钥），成员输码签到、签退，按实际在场时长折算学时（0.5 步进、下限 0.5）；与 RFID 刷卡并存，未签退仍按活动全额学时
 - 学时导出：报表可按当前标签页（排行 / 明细 / 预警）通过系统文件选择器保存 CSV（UTF-8 BOM），失败回退剪贴板 + 沙箱路径
 - 深色模式：`Theme` 颜色全部改为资源 token，`resources/dark` 提供同名校色板，跟随系统深浅色自动切换
+- 学时申诉（v4.0）：成员对已通过记录发起申诉；管理员在审核中心"学时申诉"页签通过（可调整 0~活动学时）或驳回；通过后在事务内按明细重算 `hours_total`，全程留痕
+- 规则可视化（v4.0）：`GET /api/config/get` 下发七大类 `rules`，`POST /api/config/set` 接受 `rules` 白名单；App 设置页可视化编辑，保存后下一次审核立即生效
+- 签到异常检测（v4.0）：`GET /api/report/anomaly` 输出批量签到（10 分钟 ≥5 人）、签到超 24h 未签退、认定学时大于活动学时三类风险，报表页"异常检测"页签展示并可导出
 - 嵌入式扩展：ESP32 + MFRC522 读卡实机刷卡签到，到场即认定学时（已被管理员驳回的报名需先重新报名，刷卡不会绕过审核）；签到状态通过 `checkin` 同步回本地库，成员在「我的报名」与活动详情可直接看到「已刷卡签到」；固件带 WiFi 断线自动重连与同卡 5 秒冷却；可选 `X-Device-Key` 设备密钥，防止局域网内伪造刷卡
 
 ## 系统架构
@@ -68,13 +71,16 @@ chapter03/
 │   ├── testdata_seed.sql      # 边界测试数据（id≥9000 / 学号 T9xxx，与基线隔离）
 │   ├── testdata_clean.sql     # 测试数据清理（幂等，清理后基线复原）
 │   ├── verify_test_data.ps1   # 结构/落库/接口/基线 四阶段核验（83 项，无 Python 可用）
+│   ├── verify_v4.ps1          # v4.0 验收（45 项：申诉/规则/异常/权限/基线）
 │   └── build.bat              # 编译脚本
 ├── esp32_rfid/rfid_esp32.ino  # ESP32 + MFRC522 刷卡签到固件
 ├── docs/使用说明.md            # 操作手册与验收流程（可读版，与 docx 同源）
 ├── docs/数据一致性核验-v3.2.md # 测试数据设计与 83 项核验结果、两处边界缺陷修复记录
+├── docs/V4-PLAN.md            # v4.0 目标 / 范围 / 实施步骤 / 验收标准
+├── tools/md2docx.ps1          # Markdown → Word（纯 OOXML，不依赖 Word）
 ├── HANDOFF.md                 # 改动交接（改了什么 / 为什么 / 怎么验）
-├── VERSION.md                 # 版本演进（v1.0 → v2.0 → v3.0 → v3.1 → v3.2）
-└── 使用说明文档.docx           # 使用说明 Word 版（v3.2，含分类规则 / 签到码 / 预警 / 深色章节 与验收 FAQ）
+├── VERSION.md                 # 版本演进（v1.0 → v2.0 → v3.0 → v3.1 → v3.2 → v4.0）
+└── 使用说明文档.docx           # 使用说明 Word 版（v4.0，含分类规则 / 签到码 / 预警 / 申诉 / 异常 / 深色章节 与验收 FAQ）
 ```
 
 ## 快速开始
@@ -92,12 +98,13 @@ chapter03/
    - `python server\test_api.py` 基础回归（**会真实审核 `ptest-audit-1`，跑完需按 HANDOFF 9.6 还原**）
    - `python server\verify_v3.py 8000` 服务端新功能（会创建并清理测试活动）
    - **无 Python 时的数据核验**：依次执行 `testdata_seed.sql` → `verify_test_data.ps1 -Stage schema/seed` → 重启服务端 → `-Stage api` → `testdata_clean.sql` → `-Stage baseline`（83 项，见 `docs/数据一致性核验-v3.2.md`）
+   - `powershell -ExecutionPolicy Bypass -File server\verify_v4.ps1` v4.0 验收（45 项：申诉闭环 / 规则读写 / 异常检测 / 越权 / 基线，自建自清理）
 
 ## 接口一览（自主 C++ 服务器）
 
 | 方法 | 路径 | 权限 | 说明 |
 |---|---|---|---|
-| GET | `/api/health` | 公开 | 健康检查（`version` 当前 3.2、`db` 为 MySQL 连通性、`time` 为服务器时间） |
+| GET | `/api/health` | 公开 | 健康检查（`version` 当前 4.0、`db` 为 MySQL 连通性、`time` 为服务器时间） |
 | POST | `/api/login` | 公开 | 登录签发 Token（失败节流：60 秒内 5 次失败临时拒绝） |
 | POST | `/api/register` | 公开 | 成员注册申请（待管理员审批；可选 `card_no`，卡号全局唯一、自动转大写） |
 | POST | `/api/signin` | 公开／设备密钥 | ESP32 刷卡签到（可选 `X-Device-Key`） |
@@ -121,11 +128,15 @@ chapter03/
 | POST | `/api/signup/add` | 成员 | 报名（`client_id` 幂等；先锁学生行校验时间冲突，再 `taken` 条件 UPDATE 占位控容量） |
 | POST | `/api/signup/audit` | 管理员 | 审核并累计学时（锁报名行 + 条件更新；按类别上限裁剪，返回 `hours` / `hours_capped`） |
 | POST | `/api/signup/cancel` | 成员 | 撤销本人待审核报名（释放名额） |
+| POST | `/api/appeal/add` | 成员 | 对本人已通过报名发起学时申诉（`signup_id` + `reason`，同报名仅一条待处理） |
+| GET | `/api/appeal/list` | 登录 | 申诉列表（学生本人 / 管理员全量，支持 `status`、`stu_no`、分页） |
+| POST | `/api/appeal/audit` | 管理员 | 处理申诉：`pass` 可调整 `hours`（0~活动学时）并重算汇总；`reject` 需理由 |
 | GET | `/api/hours/report` | 登录 | 学时排行 + 认定明细 + 分类汇总（`by_category`，图表数据源）；按角色过滤，本人行 `is_me=1`；下发 `required_hours` / `achieved` / `achieved_count` |
 | GET | `/api/report/warning` | 管理员 | 未达标学生名单（`stu_no` / `name` / `dept` / `total_hours` / `sign_count` / `gap` / `last_activity_at`），按缺口降序 |
+| GET | `/api/report/anomaly` | 管理员 | 签到异常：`burst`（10 分钟 ≥5 人）/ `not_signed_out`（>24h）/ `hours_exceed`（学时超活动） |
 | POST | `/api/hours/rebuild` | 管理员 | 以已通过报名重建学时汇总 |
-| GET | `/api/config/get` | 登录 | 读取系统配置（学时达标线等） |
-| POST | `/api/config/set` | 管理员 | 设置学时达标线 `required_hours`（0 表示不设线） |
+| GET | `/api/config/get` | 登录 | 读取系统配置：`required_hours` + 七大类 `rules`（`max_activity` / `max_total`，0=不限） |
+| POST | `/api/config/set` | 管理员 | 设置 `required_hours` 与/或 `rules`（类别白名单、数值 0~999，非法项整体拒绝） |
 | GET | `/api/logs` | 管理员 | 实时请求日志（内存环形缓冲；`level=err\|slow`、`method`、`kw` 筛选） |
 
 ## 演示账号

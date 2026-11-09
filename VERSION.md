@@ -227,7 +227,50 @@ INSERT INTO sys_config (cfg_key,cfg_value) VALUES
 - 验证了 `taken` 启动对账（7 处人为漂移全部修正）、`signup.category` 老数据回填（2 条）、报表 `COALESCE` 兜底、类别上限真实链路裁剪；
 - 报告见 `docs/数据一致性核验-v3.2.md`。
 
-## v4 待办（P2，本轮刻意不做）
+---
+
+## v4.0：从"能演示"到"能运营"（2026-11-09）
+
+版本口径：`/api/health.version = 4.0`；计划见 `docs/V4-PLAN.md`，验收见 `server/verify_v4.ps1`（45 项全绿）。
+
+### 学时申诉闭环
+
+- 新表 `appeal`（`init_db.sql` + `dbEnsureSchema` 双建，老库启动自动补表，无需手工迁移）；
+- 三个接口：`POST /api/appeal/add`（本人、仅已通过、同报名仅一条待处理）、`GET /api/appeal/list`（学生本人 / 管理员全量 + 状态筛选 + 分页）、`POST /api/appeal/audit`（通过可调 0~活动学时 / 驳回需理由）；
+- 事务：统一"学生行 → 申诉行"锁序；处理用 `WHERE status=0` 条件更新，并发只生效一次；通过后按 `signup` 明细重算该生 `hours_total`（比差额增减更抗漂移）；
+- 留痕：`hours_before/hours_after/reply/handler/handled_at` 全字段记录；
+- App：我的报名（已通过记录）内联申诉输入框与状态回显；审核中心新增"学时申诉"页签（待处理角标、通过调学时、驳回理由）。
+
+### 七大类规则可视化
+
+- `GET /api/config/get` 在原有平铺键之外增加结构化 `rules`（七大类 × `max_activity/max_total`），老字段不变；
+- `POST /api/config/set` 支持 `required_hours?` + `rules?`，**先全量校验再落库**：未知类别、未知规则项、非数字、负数、>999 一律 400，不会"改一半"；
+- App 设置页新增"学时规则"卡片（7 行 × 2 输入），保存后下一次审核立即生效（审核实时读 `sys_config`，无需重启）。
+
+### 签到异常检测
+
+- `GET /api/report/anomaly`（管理员）三类只读：
+  - `burst`：同一活动 10 分钟窗口签到 ≥5 人（`GROUP BY a.id, 窗口别名`，规避 only_full_group_by）；
+  - `not_signed_out`：`checkin=1 AND signout_at IS NULL AND checked_at < NOW()-24h`；
+  - `hours_exceed`：`signup.hours > activity.hours`；
+- App 报表页新增"异常检测"页签：三个计数块 + 分类明细 + 可导出 CSV。
+
+### 验证（2026-11-09）
+
+- 服务端 `-O2 -Wall` 零警告（`build.log` 为空），常驻 8000，`health.version=4.0`；
+- `verify_v4.ps1` **45 项全绿**：权限矩阵 6 项、申诉闭环 14 项、规则读写 8 项、异常检测 6 项、清理与基线 11 项；
+- 唯一踩坑：`only_full_group_by` 下窗口表达式重复书写被判"非聚合列"，改用 `SELECT` 别名分组；
+- App `hvigorw assembleHap` **BUILD SUCCESSFUL**（0 error）；
+- 基线零漂移：8 活动 / 19 报名 / 5 人 / 20.5 学时 / 榜首李铭 5.5 / 待审注册 3；申诉表清理后为空。
+
+## v4.1 待办（v4.0 刻意不做）
+
+1. 签到码离线校验（需客户端时钟同步与密钥分发，安全边界复杂）；
+2. 申诉附件/图片（需要文件存储与鉴权）；
+3. 报表导出 Excel 多 Sheet + 内嵌图表（当前 CSV + ArkUI 图表已够演示）；
+4. `signup` 归档与冷热分离（数据量未到瓶颈再设计）；
+5. 服务端配置热加载（规则已实时读库，只有端口/设备密钥需重启）；
+6. 异常检测阈值可配置（目前 5 人/10 分钟、24 小时为硬编码）；
 
 1. 活动二维码/动态码离线校验（当前码只在线校验，断网无法签到）；
 2. 签到异常检测（同码多人异地、短时间批量签到告警）；

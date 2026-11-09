@@ -7,9 +7,17 @@ import { common } from '@kit.AbilityKit';
 import { AppConfig } from '../common/AppConfig';
 import { ApiClient } from '../common/ApiClient';
 import { DbHelper } from '../common/DbHelper';
-import { CancelImpact, parseCancelImpact } from '../common/Models';
+import { CancelImpact, parseCancelImpact, CATEGORY_KEYS, CATEGORY_LABELS } from '../common/Models';
 import { Nav } from '../common/Nav';
 import { Theme } from '../common/Theme';
+
+// 学时规则行(v4.0): 输入框保留字符串, 保存时统一校验
+interface RuleRow {
+  key: string;
+  label: string;
+  maxActivity: string;
+  maxTotal: string;
+}
 
 @Entry
 @Component
@@ -50,13 +58,21 @@ struct SettingsPage {
   @State pwdMsg: string = '';
   @State pwdBusy: boolean = false;
 
+  // ---- v4.0 学时规则(仅管理员): 七大类 x 单活动上限/类别累计上限, 0 = 不限 ----
+  @State rules: RuleRow[] = [];
+  @State ruleMsg: string = '';
+  @State ruleBusy: boolean = false;
+
   aboutToAppear(): void {
     const ctx = getContext(this) as common.UIAbilityContext;
     AppConfig.init(ctx).then(() => {
       this.syncLoginState();
       this.host = AppConfig.serverHost;
       this.port = AppConfig.serverPort;
-      if (AppConfig.isAdmin) this.loadActs();
+      if (AppConfig.isAdmin) {
+        this.loadActs();
+        this.loadRules();
+      }
     }).catch((e: Error) => {
       this.msg = '初始化失败: ' + e.message;
     });
@@ -83,6 +99,67 @@ struct SettingsPage {
     this.actIds = ids;
     this.actOptions = opts;
     if (this.actIndex >= names.length) this.actIndex = 0;
+  }
+
+  /** v4.0 读取七大类学时规则(0 = 不限) */
+  async loadRules(): Promise<void> {
+    const resp = await ApiClient.get('/api/config/get');
+    if (resp['code'] !== 0) {
+      this.ruleMsg = '读取规则失败: ' + (resp['msg'] as string);
+      return;
+    }
+    const d = resp['data'] as Record<string, Object>;
+    const rj = d['rules'] as Record<string, Object> | null;
+    const arr: RuleRow[] = [];
+    for (let i = 0; i < CATEGORY_KEYS.length; i++) {
+      const key = CATEGORY_KEYS[i];
+      let ma = 0;
+      let mt = 0;
+      if (rj !== null && rj !== undefined) {
+        const v = rj[key];
+        if (v !== undefined && v !== null) {
+          const o = v as Record<string, Object>;
+          const a = o['max_activity'];
+          const b = o['max_total'];
+          ma = (typeof a === 'number') ? a as number : 0;
+          mt = (typeof b === 'number') ? b as number : 0;
+        }
+      }
+      arr.push({
+        key: key,
+        label: CATEGORY_LABELS[i],
+        maxActivity: ma.toString(),
+        maxTotal: mt.toString()
+      });
+    }
+    this.rules = arr;
+    this.ruleMsg = '';
+  }
+
+  /** 保存规则: 先整体校验, 再一次性提交(服务端同样全量校验) */
+  async saveRules(): Promise<void> {
+    if (this.ruleBusy) return;
+    const rulesObj: Record<string, Object> = {};
+    for (const r of this.rules) {
+      const a = Number(r.maxActivity.trim());
+      const b = Number(r.maxTotal.trim());
+      if (isNaN(a) || isNaN(b) || a < 0 || b < 0 || a > 999 || b > 999 ||
+        Math.floor(a) !== a || Math.floor(b) !== b) {
+        this.ruleMsg = '「' + r.label + '」的规则应为 0~999 的整数(0 表示不限)';
+        return;
+      }
+      const o: Record<string, Object> = { 'max_activity': a, 'max_total': b };
+      rulesObj[r.key] = o;
+    }
+    this.ruleBusy = true;
+    const resp = await ApiClient.post('/api/config/set', { 'rules': rulesObj });
+    this.ruleBusy = false;
+    if (resp['code'] === 0) {
+      this.ruleMsg = '规则已保存, 下一次审核立即生效';
+      await this.loadRules();
+    } else {
+      this.ruleMsg = '保存失败: ' + (resp['msg'] as string);
+    }
   }
 
   /** 走与 ESP32 完全相同的 /api/signin 接口, 保证演示链路真实 */
@@ -461,6 +538,43 @@ struct SettingsPage {
               }
             }
             .width('100%').padding(14).backgroundColor(Theme.bgCard).borderRadius(14).margin({ top: 10 })
+
+            // ---- v4.0 学时规则: 七大类 x 单活动上限 / 类别累计上限, 保存后下一次审核立即生效 ----
+            Column({ space: 10 }) {
+              Row() {
+                Text('学时规则').fontSize(14).fontWeight(FontWeight.Medium).layoutWeight(1)
+                Text('0 = 不限').fontSize(10).fontColor(Theme.textTertiary)
+              }.width('100%')
+              Text('单活动上限: 一次活动最多认定多少学时; 类别累计上限: 该类别累计认定上限。审核通过时先按单活动截断, 再按类别累计裁剪。')
+                .fontSize(11).fontColor(Theme.textTertiary).width('100%').lineHeight(17)
+              Row({ space: 6 }) {
+                Text('类别').fontSize(11).fontColor(Theme.textSecondary).width(62)
+                Text('单活动上限').fontSize(11).fontColor(Theme.textSecondary).layoutWeight(1)
+                Text('类别累计').fontSize(11).fontColor(Theme.textSecondary).layoutWeight(1)
+              }.width('100%')
+              ForEach(this.rules, (r: RuleRow) => {
+                Row({ space: 6 }) {
+                  Text(r.label).fontSize(12).fontColor(Theme.textBody).width(62)
+                  TextInput({ text: r.maxActivity, placeholder: '0' })
+                    .type(InputType.NUMBER_DECIMAL).height(34).fontSize(12).layoutWeight(1)
+                    .onChange((v: string) => { r.maxActivity = v; })
+                  TextInput({ text: r.maxTotal, placeholder: '0' })
+                    .type(InputType.NUMBER_DECIMAL).height(34).fontSize(12).layoutWeight(1)
+                    .onChange((v: string) => { r.maxTotal = v; })
+                }.width('100%')
+              }, (r: RuleRow) => r.key)
+              Button(this.ruleBusy ? '保存中...' : '保存学时规则')
+                .width('100%').height(38).fontSize(14).backgroundColor(Theme.admin)
+                .enabled(!this.ruleBusy)
+                .onClick(() => this.saveRules())
+              if (this.ruleMsg !== '') {
+                Text(this.ruleMsg).fontSize(11)
+                  .fontColor(this.ruleMsg.indexOf('已保存') >= 0 ? Theme.success : Theme.danger)
+                  .width('100%').lineHeight(17)
+              }
+            }
+            .width('100%').padding(14).margin({ top: 10 })
+            .backgroundColor(Theme.bgCard).borderRadius(14)
 
             Column({ space: 10 }) {
               Row() {
