@@ -174,7 +174,8 @@ struct MainPage {
     this.requiredHours = Number(data['required_hours']);
     const rows: HoursRow[] = parseHoursReport(resp);
     for (const r of rows) {
-      if (r.stu_no === this.stuNo) {
+      // 学生视图下他人身份已脱敏, 本人行用 is_me 标记(旧服务端没有该字段时回退学号比对)
+      if (r.is_me || r.stu_no === this.stuNo) {
         this.myHours = r.total_hours;
         break;
       }
@@ -207,7 +208,9 @@ struct MainPage {
 
   /** 学时完成度 0~100 */
   pct(): number {
-    if (this.requiredHours <= 0) return 0;
+    // 未设达标线(0)时视为"无学时压力", 进度显示满格;
+    // 原实现返回 0 会让"不设线"的配置看起来像"一条都没完成"。
+    if (this.requiredHours <= 0) return 100;
     const v = Math.round(this.myHours / this.requiredHours * 100);
     if (v < 0) return 0;
     return v > 100 ? 100 : v;

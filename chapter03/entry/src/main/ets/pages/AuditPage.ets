@@ -34,6 +34,8 @@ struct AuditPage {
   @State hasMore: boolean = false;
   @State loading: boolean = false;
   @State regs: StudentRequest[] = [];
+  // 注册审批时可补绑 RFID 卡号(按 student.id 索引; 注册时没填卡号就在这里补)
+  @State regCard: Record<string, string> = {};
   @State msg: string = '';
   @State msgError: boolean = false;   // msg 是否为失败提示(染红显示, 成功为灰色)
   @State busy: boolean = false;
@@ -331,6 +333,11 @@ struct AuditPage {
         'student_id': r.id,
         'action': action
       };
+      const typed = this.regCard[r.id.toString()];
+      const card = (typed === undefined || typed === null) ? '' : typed.trim().toUpperCase();
+      if (action === 'pass' && card !== '') {
+        body['card_no'] = card;   // 仅在通过时绑定, 拒绝不写卡号
+      }
       const resp = await ApiClient.post('/api/student/audit', body);
       if (resp['code'] === 0) {
         this.msg = action === 'pass'
@@ -442,6 +449,18 @@ struct AuditPage {
         Text('申请时间: ' + r.created_at).fontSize(11).fontColor(Theme.textDisabled)
         Text(r.card_no !== '' ? ' 已绑定RFID卡' : '').fontSize(11).fontColor(Theme.primary)
       }.width('100%').margin({ top: 4 })
+
+      // 补绑卡号: 注册时未填卡号的成员, 在这里填了才能刷卡签到
+      if (r.card_no === '') {
+        Row({ space: 8 }) {
+          Text('卡号').fontSize(12).fontColor(Theme.textSecondary)
+          TextInput({ text: this.regCard[r.id.toString()] ?? '', placeholder: '选填: 审核通过时绑定 RFID 卡' })
+            .layoutWeight(1).height(34).fontSize(12).maxLength(32)
+            .onChange((v: string) => {
+              this.regCard[r.id.toString()] = v;
+            })
+        }.width('100%').margin({ top: 8 })
+      }
 
       Row({ space: 10 }) {
         Button('同意').layoutWeight(1).height(32).fontSize(13).backgroundColor(Theme.success)

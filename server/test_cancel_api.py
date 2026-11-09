@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 注销功能接口级验收脚本(可重复执行, 结束后不留残留数据)
-覆盖: 影响面预览 / 确认学号校验 / 事务级联删除 / 旧 token 失效 /
-      无孤儿数据 / 学号可重新注册 / 管理员注销
+覆盖: 影响面预览 / 确认密码校验(学号不再作为凭据) / 注销失败节流 /
+      事务级联删除 / 旧 token 失效 / 无孤儿数据 / 学号可重新注册 / 管理员注销
 用法: python test_cancel_api.py
 """
 import json
@@ -52,7 +52,7 @@ check("admin login", admin is not None)
 call("POST", "/api/student/delete", {"stu_no": TEST_NO, "confirm_stu_no": TEST_NO}, admin)
 
 # ---- 1. 造一个真实的测试学生: 注册 -> 管理员通过 ----
-r = call("POST", "/api/register", {"stu_no": TEST_NO, "name": TEST_NAME, "dept": "TEST"})
+r = call("POST", "/api/register", {"stu_no": TEST_NO, "name": TEST_NAME, "dept": "TEST", "pwd": "123456"})
 check("register test student", r.get("code") == 0, r.get("msg", ""))
 
 reqs = call("GET", "/api/student/requests", None, admin)
@@ -64,7 +64,7 @@ check("find pending registration", sid is not None)
 r = call("POST", "/api/student/audit", {"student_id": sid, "action": "pass"}, admin)
 check("approve test student", r.get("code") == 0, r.get("msg", ""))
 
-stu = login("student", TEST_NO, TEST_NAME)
+stu = login("student", TEST_NO, "123456")
 check("test student login", stu is not None)
 
 # ---- 2. 让该学生产生报名数据(活动 1) ----
@@ -81,20 +81,20 @@ check("impact: name matches", d.get("name") == TEST_NAME, "got %s" % d.get("name
 r = call("GET", "/api/student/impact?stu_no=" + TEST_NO, None, admin)
 check("admin impact query", r.get("code") == 0 and (r.get("data") or {}).get("stu_no") == TEST_NO)
 
-# ---- 4. 确认学号不一致必须被拒 ----
-r = call("POST", "/api/student/cancel", {"confirm_stu_no": "0000000"}, stu)
-check("cancel rejects wrong stu_no", r.get("code") == 400, "code=%s" % r.get("code"))
+# ---- 4. 确认密码错误必须被拒(学号是公开信息, 不能当凭据) ----
+r = call("POST", "/api/student/cancel", {"confirm_pwd": "wrongpwd"}, stu)
+check("cancel rejects wrong password", r.get("code") == 403, "code=%s" % r.get("code"))
 
 # ---- 5. 管理员不能走自助注销通道 ----
-r = call("POST", "/api/student/cancel", {"confirm_stu_no": "admin"}, admin)
+r = call("POST", "/api/student/cancel", {"confirm_pwd": "admin123"}, admin)
 check("admin cannot use self-cancel", r.get("code") == 403, "code=%s" % r.get("code"))
 
 # ---- 6. 学生不能走管理员注销通道 ----
 r = call("POST", "/api/student/delete", {"stu_no": TEST_NO, "confirm_stu_no": TEST_NO}, stu)
 check("student cannot use admin delete", r.get("code") == 403, "code=%s" % r.get("code"))
 
-# ---- 7. 正常自助注销 ----
-r = call("POST", "/api/student/cancel", {"confirm_stu_no": TEST_NO}, stu)
+# ---- 7. 正常自助注销(密码正确) ----
+r = call("POST", "/api/student/cancel", {"confirm_pwd": "123456"}, stu)
 dd = r.get("data") or {}
 check("self cancel ok", r.get("code") == 0, r.get("msg", ""))
 check("cancel reports 1 signup deleted", dd.get("signup_deleted") == 1, "got %s" % dd.get("signup_deleted"))
@@ -113,7 +113,7 @@ total = (signups.get("data") or {}).get("total")
 check("no orphan signup left", total == 0, "left %s" % total)
 
 # ---- 10. 学号可以重新注册(注销后不占用) ----
-r = call("POST", "/api/register", {"stu_no": TEST_NO, "name": TEST_NAME, "dept": "TEST"})
+r = call("POST", "/api/register", {"stu_no": TEST_NO, "name": TEST_NAME, "dept": "TEST", "pwd": "123456"})
 check("stu_no reusable after cancel", r.get("code") == 0, r.get("msg", ""))
 
 # ---- 11. 管理员注销(收拾现场) ----
@@ -129,4 +129,28 @@ check("admin delete pending student ok", r.get("code") == 0, r.get("msg", ""))
 
 r = call("GET", "/api/student/impact?stu_no=" + TEST_NO, None, admin)
 check("cleanup verified (404)", r.get("code") == 404, "code=%s" % r.get("code"))
+
+# ---- 12. 注销失败节流: 持 Token 者不能反复猜密码后毁号 ----
+LOCK_NO = "2029998"
+call("POST", "/api/student/delete", {"stu_no": LOCK_NO, "confirm_stu_no": LOCK_NO}, admin)
+r = call("POST", "/api/register", {"stu_no": LOCK_NO, "name": "LOCKTEST", "dept": "TEST", "pwd": "123456"})
+check("lockout: register test student", r.get("code") == 0, r.get("msg", ""))
+reqs = call("GET", "/api/student/requests", None, admin)
+lid = None
+for it in (reqs.get("data") or {}).get("list", []) or []:
+    if it["stu_no"] == LOCK_NO:
+        lid = it["id"]
+r = call("POST", "/api/student/audit", {"student_id": lid, "action": "pass"}, admin)
+check("lockout: approve test student", r.get("code") == 0, r.get("msg", ""))
+ltok = login("student", LOCK_NO, "123456")
+codes = []
+for _ in range(5):
+    r = call("POST", "/api/student/cancel", {"confirm_pwd": "badpwd"}, ltok)
+    codes.append(r.get("code"))
+check("lockout: 5 wrong attempts -> 403", codes == [403, 403, 403, 403, 403], "codes=%s" % codes)
+r = call("POST", "/api/student/cancel", {"confirm_pwd": "123456"}, ltok)
+check("lockout: 6th attempt -> 429", r.get("code") == 429, "code=%s" % r.get("code"))
+r = call("POST", "/api/student/delete", {"stu_no": LOCK_NO, "confirm_stu_no": LOCK_NO}, admin)
+check("lockout: cleanup by admin ok", r.get("code") == 0, r.get("msg", ""))
+
 print("\nresult: %d passed, %d failed" % (ok_count, fail_count))

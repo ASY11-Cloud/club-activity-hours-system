@@ -71,12 +71,12 @@ STU = [('2029101', '并发甲', 'CARD-9101'), ('2029102', '并发乙', 'CARD-910
        ('2029103', '并发丙', 'CARD-9103')]
 stu_tokens = {}
 for no, name, card in STU:
-    api('/api/register', {'stu_no': no, 'name': name, 'dept': '测试班', 'card_no': card}, token=at)
+    api('/api/register', {'stu_no': no, 'name': name, 'dept': '测试班', 'card_no': card, 'pwd': '123456'}, token=at)
 _, r = api('/api/student/list?group=pending', token=at)
 pid = {s['stu_no']: s['id'] for s in r['data']['list'] if s['stu_no'] in dict((x[0], x[1]) for x in STU)}
 for no, name, card in STU:
     api('/api/student/audit', {'student_id': pid[no], 'action': 'pass'}, token=at)
-    _, r = api('/api/login', {'type': 'student', 'account': no, 'secret': name})
+    _, r = api('/api/login', {'type': 'student', 'account': no, 'secret': '123456'})
     assert r['code'] == 0, no + ' login failed'
     stu_tokens[no] = r['data']['token']
 tA, tB, tC = stu_tokens['2029101'], stu_tokens['2029102'], stu_tokens['2029103']
@@ -180,7 +180,7 @@ try:
     check('unbound card -> 404', r['code'] == 404 and '未绑定' in r['msg'], r.get('msg', ''))
 
     # 8) Token 生命周期: 登出后旧 token 失效
-    _, r = api('/api/login', {'type': 'student', 'account': '2029102', 'secret': '并发乙'})
+    _, r = api('/api/login', {'type': 'student', 'account': '2029102', 'secret': '123456'})
     tok_b2 = r['data']['token']
     api('/api/logout', {}, token=tok_b2)
     st, r = api('/api/signup/list', token=tok_b2)

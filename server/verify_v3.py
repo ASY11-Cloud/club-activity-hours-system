@@ -61,8 +61,8 @@ check("管理员 admin/admin123 登录成功", r.get("code") == 0, r)
 ATOK = r["data"]["token"] if r.get("code") == 0 else ""
 r2 = call("POST", "/api/login", {"type": "admin", "account": "admin", "secret": "wrong-pwd"})
 check("错误口令被拒绝(401)", r2.get("code") == 401, r2)
-r = call("POST", "/api/login", {"type": "student", "account": "2023001", "secret": "张三"})
-check("学生 2023001 张三 登录成功", r.get("code") == 0, r)
+r = call("POST", "/api/login", {"type": "student", "account": "2023001", "secret": "123456"})
+check("学生 2023001 登录成功(学号+密码)", r.get("code") == 0, r)
 STOK = r["data"]["token"] if r.get("code") == 0 else ""
 
 # ---------- 2. 活动列表分页 ----------

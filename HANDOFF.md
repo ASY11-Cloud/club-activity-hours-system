@@ -204,7 +204,7 @@ python server\test_api.py                     # 26 通过（会写入，跑完�
 1. **编译器**：唯一能编过的是 Dev-C++ 自带 **TDM g++ 4.9.2 + `-std=c++14`**。`C:\Program Files\mingw64` 的 6.3.0 是 win32 线程模型，缺 `std::thread`，c++11/c++17 都编不过。
 2. **`build.bat` 必须 GBK 编码 + CRLF 换行**，否则中文注释会让 cmd 解析异常。
 3. **DevEco 在 `D:\HuaWei\DevEco Studio`**，构建要 `export DEVECO_SDK_HOME="D:\HuaWei\DevEco Studio\sdk"`，并用其自带 node 跑 `hvigorw.js`。
-4. **学生登录口径是「学号 + 姓名」**（不是密码），管理员是「账号 + 密码」。写测试时最容易搞错。
+4. **学生登录口径已于 §24 改为「学号 + 密码」**（初始密码 `123456`），管理员是「账号 + 密码」。写测试时最容易搞错（旧脚本里传姓名的写法已全部替换）。
 5. **`verify_v3.py` 会留下测试活动**（`id` 递增、标题含"历史活动"或 `v3 `），跑完请清理：
    ```sql
    DELETE FROM activity WHERE title LIKE 'v3 %' OR title = '历史活动';
@@ -634,3 +634,217 @@ HoursReportPage.exportCsv 原样写 UTF-8 无 BOM, Excel 双击打开中文乱�
 ### 22.5 验证
 - 回归：`verify_demo_data` 8/8、`verify_cancel` 4/4、`verify_ui_contract` 48/48、`test_p1p2` 26/26（连跑两次）。
 - 基线未漂移：8 活动 / 19 报名 / 5 人 / 20.5 学时。
+
+---
+
+## 23. 安全加固与缺陷根治（2026-11-09）
+
+> 起因：对全项目做了一次带证据的代码审查，发现 2 个 P0（可用一条请求打崩服务、可接管他人账号并硬删数据）、5 个 P1（数据/交互缺陷）、若干 P2。本节记录全部改动与验证方式。
+
+### 23.1 P0：可远程利用
+
+| # | 问题 | 根因 | 修复 |
+|---|---|---|---|
+| 1 | 任意学生可接管他人账号并**硬删除**其报名与学时 | `/api/hours/report` 的排行数组未按角色过滤，把全班**学号+姓名**下发；学生登录口径恰是「学号+姓名」；自助注销只校验本人学号 | 排行对 `role=="student"` **脱敏**（姓名 `张**`、学号前 4 位 `2023****`），本人行用 `is_me=true` 保持明文；管理员视图不变 |
+| 2 | 一条请求打崩服务端 | `JsonParser` 纯递归无深度上限；`/api/login`、`/api/register`、`/api/signin` 均在鉴权前解析 body；64KB 的 `[[[[…` 可崩栈 | `JsonParser` 加 `depth_` + `DepthGuard`（RAII），上限 64 层 |
+
+`maskName` / `maskStuNo` / `is_me` 位于 `handleHoursReport` 上方；`DepthGuard` 位于 `JsonParser` 私有区。
+
+### 23.2 P1：数据与交互缺陷
+
+| # | 问题 | 修复 |
+|---|---|---|
+| 1 | 报名"假成功"：服务器明确拒绝仍置 `signed=true` 并保留本地 `synced=0` 记录 → 幽灵报名无法删除、也无法再报名 | 新增 `ApiClient.isRejected()`；`ActivityDetailPage.doSignup` 区分「业务拒绝」（回滚本地 + 保持未报名）与「网络故障」（保留待补传）；`MySignupPage.retryUnsynced` 对业务拒绝的记录直接清理并汇总提示 |
+| 2 | 刷卡签到时间丢失：新建/待审→通过两个分支只写 `checkin=1`，不写 `checked_at` | `handleSignin` 两处补 `checked_at=NOW()`；已通过再刷改 `COALESCE(checked_at,NOW())` 保留首次时间 |
+| 3 | `client_id` 被覆盖：同学生换设备重报时服务端改写旧 `client_id`，旧设备本地记录被当成陈旧数据清掉 | 去掉 `client_id=VALUES(client_id)`；`/api/signup/add` 回传服务器真实 `client_id`，App 用 `DbHelper.replaceSignupClientId()` 校正本地 |
+| 4 | 卡号无唯一约束；注册/审核都不采集卡号 → 新成员永远刷不了卡；手工绑重卡会刷错人 | 注册接口接受可选 `card_no`（规范化大写、查重）；审核接口支持 `card_no` 绑定；`student.card_no` 改可 NULL + `UNIQUE KEY uk_card`；注册页与审核页各加输入框 |
+| 5 | 管理员无法改口令 | 新增 `POST /api/admin/password`（校验原口令）；设置页加「修改管理员口令」卡片 |
+
+### 23.3 P2：工程加固
+
+| 项 | 修复 |
+|---|---|
+| Token 可预测（`std::mt19937`） | 改 `BCryptGenRandom`（系统 CSPRNG），32 字节 → 64 hex |
+| 口令单轮 SHA-256 | 改迭代加盐（`sha256i:` 前缀，12000 轮）；明文/单轮格式登录成功后自动升级，启动迁移只处理明文（单轮哈希无法反推） |
+| 每请求 detach 一个线程写日志 | 改「有界队列（4096）+ 单消费者线程批量写（200/批，50ms 轮询）」，队列满丢落库不阻塞业务 |
+| 连接数无上限 | `g_conns` 计数 + `MAX_CONNS=256`，超限直接 503 并关闭 |
+| 负数 `Content-Length` | `atoll` 判负 → 400（原实现强转巨大 `size_t` 会把线程卡在 drain） |
+| chunked 请求 | 明确 411 拒绝（避免块长度被当成下一个请求，形成请求走私） |
+| 日志字段超长静默丢 | `path`/`query` 入库前截到 250 字（列宽 255） |
+| 登录节流可被用来锁死他人账号 | 节流 key 改为 `ip\|type:account`，并加同 IP 总失败上限（30/60s） |
+| `scope=mine` 信任客户端 `stu_no` | 学生强制使用登录学号 |
+| 未设达标线时进度恒 0% | `pct()` 在 `requiredHours<=0` 时返回 100 |
+| `extractCode` 字符串误判 | 只在响应体开头 12 字节内找首个 `"code":` |
+
+### 23.4 数据库变更（老库自动迁移）
+
+`dbEnsureSchema()` 启动时执行（已存在则报错忽略）：
+
+```sql
+ALTER TABLE student MODIFY card_no VARCHAR(32) NULL DEFAULT NULL;
+UPDATE student SET card_no=NULL WHERE card_no='';
+CREATE UNIQUE INDEX uk_card ON student (card_no);
+```
+
+`init_db.sql` 同步：`card_no` 改 `NULL DEFAULT NULL` + `UNIQUE KEY uk_card`；`admin_user.password` 注释改为 `sha256i:` 迭代格式。
+`seed_demo_data.sql`：未绑卡学生由 `''` 改为 `NULL`（否则唯一索引冲突）。
+
+### 23.5 验证（2026-11-09 实测）
+
+- 服务端 `TDM g++ 4.9.2 -std=c++14 -O2 -Wall` **零警告**，`server.exe` 已更新
+- 原始 HTTP 用例 9/9：深嵌套 JSON → `code 400` 且进程存活；负数 `Content-Length` → `400`；`chunked` → `411`；重复卡号注册 → `409`；已通过再刷卡 → `200` 且 `checked_at` 写入、学时不变
+- 接口用例 8/8（除下条）：管理员/学生登录正常；学生排行 **本人明文 + 他人脱敏**；明细仅本人；`scope=mine&stu_no=他人` 返回本人活动；改密错原口令 → `401`
+- DB 核对：`admin.password` 前缀 `sha256i:`；`uk_card` 索引存在；`student.card_no` 无空串；基线 **8 活动 / 19 报名 / 20.5 学时** 未漂移
+- App `hvigorw assembleHap` **BUILD SUCCESSFUL**（26 tasks）
+
+### 23.6 环境注意（本轮新增）
+
+1. **编译必须加 `-lbcrypt`**（`bcrypt.h` + `libbcrypt.a` 在 TDM 4.9.2 自带），`build.bat` 已补，仍为 GBK + CRLF。
+2. 构建 App 除 `DEVECO_SDK_HOME` 外还需 **`NODE_HOME="D:\HuaWei\DevEco Studio\tools\node"`**，否则 hvigorw 报「NODE_HOME is not set」。
+3. 本机 `python` 只有 Microsoft Store 存根（执行返回 9009），**6 个 Python 回归脚本当前跑不了**；本轮改用 PowerShell 直接调 HTTP 验证。换机器/装好 Python 后仍应按 §2 跑全套。
+4. 删除过 `entry/build` 后首次构建会因 `.tsbuildinfo` 缺失报 `ENOENT`（非代码错误），先跑 `hvigorw clean` 再 `assembleHap`。
+
+### 23.7 有意未做
+
+- **学生登录改密码体系**：会改变演示口径（README/使用说明/答辩均写「学号+姓名」）并影响 6 个回归脚本。本轮通过"排行脱敏"关闭了零门槛接管路径；熟人冒名仍属 §4 声明的弱认证取舍，生产环境应改「学号+口令」或统一身份认证。
+- **Token 迁移到 `@ohos.security.asset`**：改动面大（异步 API、全部读写点），当前存 Preferences 明文，属既定取舍。
+- **chunked 完整解析**：App 与 ESP32 均不发 chunked，明确拒绝已消除走私风险。
+
+---
+
+## 24. 学生登录升级为「学号 + 密码」（2026-11-09）
+
+> 用户决定彻底根治学生弱认证：学生不再用姓名当口令，改为独立密码；同时**撤销 §23.1 的排行脱敏**——姓名不再是认证要素后，排行/用户列表按原样显示全名不构成风险。
+
+### 24.1 数据库
+
+```sql
+ALTER TABLE student ADD COLUMN pwd_hash VARCHAR(100) NOT NULL DEFAULT ''
+  COMMENT '登录口令: sha256i:<hex>';
+```
+
+- `dbEnsureSchema()` 启动时自动加列，并把 `pwd_hash=''` 的账号**统一初始化为默认密码 `123456`**（`pwdHashStrong`，只算一次哈希）。
+- 已改过密码的账号不会被覆盖（`WHERE pwd_hash=''`）。
+- `init_db.sql` 同步加列；`seed_demo_data.sql` 不写该列，首次启动自动初始化。
+
+### 24.2 接口
+
+| 变化 | 说明 |
+|---|---|
+| `POST /api/login`（student） | `secret` 由姓名改为**密码**，`pwdVerify(pwd_hash)` 校验；**先验密码再报审核状态**，避免向未认证者泄露"审核中/已驳回" |
+| `POST /api/register` | 新增 **`pwd`（必填，6~64 位）**，入库为迭代加盐哈希 |
+| `POST /api/student/password` | 新增：成员改自己密码 `{old_pwd, new_pwd}`，校验原密码 |
+| `POST /api/student/reset_pwd` | 新增：管理员重置成员密码 `{student_id, new_pwd}`（成员忘密码时用） |
+| `GET /api/hours/report` | **恢复明文** `name`/`stu_no`，保留 `is_me`（仅用于 App 定位本人行） |
+
+### 24.3 App
+
+- `LoginPage`：成员密码框改为 `InputType.Password`，预填 `2023001 / 123456`，文案「学号 + 密码」
+- `RegisterPage`：新增「密码 / 确认密码」两个输入，校验 6~64 位且两次一致
+- `SettingsPage`：成员可见「修改登录密码」卡片（`/api/student/password`）；管理员「修改管理员口令」保持不变
+- `HoursReportPage` / `MainPage`：脱敏适配代码保留 `is_me || stu_no === 本人` 的兼容判断，明文/脱敏两种响应都能正确高亮本人
+
+### 24.4 回归脚本同步（6 个）
+
+| 脚本 | 改动 |
+|---|---|
+| `test_api.py` | 学生 `secret` → `123456`；错误用例改为 `wrongpwd` |
+| `test_cancel_api.py` | 注册补 `pwd`；登录 `secret` → `123456` |
+| `test_p1p2.py` | 3 个测试学生注册补 `pwd`；登录 `secret` → `123456` |
+| `verify_demo_data.py` | 孙洋/吴桐/冯婷 `secret` → `123456` |
+| `verify_v3.py` | 2023001 `secret` → `123456` |
+| `verify_ui_contract.py` | 成员登录 `secret` → `123456`，用例名同步 |
+
+### 24.5 验证（2026-11-09 实测）
+
+- DB：`pwd_hash` 列已建；`empty_pwd=0`、`iter_pwd=10`（含 `2024001`，说明历史账号一并初始化）
+- 接口 9/9：`2023005/123456` 登录成功；`2023005/孙洋` → `401`（姓名不再可登录）；排行恢复明文（`李铭/2023002`）且 `is_me` 仍为 1；成员改密 → 新密码登录成功 → 改回 → 再登录成功；无密码注册 → `400`
+- App `hvigorw clean && assembleHap` **BUILD SUCCESSFUL**
+- 基线未漂移：8 活动 / 19 报名 / 20.5 学时 / 榜首李铭 5.5
+
+### 24.6 交付提醒
+
+1. **演示口令表**：管理员 `admin/admin123`；成员 `2023001/123456`、`2023002/123456`，其余成员初始密码同为 `123456`
+2. 首次登录后建议在「我的 → 设置」改密；管理员可在用户管理中重置（`/api/student/reset_pwd`）
+3. 若现场用旧 HAP（v3.0），登录会失败——必须更新 App 与服务端**成对**部署
+4. 密码只走 HTTP 明文传输（无 HTTPS，属既定取舍），仅限局域网演示
+
+---
+
+## 25. 学生自助注销改为密码确认 + 审查遗留项修复（2026-11-09）
+
+> 起因：用户指出「注销还让输入学号不合理」。学号在学时排行、用户管理中都是公开信息，把它当作不可逆操作的凭据等于没有确认——Token 一旦泄露（手机丢失、共享设备未退出），攻击者用公开学号就能把账号连同报名与学时物理删除。
+
+### 25.1 接口变更
+
+| 接口 | 变更 |
+|---|---|
+| `POST /api/student/cancel` | 确认字段 **`confirm_stu_no` → `confirm_pwd`**（只校验登录密码，不再要求学号）。失败码区分：密码错 → `403`；并发注销/学号已不存在 → `409`；节流命中 → `429` |
+| `POST /api/student/delete` | **不变**（`stu_no + confirm_stu_no`）。管理员本就有删除权限，学号用于防误触而非认证 |
+
+### 25.2 零 TOCTOU 的口令校验
+
+`dbDeleteStudent` 增加可选参数，在**同一事务、同一把行锁内**校验口令：
+
+```cpp
+static bool dbDeleteStudent(MYSQL* c, const string& stuNo,
+                            int& nSignup, double& hoursDeleted, string& err,
+                            const string* expectPwd = nullptr, bool* pwdMismatch = nullptr);
+```
+
+事务内 `SELECT id,pwd_hash FROM student WHERE stu_no=? FOR UPDATE` 后，若 `expectPwd` 非空且 `pwdVerify` 失败：回滚、置 `pwdMismatch=true`、返回 false。这样"校验通过 → 删除之间被并发改密"的窗口不存在，也不需要第二次查库。管理员路径不传参数，行为与原来完全一致。
+
+### 25.3 注销失败节流
+
+持 Token 者可反复猜密码、猜中即毁号，因此按 **`cancel|IP|学号`** 计数：60 秒内错 5 次即 `429`，成功清零。复用登录节流的 `loginBlocked/loginFailAdd/loginFailClear`，但不与登录计数互相影响。
+
+### 25.4 App
+
+- `SettingsPage` 注销面板：输入框改 `InputType.Password`、placeholder「输入登录密码以确认注销」、按钮在输入 ≥6 位时可用；body 改 `{confirm_pwd}`；面板增加"学号是公开信息，不能作为凭据"的说明
+- 前端仍做"非空"前置校验，真实校验只在服务端（绕过 UI 直接打接口同样被拒）
+
+### 25.5 同批修复的审查遗留项
+
+| 编号 | 问题 | 修复 |
+|---|---|---|
+| M1 | 连接数超限时在 accept 主线程 `sendAll(503)` 无发送超时，对端不读会卡死 accept | 发送前 `setsockopt(SO_SNDTIMEO=1000ms)` |
+| M2 | 连接线程无异常兜底：异常逃出线程 → `std::terminate`；且 `g_conns` 不回收 | `handleClient` 不再自行 `closesocket`；lambda 内 `try/catch` 后统一 `closesocket + fetch_sub`，正常/异常都覆盖 |
+| M3 | 登录 `secret` 无长度上限 + 12000 轮迭代 → CPU 放大攻击 | `secret > 128` 或 `account > 64` → 400，位置在 `pwdVerify` 之前 |
+| M4 | 注册/改密不 trim 而登录 trim → 含首尾空格的密码永远登不上 | 注册、确认密码、学生改密、管理员改密统一 `.trim()` |
+| S1 | 401 分支缺 `http_status`，`isRejected()` 把登录过期误判为可重试 | 401 失败体补 `'http_status': 401` |
+| S2 | `pwd_hash`/`uk_card` 迁移失败静默（缺列 → 全员 401 却无提示） | 先查 `information_schema` 存在性，补列/建索引后再确认，仍失败则 `std::cerr` 告警 |
+
+### 25.6 脚本与文档
+
+- `test_cancel_api.py`：22 项 → **27 项**。学生侧 4 处改 `confirm_pwd`；新增 5 项节流用例（新建临时学生 → 5 次错密码全 403 → 第 6 次即使密码正确也 429 → 管理员清理）
+- `verify_cancel.py`：纯数据校验，无需改动
+- `test_p1p2.py`：清理用管理员 `student/delete`，无需改动
+- `README.md`：接口表补 `student/password`、`student/reset_pwd`、`student/impact`、`student/cancel`、`student/delete`；修正 `hours/report` 的"脱敏"描述（已于 §24 恢复明文）
+- `docs/使用说明.md`：5.11 注销章节改为"学生输密码、管理员输学号"，补充节流与零 TOCTOU 说明
+- `VERSION.md`：新增 v3.1 段落
+- `CODEBUDDY.md`：**已删除**。它原本是"交给接手 AI 的上手必读"（环境/基线/红线/取舍），实际内容与本文 §16.2、§23/§24、§25 及 README 重复，且已过期（仍写"学生登录=学号+姓名"、HANDOFF 22 节、25 个接口）。删前核对过：`thread_local` 禁令（§2）、`Tabs.tabBar` 不重建（§16.2）、GBK+CRLF（§23.6）、基线 8/19/20.5（§25.7）在本文均有更详细记录，无信息丢失。后续交接只维护 `HANDOFF.md`（只追加）+ `README.md`（现状）
+
+### 25.7 验证（2026-11-09）
+
+- 服务端 `-O2 -Wall` **零警告**（`build.log` 为空），`server.exe` 已重编
+- **PowerShell 注销闭环 23/23**（本机 `python` 不可用，改用 `Invoke-WebRequest` 直打接口；服务端业务码在 `body.code`，HTTP 恒为 200）：
+  - 错密码 → `403`「登录密码不正确, 注销已取消」且账号保留；正确密码 → 成功（删除报名 0 条 / 0.0 学时，因测试学生无报名）
+  - 注销后旧 Token → `401`；`signup`/`hours_total` 级联零残留
+  - 管理员走自助通道 → `403`；5 次错密码全 `403`，第 6 次**即使密码正确**也 `429` 且账号仍在
+  - 管理员 `student/delete`（学号确认）→ 成功，管理员 Token 不受影响
+- 协议防护：深嵌套 JSON（500 层）→ `code 400` 且进程存活；负数 `Content-Length` → `400`；`chunked` → `411`；200/5000 字节口令 → `400` 账号或口令过长（452ms 返回，未进入哈希）；超长 `confirm_pwd`/空密码 → `400`
+- `verify_cancel.py` 4 项以 SQL 复核全绿：孤儿记录 0 / 逐人汇总与明细一致 / 总额 20.5 == 明细 20.5
+- App `hvigorw clean && assembleHap` **BUILD SUCCESSFUL**（33 tasks，`CompileArkTS` 实际执行 11.9s，0 ERROR）
+- 基线未漂移：8 活动 / 19 报名 / 5 人学时报表（榜首李铭 5.5）/ 20.5 学时；`2099*` 测试学生零残留
+
+### 25.8 取舍说明
+
+- 管理员注销**不要求管理员密码**：管理员 Token 本身已是高权限凭证，学号二次确认只防手滑；若要防"管理员 Token 泄露后滥删"，应引入操作审批而非再加一道密码。
+- 学生改密后旧 Token 仍有效（与 §24 一致），如需强制下线，应在改密成功后遍历 `g_tokens` 删除该学号的全部 Token。
+
+### 25.9 服务端运行约定（用户要求）
+
+- **服务端常驻，不要每次验证完就关掉**：日常改动只需重启 App 或重新登录，服务端一直开着（`/api/health` 探活即可，返回 `db:true` 说明连库正常）。
+- 唯一**必须**先停的场合：重编 `server.exe`——Windows 会因文件占用导致链接失败，流程固定为 `stop → build → start`。`server/stop_server.bat` 就是给这一步和收工用的。
+- 除非调试节流/Token 这类**内存态**逻辑（重启即清零），否则不要为了"干净状态"重启服务端；重启意味着全体在线用户掉线。
+- 若后台进程随 IDE/会话结束被回收，让用户双击 `server\start_server.bat` 即可常驻（该脚本会自检 3306 端口）。

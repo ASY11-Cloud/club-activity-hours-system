@@ -20,6 +20,9 @@ Thumbs.db
 # ---- WorkBuddy 工具内部记忆 ----
 .workbuddy/
 
+# ---- CodeBuddy 工具内部数据(非项目内容) ----
+.codebuddy/
+
 # ---- WorkBuddy 调试残留截图/临时文件（不入库） ----
 .*.jpeg
 tmp_*.jpeg

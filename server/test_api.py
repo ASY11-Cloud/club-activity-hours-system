@@ -75,12 +75,12 @@ ADMIN = r.get("data", {}).get("token", "")
 r = call("POST", "/api/login", {"type": "admin", "account": "admin", "secret": "badpwd"})
 t("admin wrong password rejected", r.get("code") == 401, r)
 
-r = call("POST", "/api/login", {"type": "student", "account": "2023001", "secret": "张三"})
+r = call("POST", "/api/login", {"type": "student", "account": "2023001", "secret": "123456"})
 t("student login ok", r.get("code") == 0 and r["data"].get("role") == "student" and r["data"].get("stu_no") == "2023001", r.get("data"))
 STU1 = r.get("data", {}).get("token", "")
 
-r = call("POST", "/api/login", {"type": "student", "account": "2023001", "secret": "李铭"})
-t("student wrong name rejected", r.get("code") == 401, r)
+r = call("POST", "/api/login", {"type": "student", "account": "2023001", "secret": "wrongpwd"})
+t("student wrong password rejected", r.get("code") == 401, r)
 
 # ================= 2. 权限矩阵(越权拒绝) =================
 print("========== 2. 权限矩阵 ==========")
@@ -111,7 +111,7 @@ not_mine = [s for s in r.get("data", {}).get("list", []) if s["stu_no"] != "2023
 t("student list only own records", r.get("code") == 0 and len(mine) > 0 and len(not_mine) == 0, r.get("data"))
 
 # 管理员登录李铭身份报名(正常路径)
-r = call("POST", "/api/login", {"type": "student", "account": "2023002", "secret": "李铭"}, )
+r = call("POST", "/api/login", {"type": "student", "account": "2023002", "secret": "123456"}, )
 t("student2 login", r.get("code") == 0, r.get("data"))
 STU2 = r.get("data", {}).get("token", "")
 r = call("POST", "/api/signup/add",

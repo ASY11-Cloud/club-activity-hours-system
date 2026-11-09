@@ -1,8 +1,8 @@
 /**
  * 社团活动报名与学时认定系统 —— 注册页(v2.0)
- * 新成员提交注册申请: 学号 + 姓名 + 班级/院系
+ * 新成员提交注册申请: 学号 + 姓名 + 班级/院系 + 登录密码(卡号可选)
  * 提交后写入服务器 student 表(status=0), 由管理员在审核中心审批,
- * 审核通过后即可登录(学号+姓名)。
+ * 审核通过后即可用「学号 + 密码」登录。
  */
 import { router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
@@ -16,6 +16,9 @@ struct RegisterPage {
   @State stuNo: string = '';
   @State name: string = '';
   @State dept: string = '';
+  @State cardNo: string = '';   // RFID 卡号(可选): 不填就刷不了卡, 也可由管理员审核时补绑
+  @State pwd: string = '';      // 登录密码(必填): 登录口径为「学号 + 密码」
+  @State pwd2: string = '';     // 确认密码
   @State msg: string = '';
   @State busy: boolean = false;
   @State done: boolean = false;
@@ -32,6 +35,9 @@ struct RegisterPage {
     const s = this.stuNo.trim();
     const n = this.name.trim();
     const d = this.dept.trim();
+    const c = this.cardNo.trim().toUpperCase();
+    // 与登录页 trim 口径一致: 登录时 secret 会 trim, 注册若保留首尾空格, 密码将永远对不上
+    const p = this.pwd.trim();
     if (s === '' || n === '') {
       this.msg = '学号与姓名必填';
       return;
@@ -44,10 +50,22 @@ struct RegisterPage {
       this.msg = '姓名过长';
       return;
     }
+    if (c.length > 32) {
+      this.msg = '卡号过长(最多 32 位)';
+      return;
+    }
+    if (p.length < 6 || p.length > 64) {
+      this.msg = '密码长度需 6~64 位';
+      return;
+    }
+    if (p !== this.pwd2.trim()) {
+      this.msg = '两次输入的密码不一致';
+      return;
+    }
     this.busy = true;
     this.msg = '正在提交注册申请...';
     try {
-      const body: Record<string, Object> = { 'stu_no': s, 'name': n, 'dept': d };
+      const body: Record<string, Object> = { 'stu_no': s, 'name': n, 'dept': d, 'card_no': c, 'pwd': p };
       const resp = await ApiClient.post('/api/register', body);
       if (resp['code'] === 0) {
         this.done = true;
@@ -65,6 +83,9 @@ struct RegisterPage {
     this.stuNo = '';
     this.name = '';
     this.dept = '';
+    this.cardNo = '';
+    this.pwd = '';
+    this.pwd2 = '';
     this.msg = '';
   }
 
@@ -113,6 +134,27 @@ struct RegisterPage {
                 .enabled(!this.done)
                 .onChange((v: string) => this.dept = v)
             }
+            Row({ space: 10 }) {
+              Text('卡号').fontSize(14).fontColor(Theme.textBody).width(60)
+              TextInput({ text: this.cardNo, placeholder: 'RFID 卡号(选填, 用于刷卡签到)' })
+                .layoutWeight(1).maxLength(32)
+                .enabled(!this.done)
+                .onChange((v: string) => this.cardNo = v)
+            }
+            Row({ space: 10 }) {
+              Text('密码').fontSize(14).fontColor(Theme.textBody).width(60)
+              TextInput({ text: this.pwd, placeholder: '登录密码(6~64 位)' })
+                .type(InputType.Password).layoutWeight(1).maxLength(64)
+                .enabled(!this.done)
+                .onChange((v: string) => this.pwd = v)
+            }
+            Row({ space: 10 }) {
+              Text('确认').fontSize(14).fontColor(Theme.textBody).width(60)
+              TextInput({ text: this.pwd2, placeholder: '再次输入密码' })
+                .type(InputType.Password).layoutWeight(1).maxLength(64)
+                .enabled(!this.done)
+                .onChange((v: string) => this.pwd2 = v)
+            }
 
             if (this.done) {
               // 提交成功: 显示提示 + 去登录
@@ -155,7 +197,7 @@ struct RegisterPage {
           // 说明
           Column({ space: 4 }) {
             Text('注册说明').fontSize(13).fontWeight(FontWeight.Medium).width('100%')
-            Text('1. 学号必须为真实学号, 登录时使用学号+姓名')
+            Text('1. 学号必须为真实学号, 登录时使用学号+密码')
               .fontSize(11).fontColor(Theme.textSecondary).width('100%')
             Text('2. 提交后状态为「待审核」, 无法登录')
               .fontSize(11).fontColor(Theme.textSecondary).width('100%')

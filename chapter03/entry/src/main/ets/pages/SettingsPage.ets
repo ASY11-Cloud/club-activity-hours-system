@@ -44,6 +44,12 @@ struct SettingsPage {
   @State cancelErr: string = '';
   @State cancelBusy: boolean = false;
 
+  // ---- 修改管理员口令(仅管理员) ----
+  @State pwdOld: string = '';
+  @State pwdNew: string = '';
+  @State pwdMsg: string = '';
+  @State pwdBusy: boolean = false;
+
   aboutToAppear(): void {
     const ctx = getContext(this) as common.UIAbilityContext;
     AppConfig.init(ctx).then(() => {
@@ -124,6 +130,62 @@ struct SettingsPage {
     this.roleTxt = AppConfig.roleText;
   }
 
+  /** 成员修改自己的登录密码(学号+密码体系) */
+  async changeStudentPassword(): Promise<void> {
+    if (this.pwdBusy) return;
+    if (this.pwdOld === '' || this.pwdNew === '') {
+      this.pwdMsg = '请填写原密码与新密码';
+      return;
+    }
+    if (this.pwdNew.length < 6) {
+      this.pwdMsg = '新密码至少 6 位';
+      return;
+    }
+    this.pwdBusy = true;
+    try {
+      // trim 与登录页保持一致: 登录时 secret 会被 trim, 这里若不去空格会导致"改完就登不上"
+      const body: Record<string, Object> = { 'old_pwd': this.pwdOld.trim(), 'new_pwd': this.pwdNew.trim() };
+      const resp = await ApiClient.post('/api/student/password', body);
+      if (resp['code'] === 0) {
+        this.pwdMsg = '密码已更新, 下次登录请使用新密码';
+        this.pwdOld = '';
+        this.pwdNew = '';
+      } else {
+        this.pwdMsg = '修改失败: ' + (resp['msg'] as string);
+      }
+    } finally {
+      this.pwdBusy = false;
+    }
+  }
+
+  /** 修改管理员口令(服务端会校验原口令, 并升级为迭代加盐哈希) */
+  async changePassword(): Promise<void> {
+    if (this.pwdBusy) return;
+    if (this.pwdOld === '' || this.pwdNew === '') {
+      this.pwdMsg = '请填写原口令与新口令';
+      return;
+    }
+    if (this.pwdNew.length < 6) {
+      this.pwdMsg = '新口令至少 6 位';
+      return;
+    }
+    this.pwdBusy = true;
+    try {
+      // 同上: 与登录页的 trim 口径一致
+      const body: Record<string, Object> = { 'old_secret': this.pwdOld.trim(), 'new_secret': this.pwdNew.trim() };
+      const resp = await ApiClient.post('/api/admin/password', body);
+      if (resp['code'] === 0) {
+        this.pwdMsg = '口令已更新, 下次登录请使用新口令';
+        this.pwdOld = '';
+        this.pwdNew = '';
+      } else {
+        this.pwdMsg = '修改失败: ' + (resp['msg'] as string);
+      }
+    } finally {
+      this.pwdBusy = false;
+    }
+  }
+
   /** 校验并保存服务器地址; 返回是否保存成功 */
   async save(): Promise<boolean> {
     const host = this.host.trim();
@@ -174,16 +236,16 @@ struct SettingsPage {
     this.cancelImpact = parseCancelImpact(resp);
   }
 
-  /** 输入学号与本人一致才允许提交(不可逆操作, 防误触) */
+  /** 输入登录密码(非空且够长度)才允许提交; 真正的校验在服务端事务内完成 */
   cancelReady(): boolean {
-    return this.cancelImpact !== null && this.cancelInput.trim() === AppConfig.stuNo;
+    return this.cancelImpact !== null && this.cancelInput.trim().length >= 6;
   }
 
   async doCancelAccount(): Promise<void> {
     if (!this.cancelReady() || this.cancelBusy) return;
     this.cancelBusy = true;
     this.cancelErr = '';
-    const body: Record<string, Object> = { 'confirm_stu_no': this.cancelInput.trim() };
+    const body: Record<string, Object> = { 'confirm_pwd': this.cancelInput.trim() };
     const resp = await ApiClient.post('/api/student/cancel', body);
     this.cancelBusy = false;
     if (resp['code'] !== 0) {
@@ -314,8 +376,10 @@ struct SettingsPage {
                 .width('100%').padding(10).backgroundColor(Theme.dangerBg).borderRadius(Theme.radiusSm)
                 .alignItems(HorizontalAlign.Start)
 
-                TextInput({ text: this.cancelInput, placeholder: '输入本人学号 ' + this.stuNo + ' 以确认' })
-                  .height(38).fontSize(13).width('100%')
+                Text('注销不可恢复, 请输入登录密码确认(学号是公开信息, 不能作为凭据)')
+                  .fontSize(11).fontColor(Theme.textTertiary).width('100%').lineHeight(17)
+                TextInput({ text: this.cancelInput, placeholder: '输入登录密码以确认注销' })
+                  .type(InputType.Password).height(38).fontSize(13).width('100%')
                   .onChange((v: string) => { this.cancelInput = v; this.cancelErr = ''; })
 
                 Row({ space: 10 }) {
@@ -349,7 +413,55 @@ struct SettingsPage {
           }
           // 刷卡调试(模拟 RFID 终端): 真实链路是 ESP32 读卡后调用 /api/signin,
           // 这里用同一个接口模拟, 答辩没带硬件也能演示"刷卡 -> 签到 -> 学时累计"
+          // ---- 成员修改登录密码 ----
+          if (this.loggedIn && !this.isAdmin) {
+            Column({ space: 10 }) {
+              Text('修改登录密码').fontSize(14).fontWeight(FontWeight.Medium)
+              Text('初始密码为 123456, 建议首次登录后立即修改')
+                .fontSize(11).fontColor(Theme.textSecondary).lineHeight(17)
+              TextInput({ text: this.pwdOld, placeholder: '原密码' })
+                .type(InputType.Password).height(40).fontSize(13)
+                .onChange((v: string) => this.pwdOld = v)
+              TextInput({ text: this.pwdNew, placeholder: '新密码(至少 6 位)' })
+                .type(InputType.Password).height(40).fontSize(13)
+                .onChange((v: string) => this.pwdNew = v)
+              Button(this.pwdBusy ? '提交中...' : '更新密码')
+                .width('100%').height(38).fontSize(14).backgroundColor(Theme.primary)
+                .enabled(!this.pwdBusy)
+                .onClick(() => this.changeStudentPassword())
+              if (this.pwdMsg !== '') {
+                Text(this.pwdMsg).fontSize(11)
+                  .fontColor(this.pwdMsg.indexOf('已更新') >= 0 ? Theme.success : Theme.danger)
+                  .width('100%')
+              }
+            }
+            .width('100%').padding(14).backgroundColor(Color.White).borderRadius(14).margin({ top: 10 })
+          }
+
           if (this.isAdmin) {
+            // ---- 修改管理员口令 ----
+            Column({ space: 10 }) {
+              Text('修改管理员口令').fontSize(14).fontWeight(FontWeight.Medium)
+              Text('管理员口令用于后台登录, 建议定期更换(普通成员使用各自的登录密码)')
+                .fontSize(11).fontColor(Theme.textSecondary).lineHeight(17)
+              TextInput({ text: this.pwdOld, placeholder: '原口令' })
+                .type(InputType.Password).height(40).fontSize(13)
+                .onChange((v: string) => this.pwdOld = v)
+              TextInput({ text: this.pwdNew, placeholder: '新口令(至少 6 位)' })
+                .type(InputType.Password).height(40).fontSize(13)
+                .onChange((v: string) => this.pwdNew = v)
+              Button(this.pwdBusy ? '提交中...' : '更新口令')
+                .width('100%').height(38).fontSize(14).backgroundColor(Theme.admin)
+                .enabled(!this.pwdBusy)
+                .onClick(() => this.changePassword())
+              if (this.pwdMsg !== '') {
+                Text(this.pwdMsg).fontSize(11)
+                  .fontColor(this.pwdMsg.indexOf('已更新') >= 0 ? Theme.success : Theme.danger)
+                  .width('100%')
+              }
+            }
+            .width('100%').padding(14).backgroundColor(Color.White).borderRadius(14).margin({ top: 10 })
+
             Column({ space: 10 }) {
               Row() {
                 Text('刷卡调试').fontSize(14).fontWeight(FontWeight.Medium).layoutWeight(1)
@@ -392,7 +504,7 @@ struct SettingsPage {
           // 演示账号说明
           Column({ space: 5 }) {
             Text('演示账号').fontSize(13).fontWeight(FontWeight.Medium).width('100%')
-            Text('普通成员: 2023001 张三 / 2023002 李铭(登录: 学号+姓名)')
+            Text('普通成员: 2023001 张三 / 2023002 李铭(登录: 学号+密码, 初始 123456)')
               .fontSize(11).fontColor(Theme.textSecondary).width('100%')
             Text('管理员: admin / admin123(登录: 账号+密码)')
               .fontSize(11).fontColor(Theme.textSecondary).width('100%')

@@ -354,7 +354,8 @@ struct HoursReportPage {
       return total;
     }
     for (const r of this.report) {
-      if (r.stu_no === AppConfig.stuNo) return r.total_hours;
+      // 本人行有 is_me 标记(学生视图下他人学号已脱敏, 不能再靠学号全等匹配)
+      if (r.is_me || r.stu_no === AppConfig.stuNo) return r.total_hours;
     }
     return 0;
   }

@@ -26,6 +26,7 @@
 #include <windows.h>
 
 #include <mysql.h>
+#include <bcrypt.h>   // BCryptGenRandom: 系统 CSPRNG(Token 生成)
 
 #include <algorithm>
 #include <atomic>
@@ -69,7 +70,8 @@ static string g_device_key;
 struct LoginFail { int count = 0; long long first_ms = 0; };
 static std::map<string, LoginFail> g_login_fail;
 static std::mutex g_login_mtx;
-static const int       LOGIN_FAIL_MAX       = 5;
+static const int       LOGIN_FAIL_MAX       = 5;    // 同一账号
+static const int       LOGIN_FAIL_IP_MAX    = 30;   // 同一来源 IP(防换账号爆破, 阈值放宽避免误伤同网段演示)
 static const long long LOGIN_FAIL_WINDOW_MS = 60LL * 1000;
 
 // ---------------------------- 登录会话(Token) ---------------------------------
@@ -86,11 +88,21 @@ static std::mutex              g_tokens_mtx;
 static const long long TOKEN_TTL_MS = 24LL * 3600 * 1000; // 24 小时
 
 static string genToken() {
-  static std::mt19937 rng((unsigned)std::chrono::system_clock::now().time_since_epoch().count()
-                          ^ (unsigned)GetCurrentProcessId());
+  // Token 是会话凭证, 必须不可预测: 用 Windows 系统 CSPRNG(BCryptGenRandom),
+  // 不能用 mt19937 —— 伪随机序列可被观察推断(拿到若干 Token 即可推后续),
+  // 一旦被预测就等于任意账号被接管。
+  unsigned char raw[32];
+  if (BCryptGenRandom(nullptr, raw, (ULONG)sizeof(raw), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) {
+    // 极端兜底: CSPRNG 不可用时退回 random_device, 仍不使用可预测的 PRNG
+    std::random_device rd;
+    for (size_t i = 0; i < sizeof(raw); i++) raw[i] = (unsigned char)(rd() & 0xFF);
+  }
   const char* hex = "0123456789abcdef";
-  string t(32, '0');
-  for (int i = 0; i < 32; i++) t[i] = hex[rng() % 16];
+  string t(64, '0');                      // 256 bit -> 64 hex
+  for (size_t i = 0; i < sizeof(raw); i++) {
+    t[i * 2]     = hex[(raw[i] >> 4) & 0x0F];
+    t[i * 2 + 1] = hex[raw[i] & 0x0F];
+  }
   return t;
 }
 
@@ -157,29 +169,56 @@ static string sha256Hex(const string& in) {
   return string(buf, 64);
 }
 
-/** 明文口令 -> 入库格式(加盐哈希) */
-static string pwdHash(const string& secret) {
-  return string(PWD_PREFIX) + sha256Hex(string(PWD_SALT) + secret);
-}
-
-/** 库中值是否为哈希格式(旧版本为明文) */
-static bool pwdIsHashed(const string& stored) {
-  return stored.size() == 71 && stored.compare(0, 7, PWD_PREFIX) == 0;
-}
-
-/** 校验口令: 哈希走摘要比对, 旧明文走字符串比对(登录成功后由调用方升级) */
-static bool pwdVerify(const string& stored, const string& secret) {
-  if (pwdIsHashed(stored)) return stored == pwdHash(secret);
-  return stored == secret;
-}
-
-/** 防时序侧信道: 常量时间比较(用于设备密钥) */
+/** 防时序侧信道: 常量时间比较(口令摘要 / 设备密钥) */
 static bool constEq(const string& a, const string& b) {
   if (a.size() != b.size()) return false;
   unsigned char diff = 0;
   for (size_t i = 0; i < a.size(); i++) diff |= (unsigned char)(a[i] ^ b[i]);
   return diff == 0;
 }
+
+// 口令存储格式演进:
+//   明文                                   (v1.0, 仅兼容读取, 登录后立即升级)
+//   "sha256:<64hex>"                       (单轮加盐, v2.0; 可被 GPU 高速暴破)
+//   "sha256i:<64hex>"                      (迭代加盐, 当前格式; 提高离线暴破成本)
+// 迭代次数取 12000: 单次登录约 10~20ms(用户无感), 但把离线尝试成本放大约 1.2 万倍。
+static const char* PWD_PREFIX_ITER = "sha256i:";
+static const int   PWD_ITER        = 12000;
+// 学生初始口令: 历史账号/演示账号没有口令, 服务启动时统一初始化为该值,
+// 文档与 App 均提示"首次登录后请自行修改"。
+static const char*  DEFAULT_STUDENT_PWD = "123456";
+
+/** 明文口令 -> 入库格式(单轮加盐, 保留用于识别与兼容旧库) */
+static string pwdHash(const string& secret) {
+  return string(PWD_PREFIX) + sha256Hex(string(PWD_SALT) + secret);
+}
+
+/** 明文口令 -> 当前入库格式(迭代加盐) */
+static string pwdHashStrong(const string& secret) {
+  string h = sha256Hex(string(PWD_SALT) + secret);
+  for (int i = 1; i < PWD_ITER; i++) h = sha256Hex(h + PWD_SALT);
+  return string(PWD_PREFIX_ITER) + h;
+}
+
+/** 库中值是否为哈希格式(旧版本可能仍是明文) */
+static bool pwdIsHashed(const string& stored) {
+  if (stored.size() == 71 && stored.compare(0, 7, PWD_PREFIX) == 0) return true;
+  if (stored.size() == 72 && stored.compare(0, 8, PWD_PREFIX_ITER) == 0) return true;
+  return false;
+}
+
+/** 是否为当前最强格式(迭代加盐); 否则登录成功后需升级 */
+static bool pwdIsStrong(const string& stored) {
+  return stored.size() == 72 && stored.compare(0, 8, PWD_PREFIX_ITER) == 0;
+}
+
+/** 校验口令: 迭代/单轮哈希走摘要比对, 旧明文走字符串比对(登录成功后由调用方升级) */
+static bool pwdVerify(const string& stored, const string& secret) {
+  if (pwdIsStrong(stored)) return constEq(stored, pwdHashStrong(secret));
+  if (pwdIsHashed(stored)) return constEq(stored, pwdHash(secret));
+  return constEq(stored, secret);
+}
+
 
 
 // ---------------------------- 轻量 JSON --------------------------------------
@@ -291,11 +330,24 @@ public:
 private:
   const string& s_;
   size_t i_;
+  // 递归深度上限: parseValue/parseObject/parseArray 是相互递归的,
+  // 一个 64KB 的 "[[[[[[..." 就能产生数万层调用把线程栈打爆(进程直接消失, 无日志)。
+  // 业务 JSON 最深不过 4 层, 64 层足够宽松又能挡住深嵌套攻击。
+  int depth_ = 0;
+  static const int MAX_DEPTH = 64;
+
+  /** 容器层级计数: 进入 +1, 任何 return 路径都靠析构 -1(避免手写遗漏) */
+  struct DepthGuard {
+    int& d;
+    explicit DepthGuard(int& x) : d(x) { d++; }
+    ~DepthGuard() { d--; }
+  };
 
   void skipWs() { while (i_ < s_.size() && (s_[i_] == ' ' || s_[i_] == '\t' || s_[i_] == '\n' || s_[i_] == '\r')) i_++; }
 
   bool parseValue(Json& out) {
     if (i_ >= s_.size()) return false;
+    if (depth_ >= MAX_DEPTH) return false;   // 超深嵌套: 直接判非法, 不进入递归
     char c = s_[i_];
     if (c == '{') return parseObject(out);
     if (c == '[') return parseArray(out);
@@ -308,6 +360,7 @@ private:
 
   bool parseObject(Json& out) {
     out = Json::Object();
+    DepthGuard guard(depth_);
     i_++; // {
     skipWs();
     if (i_ < s_.size() && s_[i_] == '}') { i_++; return true; }
@@ -334,6 +387,7 @@ private:
 
   bool parseArray(Json& out) {
     out = Json::Array();
+    DepthGuard guard(depth_);
     i_++; // [
     skipWs();
     if (i_ < s_.size() && s_[i_] == ']') { i_++; return true; }
@@ -561,6 +615,54 @@ static void logPush(const LogEntry& e) {
   if (g_logs.size() > LOG_CAP) g_logs.pop_back();
 }
 
+// ---- request_log 落库队列 ------------------------------------------------
+// 原先每个请求 detach 一个线程写库, 高并发时线程数随请求量线性上涨(可被打爆)。
+// 改为"有界队列 + 单个消费者线程批量写": 请求线程只做一次入队, 不创建线程。
+struct DbLogJob {
+  string method, path, query, ip, detail;
+  int    status = 200;
+  int    cost = 0;
+};
+static std::deque<DbLogJob> g_log_q;
+static std::mutex           g_log_q_mtx;
+static const size_t         LOG_Q_MAX   = 4096;   // 队列上限
+static const size_t         LOG_BATCH   = 200;    // 单批写入条数
+
+static void logEnqueue(const DbLogJob& j) {
+  std::lock_guard<std::mutex> lk(g_log_q_mtx);
+  // 队列满说明写库跟不上: 丢弃落库(内存环形日志仍可查), 绝不阻塞业务线程
+  if (g_log_q.size() >= LOG_Q_MAX) return;
+  g_log_q.push_back(j);
+}
+
+static void logWriterLoop() {
+  while (true) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    std::vector<DbLogJob> batch;
+    {
+      std::lock_guard<std::mutex> lk(g_log_q_mtx);
+      while (!g_log_q.empty() && batch.size() < LOG_BATCH) {
+        batch.push_back(g_log_q.front());
+        g_log_q.pop_front();
+      }
+    }
+    if (batch.empty()) continue;
+    MYSQL* c = dbConnect();
+    if (!c) continue;                 // 数据库暂不可用: 丢这一批, 下一轮继续
+    string err;
+    QueryResult r;
+    for (auto& j : batch) {
+      std::ostringstream sql;
+      sql << "INSERT INTO request_log (method,path,query,ip,status,cost_ms,detail) VALUES ("
+          << dbEscape(c, j.method) << "," << dbEscape(c, j.path) << ","
+          << dbEscape(c, j.query) << "," << dbEscape(c, j.ip) << ","
+          << j.status << "," << j.cost << "," << dbEscape(c, j.detail) << ")";
+      dbQuery(c, sql.str(), r, err);
+    }
+    dbRelease(c);
+  }
+}
+
 // ---------------------------- HTTP 请求结构 ----------------------------------
 struct HttpRequest {
   string method, path, query, body, ip;
@@ -726,18 +828,18 @@ static long long parseLocalTime(const string& s) {
 }
 
 // --- 登录失败节流(防暴力破解) ---
-static bool loginBlocked(const string& key) {
+static bool loginBlocked(const string& key, int maxCount = LOGIN_FAIL_MAX) {
   std::lock_guard<std::mutex> lk(g_login_mtx);
   auto it = g_login_fail.find(key);
   if (it == g_login_fail.end()) return false;
   if (nowMs() - it->second.first_ms > LOGIN_FAIL_WINDOW_MS) { g_login_fail.erase(it); return false; }
-  return it->second.count >= LOGIN_FAIL_MAX;
+  return it->second.count >= maxCount;
 }
-static void loginFailAdd(const string& key) {
+static void loginFailAdd(const string& key, int maxCount = LOGIN_FAIL_MAX) {
   std::lock_guard<std::mutex> lk(g_login_mtx);
   LoginFail& f = g_login_fail[key];
   if (f.count == 0) f.first_ms = nowMs();
-  if (f.count < LOGIN_FAIL_MAX) f.count++;
+  if (f.count < maxCount) f.count++;
 }
 static void loginFailClear(const string& key) {
   std::lock_guard<std::mutex> lk(g_login_mtx);
@@ -746,9 +848,11 @@ static void loginFailClear(const string& key) {
 
 // 登录: {type: admin|student, account, secret}
 //   admin  -> account=管理员账号, secret=密码 (查 admin_user 表)
-//   student-> account=学号,      secret=姓名 (查 student 表)
+//   student-> account=学号,      secret=密码 (查 student.pwd_hash)
 // 成功签发 Token, 返回 {token, role, name, stu_no}
-static string handleLogin(const Json& body) {
+// 注: v3.0 之前学生用"学号+姓名"登录, 姓名在排行/用户列表里本就是公开信息,
+//     等于"知道学号即可登录"; 现改为密码校验, 姓名不再参与认证。
+static string handleLogin(const Json& body, const string& ip) {
   string type = body.strVal("type");
   string account = body.strVal("account");
   string secret = body.strVal("secret");
@@ -756,10 +860,16 @@ static string handleLogin(const Json& body) {
     return jsonErr(400, "type must be admin|student");
   if (account.empty() || secret.empty())
     return jsonErr(400, "account/secret required");
+  // 长度上限: 口令校验要跑 12000 轮迭代哈希, 若不限长, 一个 60KB 的 secret
+  // 会让单次登录消耗数百 MB 的哈希计算量(把"防暴破的迭代"变成 CPU 放大攻击)。
+  if (secret.size() > 128 || account.size() > 64)
+    return jsonErr(400, "账号或口令过长");
 
-  // 同一账号连续失败过多 -> 暂时拒绝(成功登录后清零)
-  string failKey = type + ":" + account;
-  if (loginBlocked(failKey))
+  // 节流 key 带上来源 IP: 攻击者用别人的账号名连续试错, 只会锁住"自己 IP + 该账号",
+  // 不会把真实用户锁在门外(原实现只按账号计数, 可被用来恶意锁定任意账号)。
+  string failKey = ip + "|" + type + ":" + account;
+  string ipKey   = "ip|" + ip;                 // 同一来源的总失败次数(防换账号爆破)
+  if (loginBlocked(failKey) || loginBlocked(ipKey, LOGIN_FAIL_IP_MAX))
     return jsonErr(429, "登录失败次数过多, 请 60 秒后再试");
 
   MYSQL* c = dbConnect();
@@ -776,36 +886,45 @@ static string handleLogin(const Json& body) {
     if (r.rows.empty() || !pwdVerify(r.rows[0][2], secret)) {
       dbRelease(c);
       loginFailAdd(failKey);
+      loginFailAdd(ipKey, LOGIN_FAIL_IP_MAX);
       return jsonErr(401, "管理员账号或密码错误");
     }
-    // 历史明文口令: 登录成功后顺手升级为加盐哈希, 无需停机改库
-    if (!pwdIsHashed(r.rows[0][2])) {
+    // 旧格式口令(明文 / 单轮哈希): 登录成功后顺手升级为迭代哈希, 无需停机改库
+    if (!pwdIsStrong(r.rows[0][2])) {
       QueryResult up;
-      dbQuery(c, "UPDATE admin_user SET password=" + dbEscape(c, pwdHash(secret)) +
+      dbQuery(c, "UPDATE admin_user SET password=" + dbEscape(c, pwdHashStrong(secret)) +
                  " WHERE username=" + dbEscape(c, account), up, err);
     }
     ti.role = "admin";
     ti.name = r.rows[0][1];
     ti.stu_no = account;
   } else {
-    if (!dbQuery(c, "SELECT stu_no,name,status FROM student WHERE stu_no=" + dbEscape(c, account) +
-                    " AND name=" + dbEscape(c, secret), r, err)) {
+    if (!dbQuery(c, "SELECT stu_no,name,status,pwd_hash FROM student WHERE stu_no=" + dbEscape(c, account), r, err)) {
       dbRelease(c); return jsonErr(500, err);
     }
-    if (r.rows.empty()) {
+    // 先校验口令再报审核状态: 未通过认证的人不该知道该学号是"审核中"还是"已驳回"
+    if (r.rows.empty() || !pwdVerify(r.rows[0][3], secret)) {
       dbRelease(c);
       loginFailAdd(failKey);
-      return jsonErr(401, "学号或姓名错误, 未注册请先注册");
+      loginFailAdd(ipKey, LOGIN_FAIL_IP_MAX);
+      return jsonErr(401, "学号或密码错误, 未注册请先注册");
     }
     int regStatus = atoi(r.rows[0][2].c_str());
     if (regStatus == 0) { dbRelease(c); return jsonErr(403, "注册申请审核中, 请等待管理员审核后登录"); }
     if (regStatus == 2) { dbRelease(c); return jsonErr(403, "注册申请已被驳回, 请联系管理员"); }
+    // 旧格式(明文/单轮哈希)口令: 登录成功后升级为迭代哈希
+    if (!pwdIsStrong(r.rows[0][3])) {
+      QueryResult up;
+      dbQuery(c, "UPDATE student SET pwd_hash=" + dbEscape(c, pwdHashStrong(secret)) +
+                 " WHERE stu_no=" + dbEscape(c, account), up, err);
+    }
     ti.role = "student";
     ti.name = r.rows[0][1];
     ti.stu_no = r.rows[0][0];
   }
   dbRelease(c);
   loginFailClear(failKey);
+  loginFailClear(ipKey);
 
   string token = genToken();
   ti.expire_ms = nowMs() + TOKEN_TTL_MS;
@@ -832,15 +951,118 @@ static string needLogin() { return jsonErr(401, "未登录或登录已过期, �
 static string needAdmin() { return jsonErr(403, "无权限: 该操作仅限管理员"); }
 static string needStudent() { return jsonErr(403, "无权限: 该操作仅限普通成员"); }
 
-// 成员注册申请(公开): {stu_no, name, dept} -> 写入 student 表 status=0 等待管理员审核
+/**
+ * 管理员修改口令: {old_secret, new_secret}
+ * 必须校验原口令 —— 否则 Token 一旦泄露, 攻击者可直接改密并长期占用账号。
+ * 修改成功后旧 Token 仍然有效(Token 存内存, 不做版本号), 但口令已换, 重新登录需新口令。
+ */
+static string handleAdminPassword(const Json& body, const TokenInfo& me) {
+  if (me.role != "admin") return needAdmin();
+  string oldSecret = body.strVal("old_secret");
+  string newSecret = body.strVal("new_secret");
+  if (oldSecret.empty()) return jsonErr(400, "请输入原口令");
+  if (newSecret.size() < 6) return jsonErr(400, "新口令至少 6 位");
+  if (newSecret.size() > 64) return jsonErr(400, "新口令不能超过 64 位");
+  if (newSecret == oldSecret) return jsonErr(400, "新口令不能与原口令相同");
+
+  MYSQL* c = dbConnect();
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
+  string err;
+  QueryResult r;
+  if (!dbQuery(c, "SELECT password FROM admin_user WHERE username=" + dbEscape(c, me.stu_no), r, err)) {
+    dbRelease(c); return jsonErr(500, err);
+  }
+  if (r.rows.empty() || !pwdVerify(r.rows[0][0], oldSecret)) {
+    dbRelease(c); return jsonErr(401, "原口令不正确");
+  }
+  QueryResult up;
+  if (!dbQuery(c, "UPDATE admin_user SET password=" + dbEscape(c, pwdHashStrong(newSecret)) +
+                  " WHERE username=" + dbEscape(c, me.stu_no), up, err)) {
+    dbRelease(c); return jsonErr(500, err);
+  }
+  dbRelease(c);
+  return withAudit(jsonOkMsg("口令已更新", Json::Object()),
+                   "AUDIT 管理员改密 account=" + me.stu_no);
+}
+
+/** 成员修改自己的登录密码: {old_pwd, new_pwd} */
+static string handleStudentPassword(const Json& body, const TokenInfo& me) {
+  if (me.role != "student") return jsonErr(403, "仅普通成员可在此修改密码");
+  string oldPwd = body.strVal("old_pwd");
+  string newPwd = body.strVal("new_pwd");
+  if (oldPwd.empty()) return jsonErr(400, "请输入原密码");
+  if (newPwd.size() < 6 || newPwd.size() > 64) return jsonErr(400, "新密码长度需 6~64 位");
+  if (newPwd == oldPwd) return jsonErr(400, "新密码不能与原密码相同");
+
+  MYSQL* c = dbConnect();
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
+  string err;
+  QueryResult r;
+  if (!dbQuery(c, "SELECT pwd_hash FROM student WHERE stu_no=" + dbEscape(c, me.stu_no), r, err)) {
+    dbRelease(c); return jsonErr(500, err);
+  }
+  if (r.rows.empty() || !pwdVerify(r.rows[0][0], oldPwd)) {
+    dbRelease(c); return jsonErr(401, "原密码不正确");
+  }
+  QueryResult up;
+  if (!dbQuery(c, "UPDATE student SET pwd_hash=" + dbEscape(c, pwdHashStrong(newPwd)) +
+                  " WHERE stu_no=" + dbEscape(c, me.stu_no), up, err)) {
+    dbRelease(c); return jsonErr(500, err);
+  }
+  dbRelease(c);
+  return withAudit(jsonOkMsg("密码已更新", Json::Object()), "AUDIT 成员改密 stu_no=" + me.stu_no);
+}
+
+/** 管理员重置某成员密码(成员忘记密码时使用): {student_id, new_pwd} */
+static string handleStudentResetPwd(const Json& body) {
+  int studentId = body.intVal("student_id", -1);
+  string newPwd = body.strVal("new_pwd");
+  if (studentId <= 0) return jsonErr(400, "student_id required");
+  if (newPwd.size() < 6 || newPwd.size() > 64) return jsonErr(400, "新密码长度需 6~64 位");
+
+  MYSQL* c = dbConnect();
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
+  string err;
+  QueryResult r;
+  if (!dbQuery(c, "SELECT stu_no FROM student WHERE id=" + std::to_string(studentId), r, err)) {
+    dbRelease(c); return jsonErr(500, err);
+  }
+  if (r.rows.empty()) { dbRelease(c); return jsonErr(404, "学生不存在"); }
+  string stuNo = r.rows[0][0];
+  QueryResult up;
+  if (!dbQuery(c, "UPDATE student SET pwd_hash=" + dbEscape(c, pwdHashStrong(newPwd)) +
+                  " WHERE id=" + std::to_string(studentId), up, err)) {
+    dbRelease(c); return jsonErr(500, err);
+  }
+  dbRelease(c);
+  return withAudit(jsonOkMsg("密码已重置", Json::Object()), "AUDIT 重置成员密码 stu_no=" + stuNo);
+}
+
+/** 卡号规范化: 去空白 + 转大写(避免同一张卡因大小写/空格差异被当成两张卡) */
+static string normalizeCardNo(const string& raw) {
+  string t;
+  for (char ch : raw) {
+    if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') continue;
+    t += (char)toupper((unsigned char)ch);
+  }
+  return t;
+}
+
+// 成员注册申请(公开): {stu_no, name, dept, card_no?} -> 写入 student 表 status=0 等待管理员审核
 static string handleRegister(const Json& body) {
   string stuNo = body.strVal("stu_no");
   string name = body.strVal("name");
   string dept = body.strVal("dept");
+  string cardNo = normalizeCardNo(body.strVal("card_no"));
+  string pwd = body.strVal("pwd");
   if (stuNo.empty() || name.empty())
     return jsonErr(400, "学号与姓名必填");
   if (stuNo.size() > 20 || name.size() > 50 || dept.size() > 100)
     return jsonErr(400, "字段过长");
+  if (pwd.size() < 6 || pwd.size() > 64)
+    return jsonErr(400, "密码长度需 6~64 位");
+  if (cardNo.size() > 32)
+    return jsonErr(400, "卡号过长(最多 32 位)");
   MYSQL* c = dbConnect();
   if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
   string err;
@@ -855,9 +1077,19 @@ static string handleRegister(const Json& body) {
     if (st == 0) return jsonErr(409, "该学号注册申请审核中, 请勿重复提交");
     return jsonErr(409, "该学号注册曾被驳回, 请联系管理员处理");
   }
+  // 卡号唯一: 一张卡只能绑一个学号, 否则刷卡签到会记到别人头上(按卡号查学生只会取到第一行)
+  if (!cardNo.empty()) {
+    QueryResult rc;
+    if (!dbQuery(c, "SELECT stu_no FROM student WHERE card_no=" + dbEscape(c, cardNo), rc, err)) {
+      dbRelease(c); return jsonErr(500, err);
+    }
+    if (!rc.rows.empty()) { dbRelease(c); return jsonErr(409, "该卡号已被其他学号绑定"); }
+  }
   std::ostringstream s;
-  s << "INSERT INTO student (stu_no,name,dept,status) VALUES ("
-    << dbEscape(c, stuNo) << "," << dbEscape(c, name) << "," << dbEscape(c, dept) << ",0)";
+  s << "INSERT INTO student (stu_no,name,dept,card_no,pwd_hash,status) VALUES ("
+    << dbEscape(c, stuNo) << "," << dbEscape(c, name) << "," << dbEscape(c, dept) << ","
+    << (cardNo.empty() ? string("NULL") : dbEscape(c, cardNo)) << ","
+    << dbEscape(c, pwdHashStrong(pwd)) << ",0)";
   if (!dbQuery(c, s.str(), r, err)) { dbRelease(c); return jsonErr(500, err); }
   dbRelease(c);
   Json data = Json::Object();
@@ -1007,11 +1239,16 @@ static string handleStudentList(const string& query) {
 }
 
 // 注册申请审核(仅管理员): {student_id, action: pass|reject}
+// 注册申请审核: {student_id, action: pass|reject, card_no?}
+// card_no 仅在通过时绑定: 新注册成员没有卡号就永远刷不了卡(此前只能手工改库)
 static string handleStudentAudit(const Json& body) {
   int studentId = body.intVal("student_id", -1);
   string action = body.strVal("action");
+  string cardNo = normalizeCardNo(body.strVal("card_no"));
   if (studentId <= 0 || (action != "pass" && action != "reject"))
     return jsonErr(400, "student_id & action(pass|reject) required");
+  if (cardNo.size() > 32)
+    return jsonErr(400, "卡号过长(最多 32 位)");
   MYSQL* c = dbConnect();
   if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
   string err;
@@ -1021,10 +1258,20 @@ static string handleStudentAudit(const Json& body) {
   }
   if (r.rows.empty()) { dbRelease(c); return jsonErr(404, "该学生不存在或已注销"); }
   if (atoi(r.rows[0][1].c_str()) != 0) { dbRelease(c); return jsonErr(400, "该申请已审核, 不能重复操作"); }
+  // 绑卡前先查重(与注册同一口径), 冲突时给出明确原因而不是数据库 500
+  if (action == "pass" && !cardNo.empty()) {
+    QueryResult rc;
+    if (!dbQuery(c, "SELECT id FROM student WHERE card_no=" + dbEscape(c, cardNo) +
+                    " AND id<>" + std::to_string(studentId), rc, err)) {
+      dbRelease(c); return jsonErr(500, err);
+    }
+    if (!rc.rows.empty()) { dbRelease(c); return jsonErr(409, "该卡号已被其他学号绑定"); }
+  }
   // 条件更新(status=0) + 影响行数校验: 并发重复审核时只有一个请求生效
   std::ostringstream s;
-  s << "UPDATE student SET status=" << (action == "pass" ? 1 : 2)
-    << " WHERE id=" << studentId << " AND status=0";
+  s << "UPDATE student SET status=" << (action == "pass" ? 1 : 2);
+  if (action == "pass" && !cardNo.empty()) s << ",card_no=" << dbEscape(c, cardNo);
+  s << " WHERE id=" << studentId << " AND status=0";
   if (!dbQuery(c, s.str(), r, err)) { dbRelease(c); return jsonErr(500, err); }
   if (mysql_affected_rows(c) != 1) { dbRelease(c); return jsonErr(409, "该申请已被其他管理员处理, 请刷新"); }
   dbRelease(c);
@@ -1137,21 +1384,38 @@ static string handleStudentImpact(const string& query, const string& role, const
  * @param nSignup       出参: 被删除的报名条数
  * @param hoursDeleted  出参: 被删除的已认定学时合计
  */
+/**
+ * 事务内硬删除学生(报名 -> 学时 -> 学生行)。
+ * expectPwd 非空时在同一事务、同一把行锁内校验登录密码:
+ * 校验与删除之间不存在"被并发改密"的窗口(TOCTOU), 也不需要第二次查库。
+ * 密码不匹配时回滚、置 pwdMismatch=true, 由调用方决定返回码。
+ */
 static bool dbDeleteStudent(MYSQL* c, const string& stuNo,
-                            int& nSignup, double& hoursDeleted, string& err) {
+                            int& nSignup, double& hoursDeleted, string& err,
+                            const string* expectPwd = nullptr, bool* pwdMismatch = nullptr) {
   nSignup = 0;
   hoursDeleted = 0;
+  if (pwdMismatch) *pwdMismatch = false;
   mysql_autocommit(c, 0);
 
   // 锁学生行: 串行化"学生自己点注销"与"管理员同时注销"的并发请求
   QueryResult rLock;
-  if (!dbQuery(c, "SELECT id FROM student WHERE stu_no=" + dbEscape(c, stuNo) + " FOR UPDATE", rLock, err)) {
+  if (!dbQuery(c, "SELECT id,pwd_hash FROM student WHERE stu_no=" + dbEscape(c, stuNo) + " FOR UPDATE", rLock, err)) {
     mysql_rollback(c); mysql_autocommit(c, 1); return false;
   }
   if (rLock.rows.empty()) {
     mysql_rollback(c); mysql_autocommit(c, 1);
     err = "该学号不存在或已注销, 请刷新";
     return false;
+  }
+  // 锁定行之后再校验口令: 此刻该行的 pwd_hash 不会再被并发修改
+  if (expectPwd != nullptr) {
+    if (!pwdVerify(rLock.rows[0][1], *expectPwd)) {
+      mysql_rollback(c); mysql_autocommit(c, 1);
+      if (pwdMismatch) *pwdMismatch = true;
+      err = "登录密码不正确";
+      return false;
+    }
   }
 
   // 先统计(删除后就查不到了), 用于回显与审计
@@ -1197,21 +1461,42 @@ static int dropStudentTokens(const string& stuNo) {
   return n;
 }
 
-/** 学生自助注销: 必须输入本人学号确认(不可逆操作, 防误触) */
-static string handleStudentCancel(const Json& body, const TokenInfo& me) {
+/**
+ * 学生自助注销: 必须输入**本人登录密码**确认。
+ * 不用学号: 学号在排行/用户列表里是公开信息, 拿它当凭据等于没有确认 ——
+ * Token 一旦泄露(手机丢失/共享设备未退出), 攻击者用公开学号就能一键把账号连同
+ * 报名与学时物理删除。密码是唯一"只有本人知道"的要素。
+ */
+static string handleStudentCancel(const Json& body, const TokenInfo& me, const string& ip) {
   if (me.role != "student")
     return jsonErr(403, "管理员请到「用户管理」页注销学生账号");
-  string confirm = body.strVal("confirm_stu_no");
-  if (confirm.empty()) return jsonErr(400, "请输入本人学号以确认注销");
-  if (confirm != me.stu_no) return jsonErr(400, "学号不一致, 注销已取消");
+  string confirmPwd = body.strVal("confirm_pwd");
+  if (confirmPwd.empty()) return jsonErr(400, "请输入登录密码以确认注销");
+  // 与登录同一口径: 口令长度上限, 避免把"密码校验"变成哈希放大入口
+  if (confirmPwd.size() > 128) return jsonErr(400, "口令过长");
+
+  // 节流: 持 Token 者可反复猜密码, 猜中即毁号; 按 IP + 学号计数, 不影响登录节流
+  string failKey = "cancel|" + ip + "|" + me.stu_no;
+  if (loginBlocked(failKey))
+    return jsonErr(429, "密码错误次数过多, 请 60 秒后再试");
 
   MYSQL* c = dbConnect();
   if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
   string err;
   int n = 0;
   double hrs = 0;
-  if (!dbDeleteStudent(c, me.stu_no, n, hrs, err)) { dbRelease(c); return jsonErr(409, err); }
+  bool pwdMismatch = false;
+  // 口令校验在事务内、锁行之后完成(见 dbDeleteStudent), 不存在校验后被改密的窗口
+  if (!dbDeleteStudent(c, me.stu_no, n, hrs, err, &confirmPwd, &pwdMismatch)) {
+    dbRelease(c);
+    if (pwdMismatch) {
+      loginFailAdd(failKey);
+      return jsonErr(403, "登录密码不正确, 注销已取消");
+    }
+    return jsonErr(409, err);   // 并发注销/学号已不存在等
+  }
   dbRelease(c);
+  loginFailClear(failKey);
 
   int killed = dropStudentTokens(me.stu_no);   // 含当前这次请求所用的 token
 
@@ -1293,7 +1578,7 @@ static string handleStatsPending() {
   return jsonOk(d);
 }
 
-static string handleActivityList(const string& query, const string& role) {
+static string handleActivityList(const string& query, const string& role, const string& loginStuNo) {
   bool withOffline = (role == "admin" && query.find("all=1") != string::npos);
   // 分页: size<=0 表示不分页(向后兼容, 一次返回全部); 上限 200 防止被当作全表扫描入口
   int page = atoi(qparam(query, "page").c_str());
@@ -1318,7 +1603,8 @@ static string handleActivityList(const string& query, const string& role) {
   } else if (scope == "expired") {
     where += " AND a.end_time<NOW()";
   } else if (scope == "mine") {
-    string stu = qparam(query, "stu_no");
+    // 学生只能查自己的: 忽略客户端传入的 stu_no, 否则可枚举"他人在报名哪些活动"
+    string stu = (role == "student") ? loginStuNo : qparam(query, "stu_no");
     if (!stu.empty()) {
       where += " AND a.id IN (SELECT s2.activity_id FROM signup s2 WHERE s2.stu_no=" +
                dbEscape(c, stu) + " AND s2.status<>2)";
@@ -1579,7 +1865,9 @@ static string handleSignupAdd(const Json& body, const string& loginStuNo, const 
       << activityId << ","
       << dbEscape(c, stuNo) << ","
       << dbEscape(c, name) << ",0) "
-      << "ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id),client_id=VALUES(client_id),"
+      // 注意: 不要在这里覆盖 client_id —— 同一学生换设备/重装后重报会带来新的 UUID,
+      // 覆盖会让旧设备上"已同步"的本地记录在下次同步时被当成"服务器已删除"而清掉。
+      << "ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id),"
       // remark 要在 status 之前判断: 只有"驳回后重新报名"才清旧备注, 已通过记录重复报名保留审核意见
       << "remark=IF(status=2,'',remark),status=IF(status=2,0,status),name=VALUES(name)";
   if (!dbQuery(c, sql.str(), r, err)) {
@@ -1603,15 +1891,19 @@ static string handleSignupAdd(const Json& body, const string& loginStuNo, const 
   // 返回该记录真实状态(重复报名时可能是已通过/已驳回, 不再恒写 0)
   int realStatus = 0, realCheckin = 0;
   double realHours = 0;
+  string realClientId = clientId;   // 服务器上真实的 client_id(命中已有记录时可能与本次不同)
   QueryResult r4;
-  if (dbQuery(c, "SELECT status,checkin,hours FROM signup WHERE id=" + std::to_string(id), r4, err) && !r4.rows.empty()) {
-    realStatus = atoi(r4.rows[0][0].c_str());
-    realCheckin = atoi(r4.rows[0][1].c_str());
-    realHours = atof(r4.rows[0][2].c_str());
+  if (dbQuery(c, "SELECT client_id,status,checkin,hours FROM signup WHERE id=" + std::to_string(id), r4, err)
+      && !r4.rows.empty()) {
+    realClientId = r4.rows[0][0];
+    realStatus   = atoi(r4.rows[0][1].c_str());
+    realCheckin  = atoi(r4.rows[0][2].c_str());
+    realHours    = atof(r4.rows[0][3].c_str());
   }
   dbRelease(c);
   Json data = Json::Object();
   data.set("id", Json::Num((double)id));
+  data.set("client_id", Json::Str(realClientId));   // App 据此校正本地 client_id, 双端唯一
   data.set("status", Json::Num(realStatus));
   data.set("checkin", Json::Num(realCheckin));
   data.set("hours", Json::Num(realHours));
@@ -1809,10 +2101,14 @@ static string handleHoursReport(const string& role, const string& stuNo) {
     allHours += th;
     bool ok = requiredHours > 0 && th >= requiredHours;
     if (ok) achievedCnt++;
+    // 姓名/学号按原样公开: 登录已改为「学号 + 密码」, 姓名不再是认证要素,
+    // 排行/用户列表里显示全名不再构成"冒名登录"风险(此前脱敏正是为了堵这条链)。
+    bool isMe = (role == "student" && !stuNo.empty() && row[0] == stuNo);
     Json o = Json::Object();
     o.set("rank", Json::Num(rank));
     o.set("stu_no", Json::Str(row[0]));
     o.set("name", Json::Str(row[1]));
+    o.set("is_me", Json::Bool(isMe));
     o.set("total_hours", Json::Num(th));
     o.set("sign_count", Json::Num(atol(row[3].c_str())));
     o.set("updated_at", Json::Str(row[4]));
@@ -2038,18 +2334,19 @@ static string handleSignin(const Json& body) {
   if (signupId == 0) {
     // 无报名: 创建并通过; 影响行数为 1 才说明本次真正新建(2=命中唯一键更新, 说明并发已建)
     std::ostringstream s;
-    s << "INSERT INTO signup (client_id,activity_id,stu_no,name,status,checkin,card_no,hours,audited_at) VALUES ("
+    s << "INSERT INTO signup (client_id,activity_id,stu_no,name,status,checkin,checked_at,card_no,hours,audited_at) VALUES ("
       << dbEscape(c, clientId) << "," << activityId << ","
-      << dbEscape(c, stuNo) << "," << dbEscape(c, name) << ",1,1,"
+      << dbEscape(c, stuNo) << "," << dbEscape(c, name) << ",1,1,NOW(),"
       << dbEscape(c, cardNo) << "," << actHours << ",NOW()) "
-      << "ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id),checkin=1,card_no=VALUES(card_no),hours=VALUES(hours)";
+      << "ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id),checkin=1,"
+      << "checked_at=COALESCE(checked_at,NOW()),card_no=VALUES(card_no),hours=VALUES(hours)";
     if (!dbQuery(c, s.str(), r, err)) ok = false;
     else if (mysql_affected_rows(c) == 1) needAccumulate = true;
     else { ok = false; conflictMsg = "签到冲突(并发刷卡), 请重新刷卡"; }
   } else if (st == 0) {
     // 待审核 -> 通过 + 签到(条件 status=0, 防止并发重复累计学时)
     std::ostringstream s;
-    s << "UPDATE signup SET status=1,checkin=1,card_no=" << dbEscape(c, cardNo)
+    s << "UPDATE signup SET status=1,checkin=1,checked_at=NOW(),card_no=" << dbEscape(c, cardNo)
       << ",hours=" << actHours << ",audited_at=NOW() WHERE id=" << signupId << " AND status=0";
     if (!dbQuery(c, s.str(), r, err)) ok = false;
     else if (mysql_affected_rows(c) == 1) needAccumulate = true;
@@ -2057,7 +2354,9 @@ static string handleSignin(const Json& body) {
   } else if (st == 1) {
     // 已通过 -> 仅签到(不重复累计学时)
     std::ostringstream s;
-    s << "UPDATE signup SET checkin=1,checked_at=NOW(),card_no=" << dbEscape(c, cardNo) << " WHERE id=" << signupId;
+    // 保留首次签到时间: 卡一直放在读头上重复上报时不覆盖原始时刻
+    s << "UPDATE signup SET checkin=1,checked_at=COALESCE(checked_at,NOW()),card_no="
+      << dbEscape(c, cardNo) << " WHERE id=" << signupId;
     if (!dbQuery(c, s.str(), r, err)) ok = false;
   } else {
     // 未知状态(数据异常): 拒绝处理, 避免误绕过审核
@@ -2129,8 +2428,13 @@ static string handleLogs(const string& query) {
 // ---------------------------- 请求分发 ---------------------------------------
 // 从响应 JSON 中提取业务 code 作为日志状态
 static int extractCode(const string& resp) {
-  size_t p = resp.find("\"code\":");
+  // 只认响应体里第一个字段("code" 是 jsonOk/jsonErr 的首字段),
+  // 避免 msg/detail 文本里恰好出现 "code": 时误判状态
+  size_t bodyPos = resp.find("\r\n\r\n");
+  size_t from = (bodyPos == string::npos) ? 0 : bodyPos + 4;
+  size_t p = resp.find("\"code\":", from);
   if (p == string::npos) return 200;
+  if (bodyPos != string::npos && p > bodyPos + 12) return 200;
   p += 7;
   while (p < resp.size() && resp[p] == ' ') p++;
   int code = atoi(resp.c_str() + p);
@@ -2164,7 +2468,7 @@ static string route(const HttpRequest& req) {
   if (req.method == "POST" && p == "/api/login") {
     Json body; JsonParser jp(req.body);
     if (!jp.parse(body) || body.t != Json::OBJ) return jsonErr(400, "bad json");
-    return handleLogin(body);
+    return handleLogin(body, req.ip);
   }
 
   // ESP32 刷卡签到: 读卡终端无登录态, 按卡号识别, 保持公开
@@ -2216,11 +2520,11 @@ static string route(const HttpRequest& req) {
   if (req.method == "GET" && p == "/api/student/impact")
     return handleStudentImpact(req.query, me.role, me.stu_no);
 
-  // 学生自助注销: {confirm_stu_no} 必须与本人学号一致
+  // 学生自助注销: {confirm_pwd} 必须为本人登录密码(学号是公开信息, 不能当凭据)
   if (req.method == "POST" && p == "/api/student/cancel") {
     Json body; JsonParser jp(req.body);
     if (!jp.parse(body) || body.t != Json::OBJ) return jsonErr(400, "bad json");
-    return handleStudentCancel(body, me);
+    return handleStudentCancel(body, me, req.ip);
   }
 
   // 管理员注销学生账号: {stu_no, confirm_stu_no}
@@ -2255,7 +2559,30 @@ static string route(const HttpRequest& req) {
   }
 
   if (req.method == "GET" && p == "/api/activity/list")
-    return handleActivityList(req.query, me.role);
+    return handleActivityList(req.query, me.role, me.stu_no);
+
+  // 成员修改自己的登录密码
+  if (req.method == "POST" && p == "/api/student/password") {
+    Json body; JsonParser jp(req.body);
+    if (!jp.parse(body) || body.t != Json::OBJ) return jsonErr(400, "bad json");
+    return handleStudentPassword(body, me);
+  }
+
+  // 管理员重置成员密码
+  if (req.method == "POST" && p == "/api/student/reset_pwd") {
+    if (me.role != "admin") return needAdmin();
+    Json body; JsonParser jp(req.body);
+    if (!jp.parse(body) || body.t != Json::OBJ) return jsonErr(400, "bad json");
+    return handleStudentResetPwd(body);
+  }
+
+  // 管理员修改口令(需校验原口令)
+  if (req.method == "POST" && p == "/api/admin/password") {
+    if (me.role != "admin") return needAdmin();
+    Json body; JsonParser jp(req.body);
+    if (!jp.parse(body) || body.t != Json::OBJ) return jsonErr(400, "bad json");
+    return handleAdminPassword(body, me);
+  }
 
   // 系统配置: 读取对所有登录用户开放, 修改仅管理员
   if (req.method == "GET" && p == "/api/config/get")
@@ -2387,10 +2714,26 @@ static bool serveOne(SOCKET sock, string& carry, const string& ip) {
   if (conn == "close") keepAlive = false;
   else if (conn == "keep-alive") keepAlive = true;
 
+  // 分块传输(chunked)未实现: 明确拒绝。
+  // 若忽略该头按 Content-Length 解析, chunked 的块长度行会被当成下一个请求,
+  // 造成请求走私/解析错位 —— 拒绝比"猜"安全。
+  if (!req.header("Transfer-Encoding").empty()) {
+    sendAll(sock, httpResponse(411, jsonDump(Json::Object()
+      .set("code", Json::Num(411)).set("msg", Json::Str("chunked not supported, use Content-Length")))));
+    return false;
+  }
+
   // 请求体(限制大小, 防恶意大包撑爆内存)
   string cl = req.header("Content-Length");
   if (!cl.empty()) {
-    size_t need = (size_t)atol(cl.c_str());
+    long long needLL = atoll(cl.c_str());
+    // 负数/非法长度: 直接 400。原实现 (size_t)(-5) 会变成天文数字, 把线程卡在 drain 里
+    if (needLL < 0) {
+      sendAll(sock, httpResponse(400, jsonDump(Json::Object()
+        .set("code", Json::Num(400)).set("msg", Json::Str("invalid Content-Length")))));
+      return false;
+    }
+    size_t need = (size_t)needLL;
     if (need > 64 * 1024) {
       // 先读完请求体再响应, 避免连接上残留数据导致对端收到 RST 而读不到 413
       size_t got = 0;
@@ -2454,22 +2797,24 @@ static bool serveOne(SOCKET sock, string& carry, const string& ip) {
   std::cout << "[" << nowStr() << "] " << req.method << " " << req.path
             << " from " << ip << " -> " << status << " (" << cost << "ms)\n";
 
-  // 异步写 MySQL 日志表(不阻塞响应)
-  std::thread([=]() {
-    MYSQL* c = dbConnect();
-    if (!c) return;
-    string err; QueryResult r;
-    std::ostringstream sql;
-    sql << "INSERT INTO request_log (method,path,query,ip,status,cost_ms,detail) VALUES ("
-        << dbEscape(c, le.method) << "," << dbEscape(c, le.path) << ","
-        << dbEscape(c, req.query) << "," << dbEscape(c, le.ip) << ","
-        << le.status << "," << le.cost << "," << dbEscape(c, le.detail) << ")";
-    dbQuery(c, sql.str(), r, err);
-    dbRelease(c);
-  }).detach();
+  // 落库: 入队由单消费者线程批量写(不创建线程, 不阻塞响应)
+  // path/query 列是 VARCHAR(255), 超长会导致 INSERT 失败并静默丢日志, 这里先截断
+  DbLogJob job;
+  job.method = le.method;
+  job.path   = le.path.size() > 250 ? le.path.substr(0, 250) : le.path;
+  job.query  = req.query.size() > 250 ? req.query.substr(0, 250) : req.query;
+  job.ip     = le.ip;
+  job.detail = le.detail;
+  job.status = le.status;
+  job.cost   = le.cost;
+  logEnqueue(job);
 
   return keepAlive;
 }
+
+// 并发连接上限: 每连接一个线程, 没有上限时慢连接/半开连接可以把线程数打满
+static std::atomic<int> g_conns(0);
+static const int        MAX_CONNS = 256;
 
 // 每个连接一个线程: 连接内可连续处理多个请求(keep-alive), 空闲 10s 或达上限后关闭
 static void handleClient(SOCKET sock, const string& ip) {
@@ -2482,7 +2827,8 @@ static void handleClient(SOCKET sock, const string& ip) {
   for (int i = 0; i < 128; i++) {   // 单连接最多复用 128 次, 防止单连接长期占用线程
     if (!serveOne(sock, carry, ip)) break;
   }
-  closesocket(sock);
+  // 不在这里 closesocket: 由启动该线程的 lambda 统一关闭,
+  // 这样即使处理过程中抛异常, socket 与连接计数也不会泄漏(M2)
 }
 
 // ---------------------------- 启动期自维护 -----------------------------------
@@ -2506,6 +2852,43 @@ static void dbEnsureSchema() {
   dbQuery(c, "ALTER TABLE signup ADD COLUMN checked_at DATETIME NULL COMMENT '刷卡签到时间'", ig, err);
   // 待审报名是管理端最高频查询, 单独建索引避免全表扫描(已存在同样忽略)
   dbQuery(c, "CREATE INDEX idx_signup_status ON signup (status)", ig, err);
+  // 卡号唯一: 允许 NULL(未绑卡), 但同一张卡只能绑一个学号。
+  // 老库 card_no 是 NOT NULL DEFAULT '', 多行空串会违反唯一索引, 所以先放开 NULL 再清空串。
+  dbQuery(c, "ALTER TABLE student MODIFY card_no VARCHAR(32) NULL DEFAULT NULL COMMENT 'RFID卡号(RFID刷卡签到绑定)'", ig, err);
+  dbQuery(c, "UPDATE student SET card_no=NULL WHERE card_no=''", ig, err);
+  // 迁移告警(S2): 这些 DDL 失败会被忽略, 但"补列/建索引"失败是会影响登录与刷卡的,
+  // 不能静默 —— 先查存在性, 缺了才建, 建完仍缺就打到 stderr。
+  auto hasIdx = [&](const char* name) -> bool {
+    QueryResult q; string e;
+    return dbQuery(c, string("SELECT 1 FROM information_schema.statistics WHERE table_schema=DATABASE()"
+                             " AND table_name='student' AND index_name='") + name + "'", q, e) && !q.rows.empty();
+  };
+  auto hasCol = [&](const char* name) -> bool {
+    QueryResult q; string e;
+    return dbQuery(c, string("SELECT 1 FROM information_schema.columns WHERE table_schema=DATABASE()"
+                             " AND table_name='student' AND column_name='") + name + "'", q, e) && !q.rows.empty();
+  };
+  if (!hasIdx("uk_card")) {
+    dbQuery(c, "CREATE UNIQUE INDEX uk_card ON student (card_no)", ig, err);
+    if (!hasIdx("uk_card"))
+      std::cerr << "[migrate] WARN uk_card 唯一索引创建失败(可能存在重复卡号, 刷卡会认错人): " << err << "\n";
+  }
+  // 学生登录口令(v3.1 起"学号+密码", 不再用姓名认证)
+  if (!hasCol("pwd_hash")) {
+    dbQuery(c, "ALTER TABLE student ADD COLUMN pwd_hash VARCHAR(100) NOT NULL DEFAULT '' COMMENT '登录口令: sha256i:<hex>'", ig, err);
+    if (!hasCol("pwd_hash")) {
+      // 缺这一列 = 所有学生登录必然 401, 必须显式告警
+      std::cerr << "[migrate] WARN student.pwd_hash 缺失且补列失败(学生将无法登录): " << err << "\n";
+      dbRelease(c);
+      return;
+    }
+  }
+  QueryResult pws;
+  if (dbQuery(c, "SELECT id FROM student WHERE pwd_hash='' LIMIT 1", pws, err) && !pws.rows.empty()) {
+    // 只更新确实为空的账号(已改过密码的不受影响); 迭代哈希算一次即可
+    string initHash = dbEscape(c, pwdHashStrong(string(DEFAULT_STUDENT_PWD)));
+    dbQuery(c, "UPDATE student SET pwd_hash=" + initHash + " WHERE pwd_hash=''", ig, err);
+  }
   dbRelease(c);
 }
 
@@ -2518,10 +2901,11 @@ static void dbMigratePasswords() {
   if (!dbQuery(c, "SELECT id,username,password FROM admin_user", r, err)) { dbRelease(c); return; }
   int n = 0;
   for (auto& row : r.rows) {
+    // 只迁移明文; 已有的单轮哈希无法反推出明文, 等该账号下次登录时由 handleLogin 升级
     if (pwdIsHashed(row[2])) continue;
     QueryResult up;
     std::ostringstream s;
-    s << "UPDATE admin_user SET password=" << dbEscape(c, pwdHash(row[2])) << " WHERE id=" << row[0];
+    s << "UPDATE admin_user SET password=" << dbEscape(c, pwdHashStrong(row[2])) << " WHERE id=" << row[0];
     if (dbQuery(c, s.str(), up, err)) n++;
   }
   dbRelease(c);
@@ -2592,6 +2976,7 @@ int main(int argc, char* argv[]) {
   dbEnsureSchema();
   dbMigratePasswords();
   std::thread(logCleanerLoop).detach();   // 后台: 每小时清理一次历史日志
+  std::thread(logWriterLoop).detach();    // 后台: 批量写 request_log(单消费者)
 
   SOCKET listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (listenSock == INVALID_SOCKET) {
@@ -2630,7 +3015,34 @@ int main(int argc, char* argv[]) {
     }
     char* ipc = inet_ntoa(client.sin_addr);
     string ip = ipc ? ipc : "0.0.0.0";
-    std::thread(handleClient, sock, ip).detach();
+    // 超过上限直接 503 并关闭: 宁可拒绝新连接, 也不让线程数无限增长
+    if (g_conns.fetch_add(1) >= MAX_CONNS) {
+      g_conns.fetch_sub(1);
+      // 这里是 accept 主线程: 必须设发送超时, 否则对端不读会让 send 无限阻塞,
+      // 进而卡死 accept, 表现为整个服务端无响应(M1)
+      DWORD sendTimeout = 1000;
+      setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&sendTimeout, sizeof(sendTimeout));
+      sendAll(sock, httpResponse(503, jsonDump(Json::Object()
+        .set("code", Json::Num(503)).set("msg", Json::Str("server busy: too many connections")))));
+      closesocket(sock);
+      continue;
+    }
+    try {
+      std::thread([sock, ip]() {
+        // 线程内异常绝不能逃出线程(否则 std::terminate 直接把进程干掉),
+        // 也不能因为异常跳过 closesocket / 计数回收
+        try {
+          handleClient(sock, ip);
+        } catch (...) {
+          // 单连接异常只影响该连接, 服务端继续工作
+        }
+        closesocket(sock);          // 正常/异常路径统一关闭
+        g_conns.fetch_sub(1);       // 连接线程结束才释放名额
+      }).detach();
+    } catch (...) {
+      g_conns.fetch_sub(1);       // 线程创建失败: 不能让计数泄漏
+      closesocket(sock);
+    }
   }
 
   closesocket(listenSock);

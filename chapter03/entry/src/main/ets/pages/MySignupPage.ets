@@ -100,6 +100,7 @@ struct MySignupPage {
     this.syncing = true;
     let ok = 0;
     let fail = 0;
+    let rejected = 0;
     for (const s of pending) {
       const body: Record<string, Object> = {
         'client_id': s.client_id,
@@ -107,26 +108,40 @@ struct MySignupPage {
         'stu_no': AppConfig.stuNo,
         'name': AppConfig.stuName
       };
-      const resp = await ApiClient.post('/api/signup/add', body);
+      // 批量补传用 silent: 逐条弹 toast 会刷屏, 结果统一在末尾汇总
+      const resp = await ApiClient.post('/api/signup/add', body, true);
       if (resp['code'] === 0) {
-        await DbHelper.markSignupSynced(s.client_id);
         const d = resp['data'] as Record<string, Object>;
+        // 服务器可能命中已有报名并保留原 client_id, 以服务端为准校正本地, 避免双端不一致
+        let cid = s.client_id;
+        const scid = (d['client_id'] === undefined || d['client_id'] === null) ? '' : String(d['client_id']);
+        if (scid !== '' && scid !== cid) {
+          await DbHelper.replaceSignupClientId(cid, scid);
+          cid = scid;
+        }
+        await DbHelper.markSignupSynced(cid);
         const st = Number(d['status']);
         const ck = (d['checkin'] === undefined || d['checkin'] === null) ? 0 : Number(d['checkin']);
         if (st === 1) {
-          await DbHelper.updateSignupStatus(s.client_id, 1, Number(d['hours']), '', ck);
+          await DbHelper.updateSignupStatus(cid, 1, Number(d['hours']), '', ck);
         }
         ok++;
+      } else if (ApiClient.isRejected(resp)) {
+        // 服务端明确拒绝(名额已满/活动已结束/已下线): 永远传不上去, 直接清理避免无限重试
+        await DbHelper.deleteSignupByClientId(s.client_id);
+        rejected++;
       } else {
         fail++;
       }
     }
     this.syncing = false;
     await this.refreshLocal();
-    if (!silent || fail > 0) {
-      this.msg = fail === 0
-        ? '补传成功: ' + ok + ' 条记录已同步服务器'
-        : '补传完成: 成功 ' + ok + ' 条, 失败 ' + fail + ' 条(请检查服务器连接)';
+    if (!silent || fail > 0 || rejected > 0) {
+      const parts: string[] = [];
+      if (ok > 0) parts.push('成功 ' + ok.toString() + ' 条');
+      if (rejected > 0) parts.push('已失效 ' + rejected.toString() + ' 条(服务器拒绝, 已清理)');
+      if (fail > 0) parts.push('失败 ' + fail.toString() + ' 条(请检查服务器连接)');
+      this.msg = '补传完成: ' + parts.join(', ');
     }
   }
 

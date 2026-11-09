@@ -1,6 +1,6 @@
 /**
  * 社团活动报名与学时认定系统 —— 登录页(v2.0: 登录成功进入底部 TabBar 主界面)
- * 普通成员: 学号 + 姓名(需注册且管理员审核通过)
+ * 普通成员: 学号 + 密码(需注册且管理员审核通过; 初始密码 123456, 登录后可在设置页修改)
  * 管理员:   账号 + 密码(与 MySQL admin_user 表校验)
  * 登录成功签发 Token, 后续请求自动携带。
  */
@@ -31,7 +31,7 @@ struct LoginPage {
       // 预填演示账号, 便于验收演示
       if (AppConfig.role === '') {
         this.account = '2023001';
-        this.secret = '张三';
+        this.secret = '123456';
       }
     }).catch((e: Error) => {
       this.msg = '初始化失败: ' + e.message;
@@ -43,7 +43,7 @@ struct LoginPage {
     this.msg = '';
     if (r === 'student') {
       this.account = '2023001';
-      this.secret = '张三';
+      this.secret = '123456';
     } else {
       this.account = 'admin';
       this.secret = 'admin123';
@@ -53,7 +53,7 @@ struct LoginPage {
   async doLogin(): Promise<void> {
     if (this.busy) return;
     if (this.account.trim() === '' || this.secret.trim() === '') {
-      this.msg = this.role === 'student' ? '请填写学号与姓名' : '请填写管理员账号与密码';
+      this.msg = this.role === 'student' ? '请填写学号与密码' : '请填写管理员账号与密码';
       return;
     }
     this.busy = true;
@@ -125,7 +125,7 @@ struct LoginPage {
 
             // 角色切换
             Row({ space: 10 }) {
-              this.roleTab('普通成员', 'student', '学号 + 姓名')
+              this.roleTab('普通成员', 'student', '学号 + 密码')
               this.roleTab('管理员', 'admin', '账号 + 密码')
             }.width('100%')
 
@@ -139,10 +139,10 @@ struct LoginPage {
                   .onChange((v: string) => this.account = v)
               }
               Row({ space: 10 }) {
-                Text(this.role === 'student' ? '姓名' : '密码')
+                Text('密码')
                   .fontSize(14).fontColor(Theme.textBody).width(52)
-                TextInput({ text: this.secret, placeholder: this.role === 'student' ? '如 张三' : '管理员密码' })
-                  .type(this.role === 'admin' ? InputType.Password : InputType.Normal)
+                TextInput({ text: this.secret, placeholder: this.role === 'student' ? '成员登录密码' : '管理员密码' })
+                  .type(InputType.Password)
                   .layoutWeight(1)
                   .onChange((v: string) => this.secret = v)
               }

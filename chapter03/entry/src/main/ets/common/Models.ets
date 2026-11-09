@@ -49,6 +49,7 @@ export interface HoursRow {
   sign_count: number;
   updated_at: string;
   achieved: boolean;   // 是否达到系统设定的学时达标线(未设达标线时恒为 false)
+  is_me: boolean;      // 是否本人(学生视图下他人姓名/学号已脱敏, 只能靠该标记定位自己)
 }
 
 // 学时明细
@@ -237,7 +238,8 @@ export function parseHoursReport(resp: Record<string, Object>): HoursRow[] {
       total_hours: numOf(item, 'total_hours'),
       sign_count: numOf(item, 'sign_count'),
       updated_at: strOf(item, 'updated_at'),
-      achieved: boolOf(item, 'achieved')
+      achieved: boolOf(item, 'achieved'),
+      is_me: boolOf(item, 'is_me')
     });
   }
   return out;

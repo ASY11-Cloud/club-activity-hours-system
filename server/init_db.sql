@@ -18,7 +18,7 @@ DROP TABLE IF EXISTS admin_user;
 CREATE TABLE admin_user (
   id         INT AUTO_INCREMENT PRIMARY KEY,
   username   VARCHAR(50)  NOT NULL UNIQUE COMMENT '管理员登录账号',
-  password   VARCHAR(100) NOT NULL COMMENT '口令摘要: "sha256:<hex>", 值=SHA256("club-system::"+明文)',
+  password   VARCHAR(100) NOT NULL COMMENT '口令摘要: "sha256i:<hex>", 迭代加盐; 旧格式 sha256:/明文会在登录或启动时自动升级',
   name       VARCHAR(50)  NOT NULL DEFAULT '' COMMENT '管理员姓名',
   created_at DATETIME     DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB COMMENT='管理员账号表(口令不存明文)';
@@ -37,9 +37,12 @@ CREATE TABLE student (
   stu_no     VARCHAR(20)  NOT NULL UNIQUE COMMENT '学号(登录账号)',
   name       VARCHAR(50)  NOT NULL COMMENT '姓名',
   dept       VARCHAR(100) DEFAULT '' COMMENT '班级/院系',
-  card_no    VARCHAR(32)  NOT NULL DEFAULT '' COMMENT 'RFID卡号(嵌入式刷卡签到绑定)',
+  -- 卡号允许 NULL(未绑卡); 唯一索引保证一张卡只能绑一个学号, 否则刷卡会记到别人头上
+  card_no    VARCHAR(32)  NULL DEFAULT NULL COMMENT 'RFID卡号(刷卡签到绑定, 唯一)',
+  pwd_hash   VARCHAR(100) NOT NULL DEFAULT '' COMMENT '登录口令: sha256i:<hex>(空=未设置, 服务启动时初始化为默认密码 123456)',
   status     TINYINT      NOT NULL DEFAULT 1 COMMENT '注册审核: 1=已通过(可登录) 0=待审核 2=已驳回',
-  created_at DATETIME     DEFAULT CURRENT_TIMESTAMP
+  created_at DATETIME     DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_card (card_no)
 ) ENGINE=InnoDB COMMENT='学生表(权限见 admin_user, 不再使用 is_admin 字段)';
 
 -- ---------------------------------------------------------------------

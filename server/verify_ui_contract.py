@@ -55,9 +55,9 @@ def login(role, account, secret):
 
 print('== 0. 登录 ==')
 admin = login('admin', 'admin', 'admin123')
-stu = login('student', '2023001', '张三')   # 成员登录口径: 学号 + 姓名
+stu = login('student', '2023001', '123456')   # 成员登录口径: 学号 + 密码(初始 123456)
 check('管理员登录', admin is not None)
-check('成员登录(2023001 + 姓名)', stu is not None)
+check('成员登录(2023001 + 密码)', stu is not None)
 
 print('== 1. 活动列表分页(活动广场滚动加载) ==')
 r, _ = call('GET', '/api/activity/list?page=1&size=3', token=stu)

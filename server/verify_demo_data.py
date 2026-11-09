@@ -36,15 +36,15 @@ def main():
         print("[%s] %s %s" % (mark, name, extra))
 
     # 1. 已通过学生可登录
-    st, r = req("POST", "/api/login", {"type": "student", "account": "2023005", "secret": "孙洋"})
+    st, r = req("POST", "/api/login", {"type": "student", "account": "2023005", "secret": "123456"})
     check("孙洋(已通过)登录", st == 200 and r.get("code") == 0, "st=%d msg=%s" % (st, r.get("msg")))
 
     # 2. 待审核学生登录被拒(业务拒绝: code!=0)
-    st, r = req("POST", "/api/login", {"type": "student", "account": "2023007", "secret": "吴桐"})
+    st, r = req("POST", "/api/login", {"type": "student", "account": "2023007", "secret": "123456"})
     check("吴桐(待审核)登录被拒", r.get("code") != 0 and "审核" in (r.get("msg") or ""), "st=%d msg=%s" % (st, r.get("msg")))
 
     # 3. 已驳回学生登录被拒(业务拒绝: code!=0)
-    st, r = req("POST", "/api/login", {"type": "student", "account": "2023009", "secret": "冯婷"})
+    st, r = req("POST", "/api/login", {"type": "student", "account": "2023009", "secret": "123456"})
     check("冯婷(已驳回)登录被拒", r.get("code") != 0 and "驳回" in (r.get("msg") or ""), "st=%d msg=%s" % (st, r.get("msg")))
 
     # 4. 管理员登录拿 token

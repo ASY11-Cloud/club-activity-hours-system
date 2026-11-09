@@ -378,6 +378,24 @@ export class DbHelper {
     await store.delete(pred);
   }
 
+  /**
+   * 把本地记录的 client_id 校正为服务器返回的真实值。
+   * 场景: 该生已在服务器报过名(唯一键 uk_act_stu 命中), 服务端保留原 client_id,
+   * 而本地这次是新生成的 UUID。不校正则本地会出现两条同活动记录,
+   * 且下次全量同步会认为"服务器没有这个 client_id"而把本地的当陈旧记录删掉。
+   */
+  static async replaceSignupClientId(oldId: string, newId: string): Promise<void> {
+    const store = DbHelper.rdb;
+    if (!store || oldId === '' || newId === '' || oldId === newId) return;
+    const predDup = new relationalStore.RdbPredicates('local_signup');
+    predDup.equalTo('client_id', newId);
+    await store.delete(predDup);      // 目标 id 已存在(旧设备残留): 先删, 避免唯一约束冲突
+    const vb: relationalStore.ValuesBucket = { 'client_id': newId };
+    const pred = new relationalStore.RdbPredicates('local_signup');
+    pred.equalTo('client_id', oldId);
+    await store.update(vb, pred);
+  }
+
   /** 本地学时统计(通过记录聚合) */
   static async localHours(stuNo: string): Promise<number> {
     const list = await DbHelper.getSignups(stuNo);

@@ -180,7 +180,7 @@ struct ActivityDetailPage {
         await DbHelper.deleteSignupByActivity(a.id, AppConfig.stuNo);
       }
       // 1) 本地落库(离线可查)
-      const clientId = util.generateRandomUUID();
+      let clientId = util.generateRandomUUID();
       await DbHelper.addSignup(clientId, a.id, a.title, AppConfig.stuNo, AppConfig.stuName);
       this.msg = '已写入本地库, 正在同步服务器...';
       // 2) 同步服务器(幂等)
@@ -192,8 +192,14 @@ struct ActivityDetailPage {
       };
       const resp = await ApiClient.post('/api/signup/add', body);
       if (resp['code'] === 0) {
-        await DbHelper.markSignupSynced(clientId);
         const d = resp['data'] as Record<string, Object>;
+        // 服务器可能命中该生已有报名并保留原 client_id: 以服务端为准校正本地, 保证双端各一条
+        const scid = (d['client_id'] === undefined || d['client_id'] === null) ? '' : String(d['client_id']);
+        if (scid !== '' && scid !== clientId) {
+          await DbHelper.replaceSignupClientId(clientId, scid);
+          clientId = scid;
+        }
+        await DbHelper.markSignupSynced(clientId);
         const st = Number(d['status']);
         const ck = (d['checkin'] === undefined || d['checkin'] === null) ? 0 : Number(d['checkin']);
         if (st === 1) {
@@ -204,10 +210,22 @@ struct ActivityDetailPage {
           this.msg = '报名成功, 已同步服务器, 等待管理员审核';
           this.justSigned = true;
         }
+        this.signed = true;
+      } else if (ApiClient.isRejected(resp)) {
+        // 服务端明确拒绝(名额已满 / 活动已结束 / 已下线): 回滚本地记录并保持"未报名"。
+        // 原实现无条件 signed=true 且保留本地待同步记录, 会留下一条永远传不上去、
+        // 界面也删不掉的"幽灵报名", 并让用户无法再次报名(按钮被 signed 守卫拦住)。
+        await DbHelper.deleteSignupByClientId(clientId);
+        this.msg = '报名失败: ' + (resp['msg'] as string);
+        this.signed = false;
+        this.mySignupStatus = -1;
+        this.myStatus = '';
+        this.justSigned = false;
       } else {
-        this.msg = '服务器同步失败: ' + (resp['msg'] as string) + ' (记录已保留在本地, 可稍后重试)';
+        // 网络不可达 / 服务端临时故障: 保留本地记录, 由「我的报名」补传
+        this.msg = '暂未同步到服务器: ' + (resp['msg'] as string) + ' (已存本地, 可在「我的报名」重试)';
+        this.signed = true;
       }
-      this.signed = true;
       // 重新拉取活动(名额/剩余数已变化)并同步本人状态
       await this.loadActivity();
     } finally {

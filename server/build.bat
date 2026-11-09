@@ -14,7 +14,7 @@ if not exist "%MYSQL_HOME%\include\mysql.h" (
   exit /b 1
 )
 
-set FLAGS=-std=c++14 -O2 -Wall server.cpp -o server.exe -I "%MYSQL_HOME%\include" -L "%MYSQL_HOME%\lib" -lmysql -lws2_32
+set FLAGS=-std=c++14 -O2 -Wall server.cpp -o server.exe -I "%MYSQL_HOME%\include" -L "%MYSQL_HOME%\lib" -lmysql -lws2_32 -lbcrypt
 set BUILT=0
 if exist build.log del /q build.log
 

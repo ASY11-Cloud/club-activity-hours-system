@@ -65,7 +65,9 @@ export class ApiClient {
         if (AppConfig.token !== '') {
           await AppConfig.logout();
         }
-        failed = { 'code': -401, 'msg': '登录已失效, 已清除本地登录状态, 请重新登录' };
+        // http_status 供 ApiClient.isRejected() 判断: 登录过期属于"需要重新登录",
+        // 不应被当成"网络抖动可重试"而把本地待同步记录留下
+        failed = { 'code': -401, 'msg': '登录已失效, 已清除本地登录状态, 请重新登录', 'http_status': 401 };
       } else {
         // 4xx/5xx: 服务端的错误体是 JSON({code,msg}), 中文提示必须透传给页面 ——
         // 旧实现直接压成 "HTTP 404", 把"该报名已被学生撤销"这类原因全部丢掉了。
@@ -78,7 +80,7 @@ export class ApiClient {
           }
         } catch (e) {
         }
-        failed = { 'code': -1, 'msg': msg };
+        failed = { 'code': -1, 'msg': msg, 'http_status': resp.responseCode };
       }
     } catch (e) {
       failed = { 'code': -3, 'msg': '无法连接服务器, 请检查服务端是否已启动' };
@@ -94,6 +96,24 @@ export class ApiClient {
       });
     }
     return failed;
+  }
+
+  /**
+   * 是否为"服务端明确拒绝"(而非网络故障)。
+   * 服务端约定业务错误走 HTTP 200 + body.code(400/401/403/404/409/413),
+   * 这类失败重试也不会成功 —— 调用方必须回滚本地草稿/待同步记录,
+   * 否则会留下一条永远传不上去、界面上也删不掉的"幽灵报名"。
+   * 负 code(-1 HTTP 异常 / -2 解析失败 / -3 连接失败)与 500(服务端内部错误)才值得重试。
+   */
+  static isRejected(resp: Record<string, Object>): boolean {
+    const c = Number(resp['code']);
+    if (c === 400 || c === 401 || c === 403 || c === 404 || c === 409 || c === 413) return true;
+    const hs = resp['http_status'];
+    if (hs !== undefined && hs !== null) {
+      const n = Number(hs);
+      if (n >= 400 && n < 500) return true;
+    }
+    return false;
   }
 
   /** 测试服务器连接 */
