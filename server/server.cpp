@@ -2449,7 +2449,7 @@ static string route(const HttpRequest& req) {
   if (p == "/api/health") {
     Json d = Json::Object();
     d.set("server", Json::Str("club-system-server"));
-    d.set("version", Json::Str("3.0"));
+    d.set("version", Json::Str("3.1"));
     d.set("time", Json::Str(nowStr()));
     // 数据库连通性: 验收时可直接确认"服务器在线且 MySQL 可用", 前端仍按 code==0 判在线,
     // db=false 只作为附加信息(不改变健康检查的业务 code, 避免数据库抖动时健康检查整体变红)

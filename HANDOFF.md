@@ -848,3 +848,45 @@ static bool dbDeleteStudent(MYSQL* c, const string& stuNo,
 - 唯一**必须**先停的场合：重编 `server.exe`——Windows 会因文件占用导致链接失败，流程固定为 `stop → build → start`。`server/stop_server.bat` 就是给这一步和收工用的。
 - 除非调试节流/Token 这类**内存态**逻辑（重启即清零），否则不要为了"干净状态"重启服务端；重启意味着全体在线用户掉线。
 - 若后台进程随 IDE/会话结束被回收，让用户双击 `server\start_server.bat` 即可常驻（该脚本会自检 3306 端口）。
+
+---
+
+## 26. 文档一致性收尾 + 文档维护约定（2026-11-09）
+
+### 26.1 版本号口径对齐
+
+`VERSION.md` 早已写入 v3.1，但 `/api/health` 仍返回 `"version":"3.0"`、使用说明页首也标"文档对应版本 v3.0"——评审点开接口会以为版本没动。本轮把 `server.cpp` 中 health 的 version 改为 **`3.1`**，重编重启后实测：
+
+```
+{"code":0,"msg":"ok","data":{"server":"club-system-server","version":"3.1","db":true,...}}
+```
+
+`docs/使用说明.md` 页首与 §3.2 的健康检查说明同步改为 3.1；`README.md` 接口表补 `version 当前 3.1`。
+
+### 26.2 重建 Word 版使用说明
+
+旧 `使用说明文档.docx` 停在 2026-10-30（v3.0）：全文无"登录密码"、注销仍写"输学号"，而 README 却宣称它"与 md 同源"，属**会误导的过期交付物**。
+
+- 本机 `python` 为 Store 存根、无 pandoc，故改用 **Word 16 COM**：先把 md 转成带 CSS 的 HTML（`h1/h2/h3` 对应 Word 内置 Heading 1-3，表头 `#1F3864` 白字、隔行 `#EDF2FA`、代码块灰底、引用块左边框），再 `Documents.Open` → `SaveAs2(..., 16)`。
+- 页脚写入居中页码字段（`wdFieldPage`），字号 9pt。
+- 生成结果：**17 页 / 9 表 / 1.1 万字**；抽查 `v3.1`、`登录密码`、`5.11 账号注销`、文末回归章节均在，无"输入本人学号"残留。
+- 生成脚本 `%TEMP%\md2docx.ps1`（一次性工具，未入库）；若日后要复现，可参照本节描述重写，或装好 Python 后用 python-docx 版本。
+
+### 26.3 文档维护约定（用户明确要求，后续每次改动都执行）
+
+1. **改完代码就同步文档**，不留"下次再说"：接口/行为变了改 `docs/使用说明.md`，目录/接口表/命令变了改 `README.md`，版本能力变了改 `VERSION.md`，过程记录追加到本文件。
+2. **本文件只追加不覆盖**：新章节号 = 现有最大节号 + 1（当前到 §26），写前先 `Select-String '^## '` 确认，避免并行会话互相覆盖（§18 曾因此丢失重建）。
+3. **md 改完必须重建 docx**，否则 Word 版必然落后一版——本轮就是这种情况的后果。
+4. **版本号三处必须一致**：`VERSION.md` 段落标题、`/api/health` 的 `version`、使用说明页首标注。
+5. **文档与代码同一次 commit/push**，commit message 里写清范围（如本轮"v3.1 文档收尾"），不要代码一个提交、文档拖到下一轮。
+6. **不再新增 CODEBUDDY 类"给 AI 的须知"文档**：内容必然与 HANDOFF 重复并迅速过期。交接只维护两份——本文件（历史与决策）+ `README.md`（当前状态），使用说明另算。
+
+### 26.4 本轮清理
+
+| 项 | 处置 |
+|---|---|
+| `CODEBUDDY.md` | 删除（与 §16.2/§23/§24/§25 重复且已过期：仍写"学号+姓名"） |
+| `server/rename_demo_users.sql` | 删除（2026-10-28 一次性改名迁移，早已执行，新库由 seed 直接给新名字） |
+| `server/build.log` | 删除（0 字节生成物，`build.bat` 每次重建） |
+| `.gitignore` | 补 `.codebuddy/`（工具内部数据，防误提交） |
+| `server/stop_server.bat` | 新增并登记进 README / 使用说明 |

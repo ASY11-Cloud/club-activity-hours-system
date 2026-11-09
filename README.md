@@ -6,7 +6,7 @@
 
 > 版本演进与 v2.0 相对 v1.0 的升级说明见 [`VERSION.md`](VERSION.md)；归档分支：`v1.0`（第一版）、`v2.0`（第二版最终版，同 main）。
 > 本轮改动明细、为什么改、验证方式与环境坑，见 [`HANDOFF.md`](HANDOFF.md)。
-> 操作步骤与验收演示见 [`docs/使用说明.md`](docs/使用说明.md)（Word 版 `使用说明文档.docx`）。
+> 操作步骤与验收演示见 [`docs/使用说明.md`](docs/使用说明.md)（Word 版 `使用说明文档.docx`，与 md 同源，均对应 v3.1）。
 
 ## 功能总览
 
@@ -65,7 +65,7 @@ chapter03/
 ├── docs/使用说明.md            # 操作手册与验收流程（可读版，与 docx 同源）
 ├── HANDOFF.md                 # 改动交接（改了什么 / 为什么 / 怎么验）
 ├── VERSION.md                 # 版本演进（v1.0 → v2.0 → v3.0 → v3.1）
-└── 使用说明文档.docx           # 使用说明 Word 版（含验收演示流程与 FAQ）
+└── 使用说明文档.docx           # 使用说明 Word 版（v3.1・17 页 / 9 表，含验收演示流程与 FAQ）
 ```
 
 ## 快速开始
@@ -87,7 +87,7 @@ chapter03/
 
 | 方法 | 路径 | 权限 | 说明 |
 |---|---|---|---|
-| GET | `/api/health` | 公开 | 健康检查（含 MySQL 连通性与服务器时间） |
+| GET | `/api/health` | 公开 | 健康检查（`version` 当前 3.1、`db` 为 MySQL 连通性、`time` 为服务器时间） |
 | POST | `/api/login` | 公开 | 登录签发 Token（失败节流：60 秒内 5 次失败临时拒绝） |
 | POST | `/api/register` | 公开 | 成员注册申请（待管理员审批；可选 `card_no`，卡号全局唯一、自动转大写） |
 | POST | `/api/signin` | 公开／设备密钥 | ESP32 刷卡签到（可选 `X-Device-Key`） |
