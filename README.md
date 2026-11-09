@@ -74,11 +74,13 @@ chapter03/
 │   ├── testdata_clean.sql     # 测试数据清理（幂等，清理后基线复原）
 │   ├── verify_test_data.ps1   # 结构/落库/接口/基线 四阶段核验（83 项，无 Python 可用）
 │   ├── verify_v4.ps1          # v4.0 验收（45 项：申诉/规则/异常/权限/基线）
+│   ├── audit_v4.ps1           # 系统全面测试（103 项：功能/边界/安全/性能/一致性/兼容）
 │   └── build.bat              # 编译脚本
 ├── esp32_rfid/rfid_esp32.ino  # ESP32 + MFRC522 刷卡签到固件
 ├── docs/使用说明.md            # 操作手册与验收流程（可读版，与 docx 同源）
 ├── docs/数据一致性核验-v3.2.md # 测试数据设计与 83 项核验结果、两处边界缺陷修复记录
 ├── docs/V4-PLAN.md            # v4.0 目标 / 范围 / 实施步骤 / 验收标准
+├── docs/系统测试报告-v4.0.md   # 六维测试范围/验收标准、性能数据、缺陷分级与改进优先级
 ├── tools/md2docx.ps1          # Markdown → Word（纯 OOXML，不依赖 Word）
 ├── HANDOFF.md                 # 改动交接（改了什么 / 为什么 / 怎么验）
 ├── VERSION.md                 # 版本演进（v1.0 → v2.0 → v3.0 → v3.1 → v3.2 → v4.0）
@@ -101,6 +103,7 @@ chapter03/
    - `python server\verify_v3.py 8000` 服务端新功能（会创建并清理测试活动）
    - **无 Python 时的数据核验**：依次执行 `testdata_seed.sql` → `verify_test_data.ps1 -Stage schema/seed` → 重启服务端 → `-Stage api` → `testdata_clean.sql` → `-Stage baseline`（83 项，见 `docs/数据一致性核验-v3.2.md`）
    - `powershell -ExecutionPolicy Bypass -File server\verify_v4.ps1` v4.0 验收（45 项：申诉闭环 / 规则读写 / 异常检测 / 越权 / 基线，自建自清理）
+   - `powershell -ExecutionPolicy Bypass -File server\audit_v4.ps1` 系统全面测试（103 项：功能 / 边界 / 安全 / 性能 / 一致性 / 兼容，含 p95 与并发指标）
 
 ## 接口一览（自主 C++ 服务器）
 

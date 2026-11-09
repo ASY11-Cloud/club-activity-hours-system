@@ -762,10 +762,39 @@ static string takeAudit(string& resp) {
   return note;
 }
 
+/** 判断是否是底层数据库错误(这类原文只进服务端日志, 不回给客户端) */
+static bool looksLikeDbError(const string& m) {
+  static const char* keys[] = {
+    "Incorrect string value", "Duplicate entry", "Unknown column", "SQL syntax",
+    "for column", "at row", "Data too long", "foreign key constraint",
+    "Cannot add or update a child row", "Deadlock found", "Lock wait timeout",
+    "You have an error in your SQL"
+  };
+  for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+    if (m.find(keys[i]) != string::npos) return true;
+  }
+  return false;
+}
+
+/** UTF-8 安全截断: 不切断多字节字符(否则 MySQL 会报 Incorrect string value) */
+static string utf8Truncate(const string& s, size_t maxBytes) {
+  if (s.size() <= maxBytes) return s;
+  size_t n = maxBytes;
+  // s[n] 是第一个被舍弃的字节; 若它是续字节(10xxxxxx), 说明字符被切开, 继续回退
+  while (n > 0 && (static_cast<unsigned char>(s[n]) & 0xC0) == 0x80) n--;
+  return s.substr(0, n);
+}
+
 static string jsonErr(int code, const string& msg) {
+  string safe = msg;
+  if (code >= 500 && looksLikeDbError(safe)) {
+    // 底层错误原文写服务端日志便于排查, 客户端只拿到通用文案(防泄露表名/列名)
+    fprintf(stderr, "[DB-ERROR] %s\n", safe.c_str());
+    safe = "服务器内部错误, 请稍后重试";
+  }
   Json j = Json::Object();
   j.set("code", Json::Num(code));
-  j.set("msg", Json::Str(msg));
+  j.set("msg", Json::Str(safe));
   j.set("data", Json::Null());
   return httpResponse(200, jsonDump(j));
 }
@@ -1157,7 +1186,7 @@ static string handleStudentList(const string& query) {
   string group = qparam(query, "group");
   string kw = qparam(query, "kw");
   if (group.empty()) group = "all";
-  if (kw.size() > 50) kw = kw.substr(0, 50);
+  if (kw.size() > 50) kw = utf8Truncate(kw, 50);
   int page = atoi(qparam(query, "page").c_str());
   int size = atoi(qparam(query, "size").c_str());
   if (page < 1) page = 1;
@@ -1619,7 +1648,7 @@ static string handleActivityList(const string& query, const string& role, const 
   //   kw 按标题或地点模糊搜索
   string scope = qparam(query, "scope");
   string kw = qparam(query, "kw");
-  if (kw.size() > 50) kw = kw.substr(0, 50);
+  if (kw.size() > 50) kw = utf8Truncate(kw, 50);
   if (scope == "available") {
     where += " AND a.end_time>=NOW()";
     // 用 taken 缓存判定剩余名额(与报名时的条件 UPDATE 同一口径), 避免每行一次子查询
@@ -1753,10 +1782,10 @@ static bool parseActivityForm(const Json& body, ActivityForm& f, string& errMsg,
   f.hasCategory = (body.get("category") != nullptr);
   f.category  = normCategory(body.strVal("category"));
   // 长度截断, 防止超长内容破坏数据
-  if (f.title.size() > 100)      f.title = f.title.substr(0, 100);
-  if (f.content.size() > 2000)   f.content = f.content.substr(0, 2000);
-  if (f.location.size() > 100)   f.location = f.location.substr(0, 100);
-  if (f.publisher.size() > 50)   f.publisher = f.publisher.substr(0, 50);
+  if (f.title.size() > 100)      f.title = utf8Truncate(f.title, 100);
+  if (f.content.size() > 2000)   f.content = utf8Truncate(f.content, 2000);
+  if (f.location.size() > 100)   f.location = utf8Truncate(f.location, 100);
+  if (f.publisher.size() > 50)   f.publisher = utf8Truncate(f.publisher, 50);
   return true;
 }
 
@@ -1899,7 +1928,7 @@ static string handleSignupAdd(const Json& body, const string& loginStuNo, const 
   int activityId = body.intVal("activity_id", -1);
   if (clientId.empty() || activityId <= 0)
     return jsonErr(400, "client_id/activity_id required");
-  if (clientId.size() > 64) clientId = clientId.substr(0, 64);   // 防超长主键撑爆索引
+  if (clientId.size() > 64) clientId = utf8Truncate(clientId, 64);   // 防超长主键撑爆索引
   const string stuNo = loginStuNo;
   const string name  = loginName;
 
@@ -2032,7 +2061,7 @@ static string handleSignupList(const string& query, const string& forceStuNo) {
   if (!sv.empty()) status = atoi(sv.c_str());
   if (status < -1 || status > 2) status = -1;
   string kw = qparam(query, "kw");                  // 姓名/学号/活动名 模糊搜索(服务端执行, 分页前过滤)
-  if (kw.size() > 50) kw = kw.substr(0, 50);
+  if (kw.size() > 50) kw = utf8Truncate(kw, 50);
   int page = atoi(qparam(query, "page").c_str());
   int size = atoi(qparam(query, "size").c_str());
   if (page < 1) page = 1;
@@ -2119,7 +2148,7 @@ static string handleSignupAudit(const Json& body) {
   int signupId = body.intVal("signup_id", -1);
   string action = body.strVal("action");
   string remark = body.strVal("remark");
-  if (remark.size() > 200) remark = remark.substr(0, 200); // 长度截断
+  if (remark.size() > 200) remark = utf8Truncate(remark, 200); // 长度截断
   if (signupId <= 0 || (action != "pass" && action != "reject"))
     return jsonErr(400, "signup_id & action(pass|reject) required");
   // 驳回必须给出理由: 成员端会原样显示, 空理由等于"没说为什么", 无法指导他修改后重报
@@ -2194,7 +2223,7 @@ static string handleSignupAudit(const Json& body) {
       std::ostringstream cs;
       cs << (finalRemark.empty() ? "" : "; ") << "按类别上限折算为 " << finalHours << " 学时";
       finalRemark += cs.str();
-      if (finalRemark.size() > 200) finalRemark = finalRemark.substr(0, 200);
+      if (finalRemark.size() > 200) finalRemark = utf8Truncate(finalRemark, 200);
     }
 
     // 4) 更新报名状态+学时(条件 status=0, 影响行数必须为 1), 同时补齐类别快照
@@ -2866,7 +2895,7 @@ static string handleAppealAdd(const Json& body, const TokenInfo& me) {
   string reason = body.strVal("reason");
   if (signupId <= 0) return jsonErr(400, "signup_id required");
   if (reason.size() < 5) return jsonErr(400, "请填写申诉理由(至少 5 个字)");
-  if (reason.size() > 500) reason = reason.substr(0, 500);
+  if (reason.size() > 500) reason = utf8Truncate(reason, 500);
 
   MYSQL* c = dbConnect();
   if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
@@ -2993,10 +3022,13 @@ static string handleAppealAudit(const Json& body, const TokenInfo& me) {
   int appealId = body.intVal("appeal_id", -1);
   string action = body.strVal("action");
   string reply = body.strVal("reply");
-  double reqHours = body.numVal("hours", -1);
+  // 区分"没传 hours"(沿用原学时)与"传了非法值": 只认字段存在性, 不认 -1 哨兵,
+  // 否则 hours=-2 会被当成"未提供"而静默通过。
+  bool hasHours = (body.get("hours") != nullptr);
+  double reqHours = hasHours ? body.numVal("hours", -1) : -1;
   if (appealId <= 0 || (action != "pass" && action != "reject"))
     return jsonErr(400, "appeal_id & action(pass|reject) required");
-  if (reply.size() > 500) reply = reply.substr(0, 500);
+  if (reply.size() > 500) reply = utf8Truncate(reply, 500);
   if (action == "reject" && reply.size() < 2)
     return jsonErr(400, "驳回需填写原因(至少 2 个字), 学生端会看到");
   string handler = me.name.empty() ? string("管理员") : me.name;
@@ -3051,7 +3083,7 @@ static string handleAppealAudit(const Json& body, const TokenInfo& me) {
   }
 
   if (atoi(r.rows[0][3].c_str()) != 1) return fail(409, "该报名已不是已通过状态, 无法调整学时");
-  double target = (reqHours < 0) ? curHours : reqHours;
+  double target = hasHours ? reqHours : curHours;
   if (target < 0 || target > actHours + 1e-6) {
     std::ostringstream em;
     em << "调整学时应在 0 ~ " << actHours << " 之间";
@@ -3655,7 +3687,7 @@ static bool serveOne(SOCKET sock, string& carry, const string& ip) {
     string audit = takeAudit(resp);      // 摘出注销等破坏性操作的审计说明
     detail = req.method + " " + req.path + (req.query.empty() ? "" : "?" + req.query);
     if (!audit.empty()) detail += " | " + audit;               // 留痕
-    if (detail.size() > 480) detail = detail.substr(0, 480); // 适配日志列宽
+    if (detail.size() > 480) detail = utf8Truncate(detail, 480); // 适配日志列宽
   } catch (...) {
     resp = jsonErr(500, "服务器内部错误, 请查看服务端日志");
     status = 500;

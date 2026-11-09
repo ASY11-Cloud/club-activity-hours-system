@@ -1080,3 +1080,46 @@ powershell -ExecutionPolicy Bypass -File tools\md2docx.ps1 -Md docs\使用说明
 - 规则用例覆盖：结构化下发、七大类齐全、未知类别/负数拒绝、设置 1.5 后审核裁剪到 1.5、复位 0；
 - 异常用例覆盖：5 条 10 分钟内签到命中 burst、30 小时未签退命中、学时 5>4 命中；清理后异常归零；
 - 基线：8 活动 / 19 报名 / 5 人 / 20.5 学时 / 李铭 5.5 / 待审 3。
+
+## 31. v4.0 系统全面测试（2026-11-09）
+
+脚本 `server/audit_v4.ps1`，报告 `docs/系统测试报告-v4.0.md`。不引入新依赖，测试数据用 `A90xx` / id 9200-9299 命名空间，前后自动清理。
+
+### 31.1 覆盖面与结果
+
+| 维度 | 断言数 | 结果 |
+|---|---:|---|
+| 功能完整性（接口矩阵/字段契约/分页/报表/申诉/规则） | 19 | 全绿 |
+| 边界与异常（非法 JSON、超大 body、数值越界、并发抢名额、重复操作、超长中文） | 36 | 全绿 |
+| 安全性（401/403/IDOR/注入/Token 失效/口令泄露/节流） | 13 | 全绿 |
+| 性能（p95、100 并发读、20 并发报表、内存） | 10 | 全绿 |
+| 数据一致性（基线/taken/hours_total/类别/孤儿/重复） | 10 | 全绿 |
+| 兼容性（旧字段、编辑不带 category、CORS、MySQL 严格模式） | 6 | 全绿 |
+| 清理回归 | 5 | 全绿 |
+
+**103/103**，`verify_v4.ps1` 45/45 回归仍绿。
+
+### 31.2 本轮修掉的三个一般缺陷
+
+1. **UTF-8 按字节截断 → 500**：`reason.substr(0,500)` 把汉字切成半个，MySQL 报 `Incorrect string value`。新增 `utf8Truncate()`（从截断点回退到 UTF-8 字符边界），把 `title/content/location/publisher/remark/reason/reply/detail/kw/clientId` 共 12 处 `substr` 全部替换。600 个汉字现在能正常入库（按 500 字节截断 ≈166 字）。
+2. **DB 错误原文回传**：`jsonErr(500, err)` 直接把 `for column 'reason' at row 1` 发给客户端。改为 `jsonErr` 内统一识别 DB 错误：原文 `fprintf(stderr)`，客户端只收「服务器内部错误, 请稍后重试」。识别关键词含 `Duplicate entry / Unknown column / SQL syntax / Data too long / Deadlock / foreign key` 等。
+3. **申诉 `hours=-2` 静默通过**：原逻辑用 `reqHours < 0` 判断"未提供"，负数被当成沿用原学时。改为 `body.get("hours")` 判断字段是否出现，出现即校验 `[0, 活动学时]`，负数返回 400。
+
+### 31.3 未修复但已排期
+
+- P1：`size=0` 全量返回（建议归一到默认 20、硬上限 200）、状态码语义统一（重复审核 400 → 409；名额满 403）、读接口全局限流、`request_log` 定期裁剪（目前仅启动时裁 7 天/2 万条）、异常检测 `checked_at` 索引、模拟器 UI 冒烟；
+- P2：TLS + Token 安全存储、线程池替代一连接一线程、报表分页。
+
+### 31.4 测试脚本自身的坑（复用者注意）
+
+- PowerShell 5.1 需要 `Add-Type -AssemblyName System.Net.Http` 才能 `new HttpClient`，否则报"找不到类型"；
+- GET 请求不能带 body，角色矩阵循环里要按 method 传 `$null`，否则 PowerShell 直接抛 `Cannot send a content-body with this verb-type`；
+- `Invoke-RestMethod` 遇到 HTTP 404 会抛异常且拿不到业务 JSON，未知路由要用"HTTP 状态"口径断言，不能套业务码口径；
+- `size=0` 是"全量"，性能用例不要拿它做分页样本；
+- 所有 `.ps1` 继续坚持 UTF-8 **BOM**，否则 5.1 按 ANSI 解析中文会语法报错。
+
+### 31.5 环境结论
+
+- MySQL 8.0.46、`ONLY_FULL_GROUP_BY + STRICT_TRANS_TABLES` 下全部 SQL 可执行；
+- 小数据量 p95 13~18ms，100 并发 60ms 全成功，内存无持续增长；
+- 未覆盖：真机/模拟器 UI 交互、长时间浸泡（soak）、TLS 抓包、多机部署。已写入报告的"未覆盖/限制"。
