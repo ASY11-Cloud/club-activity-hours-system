@@ -7,6 +7,8 @@
 > 版本演进与 v2.0 相对 v1.0 的升级说明见 [`VERSION.md`](VERSION.md)；归档分支：`v1.0`（第一版）、`v2.0`（第二版最终版，同 main）。
 > 本轮改动明细、为什么改、验证方式与环境坑，见 [`HANDOFF.md`](HANDOFF.md)。
 > 操作步骤与验收演示见 [`docs/使用说明.md`](docs/使用说明.md)（Word 版 `使用说明文档.docx`，与 md 同源，均对应 v4.0）。
+>
+> **版本归档**：第三版最终版（v3.2）已单独归档为分支 `release/v3-final` 与标签 `v3-final`（commit `5bcf487`），v4.0 在 `main` 继续演进，**不会覆盖**该快照。`git checkout v3-final` 即可取第三版终稿。
 
 ## 功能总览
 
