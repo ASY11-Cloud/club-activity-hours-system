@@ -16,7 +16,7 @@ import { AppConfig } from '../common/AppConfig';
 import { ApiClient } from '../common/ApiClient';
 import {
   ActivityInfo, HoursRow, SignupInfo, parseActivities, parseHoursReport, parseSignups,
-  totalOf, hasMoreOf
+  totalOf, hasMoreOf, CATEGORY_KEYS, categoryText
 } from '../common/Models';
 import { Nav } from '../common/Nav';
 import { Theme } from '../common/Theme';
@@ -47,6 +47,7 @@ struct MainPage {
 
   // ---- 筛选 / 搜索(全部在服务端生效) ----
   @State scope: string = 'all';
+  @State category: string = '';   // '' = 全部类别, 否则为七大类 key
   @State kw: string = '';
   @State kwInput: string = '';
   @State searchOpen: boolean = false;
@@ -111,6 +112,7 @@ struct MainPage {
     let q = '/api/activity/list?page=' + page.toString() + '&size=' + PAGE_SIZE.toString();
     if (this.scope !== 'all') q += '&scope=' + this.scope;
     if (this.scope === 'mine' && this.stuNo !== '') q += '&stu_no=' + encodeURIComponent(this.stuNo);
+    if (this.category !== '') q += '&category=' + this.category;
     if (this.kw !== '') q += '&kw=' + encodeURIComponent(this.kw);
     return q;
   }
@@ -217,7 +219,7 @@ struct MainPage {
   }
 
   /** 活动状态色: 已结束灰 / 名额满橙 / 进行中绿 / 未开始蓝 */
-  actColor(a: ActivityInfo): string {
+  actColor(a: ActivityInfo): ResourceColor {
     if (a.expired) return Theme.textDisabled;
     if (a.remaining === 0) return Theme.warning;
     if (TimeFmt.stage(a.start_time, a.end_time) === '进行中') return Theme.success;
@@ -289,7 +291,7 @@ struct MainPage {
     return n > 99 ? '99+' : n.toString();
   }
 
-  tabColor(idx: number): string {
+  tabColor(idx: number): ResourceColor {
     return this.currentTab === idx ? Theme.primary : Theme.textTertiary;
   }
 
@@ -506,6 +508,39 @@ struct MainPage {
     .padding({ left: Theme.pagePadding, right: Theme.pagePadding, bottom: 8 })
   }
 
+  @Builder
+  categoryChip(label: string, key: string) {
+    Text(label)
+      .fontSize(Theme.fsCaption)
+      .fontColor(this.category === key ? Theme.textOnPrimary : Theme.textSecondary)
+      .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+      .backgroundColor(this.category === key ? Theme.primary : Theme.bgSubtle)
+      .borderRadius(Theme.radiusPill)
+      .onClick(() => this.setCategory(key))
+  }
+
+  /** 类别筛选条: 七大类 + 全部(横向滚动, 不挤占纵向空间) */
+  @Builder
+  categoryBar() {
+    Scroll() {
+      Row({ space: 6 }) {
+        this.categoryChip('全部类别', '')
+        ForEach(CATEGORY_KEYS, (k: string) => {
+          this.categoryChip(categoryText(k), k)
+        }, (k: string) => k)
+      }.padding({ left: Theme.pagePadding, right: Theme.pagePadding })
+    }
+    .scrollable(ScrollDirection.Horizontal)
+    .scrollBar(BarState.Off)
+    .width('100%').padding({ bottom: 8 })
+  }
+
+  setCategory(key: string): void {
+    if (this.category === key) return;
+    this.category = key;
+    this.resetAndLoad();
+  }
+
   // ==================== 活动卡 ====================
 
   @Builder
@@ -525,6 +560,13 @@ struct MainPage {
           .fontSize(Theme.fsCaption).fontColor(Theme.primary)
           .padding({ left: 6, right: 6, top: 2, bottom: 2 })
           .backgroundColor(Theme.primaryBg).borderRadius(Theme.radiusSm)
+      }.width('100%')
+
+      Row({ space: 6 }) {
+        Text(categoryText(a.category))
+          .fontSize(Theme.fsCaption).fontColor(Theme.report)
+          .padding({ left: 6, right: 6, top: 1, bottom: 1 })
+          .backgroundColor(Theme.reportBg).borderRadius(Theme.radiusSm)
       }.width('100%')
 
       Row({ space: 6 }) {
@@ -591,6 +633,7 @@ struct MainPage {
       }.width('100%').padding({ left: Theme.pagePadding, right: Theme.pagePadding, bottom: 10 })
 
       this.scopeBar()
+      this.categoryBar()
 
       if (this.loadFailed) {
         StateView({
@@ -676,7 +719,7 @@ struct MainPage {
   }
 
   @Builder
-  bigCard(title: string, desc: string, color: string, url: string, kind: string) {
+  bigCard(title: string, desc: string, color: ResourceColor, url: string, kind: string) {
     Row({ space: 12 }) {
       Text(title.substring(0, 1))
         .fontSize(18).fontWeight(FontWeight.Bold).fontColor(Theme.textOnPrimary)

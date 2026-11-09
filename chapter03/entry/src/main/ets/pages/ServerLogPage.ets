@@ -93,7 +93,7 @@ struct ServerLogPage {
   chip(label: string, active: boolean, kind: string, val: string) {
     Text(label)
       .fontSize(11)
-      .fontColor(active ? Color.White : Theme.textBody)
+      .fontColor(active ? Theme.textOnPrimary : Theme.textBody)
       .padding({ left: 10, right: 10, top: 4, bottom: 4 })
       .backgroundColor(active ? Theme.primary : Theme.bgNeutral)
       .borderRadius(12)
@@ -112,13 +112,13 @@ struct ServerLogPage {
     Row() {
       Column({ space: 3 }) {
         Row({ space: 8 }) {
-          Text(l.method).fontSize(11).fontColor(Color.White)
+          Text(l.method).fontSize(11).fontColor(Theme.textOnPrimary)
             .padding({ left: 5, right: 5, top: 1, bottom: 1 })
             .backgroundColor(l.method === 'POST' ? Theme.danger : Theme.primary).borderRadius(4)
           Text(l.status.toString()).fontSize(12).fontWeight(FontWeight.Bold)
             .fontColor(l.status >= 400 ? Theme.danger : Theme.success)
           if (l.cost_ms >= 500) {
-            Text('慢').fontSize(9).fontColor(Color.White)
+            Text('慢').fontSize(9).fontColor(Theme.textOnPrimary)
               .padding({ left: 4, right: 4, top: 1, bottom: 1 })
               .backgroundColor(Theme.warning).borderRadius(4)
           }
@@ -130,7 +130,7 @@ struct ServerLogPage {
         Text(l.ip + ' · ' + l.cost_ms + 'ms').fontSize(11).fontColor(Theme.textTertiary)
       }.alignItems(HorizontalAlign.End)
     }
-    .width('100%').padding(12).backgroundColor(Color.White).borderRadius(12).margin({ bottom: 8 })
+    .width('100%').padding(12).backgroundColor(Theme.bgCard).borderRadius(12).margin({ bottom: 8 })
   }
 
   @Builder

@@ -35,6 +35,7 @@ export class SyncService {
     }
     let page = 1;
     let count = 0;
+    let complete = false;                // 是否把服务器数据拉完(而非撞上页数上限)
     const serverIds: string[] = [];      // 服务器上确有的 client_id
     while (page <= maxPages) {
       const resp = await ApiClient.get('/api/signup/list?size=200&page=' + page.toString());
@@ -51,8 +52,13 @@ export class SyncService {
         count++;
       }
       const more: boolean = hasMoreOf(resp);
-      if (!more || list.length === 0) break;
+      if (!more || list.length === 0) { complete = true; break; }
       page++;
+    }
+    // 没拉完就绝不能清理: 此时 serverIds 不完整, 拿它当"服务器已删除"的依据会误删有效记录
+    if (!complete) {
+      return new SyncResult(true, count,
+        '同步完成: 更新/补全 ' + count.toString() + ' 条(数据量超限, 已跳过清理)');
     }
     // 以服务器为准清理陈旧记录: 本地标着"已同步"但服务器上没有的(被撤销/被删除/旧测试残留)要删掉;
     // 未同步的(synced=0)保留 —— 那是离线报名, 还没补传到服务器。

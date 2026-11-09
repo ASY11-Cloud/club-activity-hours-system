@@ -54,11 +54,11 @@ def dt(days=0, minutes=0):
     return (datetime.now() + timedelta(days=days, minutes=minutes)).strftime('%Y-%m-%d %H:%M')
 
 
-def add_act(admin, title, start, end, hours=2.0, capacity=0):
+def add_act(admin, title, start, end, hours=2.0, capacity=0, category='sports'):
     _, r = api('/api/activity/add', {
         'title': title, 'content': 'P1P2 测试', 'location': '测试场地',
         'start_time': start, 'end_time': end, 'hours': hours, 'capacity': capacity,
-        'publisher': '系统管理员'}, token=admin)
+        'category': category, 'publisher': '系统管理员'}, token=admin)
     return r['data']['id'] if r.get('code') == 0 else None
 
 
@@ -89,7 +89,13 @@ a3 = add_act(at, 'P2已结束', dt(minutes=5), dt(days=2), capacity=10)
 a4 = add_act(at, 'P1刷卡重复', dt(minutes=1), dt(days=2), capacity=10)
 # A5 专用于"驳回后重报": 独立活动且不限人数, 避免复用 a1(容量 1 已被竞态测试占位)造成偶发失败
 a5 = add_act(at, 'P2驳回重报', dt(minutes=5), dt(days=2), capacity=0)
-check('setup activities created', None not in (a1, a2, a3, a4, a5))
+# v3.2 新用例: a6/a7 同一时段(时间冲突)/ a8 动态签到码与签退(未来时段避免与其他报名重叠)
+a6 = add_act(at, 'P1冲突甲', dt(days=20), dt(days=21), capacity=0)
+a7 = add_act(at, 'P1冲突乙', dt(days=20), dt(days=21), capacity=0)
+a8 = add_act(at, 'P1动态签到码', dt(days=10), dt(days=11), capacity=0)
+# a9 类别上限(skill): 活动 5 学时, 单活动上限设 2 -> 审核通过只认 2
+a9 = add_act(at, 'P1类别上限', dt(days=30), dt(days=31), hours=5.0, capacity=0, category='skill')
+check('setup activities created', None not in (a1, a2, a3, a4, a5, a6, a7, a8, a9))
 # A3 通过"编辑"改为过去时间段(编辑允许历史时间, 发布不允许 —— 本身就是一条 P2 用例)
 _, r = api('/api/activity/update', {'activity_id': a3, 'title': 'P2已结束', 'content': '',
                                     'location': '测试场地', 'start_time': dt(days=-3),
@@ -143,6 +149,16 @@ try:
           'denied=%s' % denied)
     valid = int(sql("SELECT COUNT(*) FROM signup WHERE activity_id=%d AND status<>2" % a1))
     check('capacity race: valid_count <= 1', valid <= 1, 'valid=%d' % valid)
+    taken1 = int(sql("SELECT taken FROM activity WHERE id=%d" % a1) or -1)
+    check('capacity race: taken equals valid_count', taken1 == valid, 'taken=%d valid=%d' % (taken1, valid))
+
+    # 4.5) 时间冲突: 同一学生不能同时报名两个时间重叠的活动(否则学时双算)
+    _, r = api('/api/signup/add', {'client_id': 'conf-a', 'activity_id': a6}, token=tA)
+    check('overlap: first signup ok', r['code'] == 0, r.get('msg', ''))
+    _, r = api('/api/signup/add', {'client_id': 'conf-b', 'activity_id': a7}, token=tA)
+    check('overlap: second signup rejected 409', r['code'] == 409 and '冲突' in r['msg'], r.get('msg', ''))
+    taken6 = int(sql("SELECT taken FROM activity WHERE id=%d" % a6) or -1)
+    check('overlap: rejected signup takes no slot', taken6 == 1, 'taken=%d' % taken6)
 
     # 5) 并发重复审核: 乙在 a2 的待审记录, 两路并发通过 -> 学时只加一次
     rowid = int(sql("SELECT id FROM signup WHERE activity_id=%d AND stu_no='2029102'" % a2))
@@ -178,6 +194,35 @@ try:
     check('5x card swipe: single passed record', c_passed == 1, 'records=%d' % c_passed)
     st, r = api('/api/signin', {'card_no': 'CARD-9999', 'activity_id': a4})
     check('unbound card -> 404', r['code'] == 404 and '未绑定' in r['msg'], r.get('msg', ''))
+
+    # 7.5) 动态签到码 + 签退: 管理员出码 -> 学生输码签到 -> 签退按在场时长折算
+    _, r = api('/api/activity/signin_code?activity_id=%d' % a8, token=at)
+    code = r['data']['code'] if r.get('code') == 0 else ''
+    check('admin gets 6-digit signin code', len(code) == 6 and code.isdigit(), str(r.get('data')))
+    badcode = '000000' if code != '000000' else '111111'
+    _, r = api('/api/signin/code', {'activity_id': a8, 'code': badcode}, token=tA)
+    check('wrong signin code rejected 403', r['code'] == 403, r.get('msg', ''))
+    _, r = api('/api/signin/code', {'activity_id': a8, 'code': code}, token=tA)
+    check('code signin ok (auto pass + checkin)',
+          r.get('code') == 0 and (r.get('data') or {}).get('checkin') == 1, str(r.get('data')))
+    _, r = api('/api/signin/out', {'activity_id': a8}, token=tA)
+    check('signout ok', r['code'] == 0, r.get('msg', ''))
+    hrs = float(sql("SELECT hours FROM signup WHERE activity_id=%d AND stu_no='2029101'" % a8) or 0)
+    check('signout folds hours (0.5 ~ activity hours)', 0.5 <= hrs <= 2.0, 'hours=%s' % hrs)
+    _, r = api('/api/signin/out', {'activity_id': a8}, token=tA)
+    check('double signout rejected 409', r['code'] == 409, r.get('msg', ''))
+
+    # 7.6) 类别学时规则: skill 单活动上限 2 学时, 5 学时活动只认定 2 学时
+    sql("INSERT INTO sys_config (cfg_key,cfg_value) VALUES ('rule.skill.max_activity','2') "
+        "ON DUPLICATE KEY UPDATE cfg_value='2'")
+    _, r = api('/api/signup/add', {'client_id': 'cap-skill', 'activity_id': a9}, token=tA)
+    check('category activity signup ok', r['code'] == 0, r.get('msg', ''))
+    rid9 = int(sql("SELECT id FROM signup WHERE activity_id=%d AND stu_no='2029101'" % a9))
+    _, r = api('/api/signup/audit', {'signup_id': rid9, 'action': 'pass', 'remark': '类别上限测试'}, token=at)
+    check('single-activity cap trims hours to 2.0',
+          r.get('code') == 0 and abs(float((r.get('data') or {}).get('hours', -1)) - 2.0) < 1e-6
+          and (r.get('data') or {}).get('hours_capped') is True, str(r.get('data')))
+    sql("UPDATE sys_config SET cfg_value='0' WHERE cfg_key='rule.skill.max_activity'")
 
     # 8) Token 生命周期: 登出后旧 token 失效
     _, r = api('/api/login', {'type': 'student', 'account': '2029102', 'secret': '123456'})
@@ -240,9 +285,10 @@ finally:
     # ---------- 清理: 删学生(级联删报名/学时) + 删测试活动 ----------
     for no, name, card in STU:
         api('/api/student/delete', {'stu_no': no, 'confirm_stu_no': no}, token=at)
-    ids = ','.join(str(x) for x in (a1, a2, a3, a4, a5) if x)
+    ids = ','.join(str(x) for x in (a1, a2, a3, a4, a5, a6, a7, a8, a9) if x)
     sql("DELETE FROM activity WHERE id IN (%s)" % ids)
-    sql("DELETE FROM sys_config WHERE 1=0")  # no-op, 保持连接习惯
+    # 类别规则复位为 0(不限), 保证演示基线 20.5 学时不受影响
+    sql("UPDATE sys_config SET cfg_value='0' WHERE cfg_key='rule.skill.max_activity'")
     left = sql("SELECT COUNT(*) FROM student WHERE stu_no LIKE '20291%'")
     print('[CLEANUP] test students left=%s (expect 0)' % left)
 

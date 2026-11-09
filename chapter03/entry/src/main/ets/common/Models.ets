@@ -20,6 +20,8 @@ export interface ActivityInfo {
   remaining: number;      // 剩余名额; -1 表示不限人数
   expired: boolean;       // 活动是否已结束(结束后不可报名/刷卡)
   status: number;         // 1 已发布 / 0 已下线(仅管理员查询 all=1 时可能出现)
+  category: string;       // 七大类 key: thought/practice/volunteer/innovation/sports/social/skill
+  taken: number;          // 服务端名额计数缓存(status<>2), 与 valid_count 应一致
 }
 
 // 报名记录
@@ -37,7 +39,9 @@ export interface SignupInfo {
   audited_at: string;
   activity_title: string;
   activity_hours: number;  // 活动本身的学时(审核通过时服务端按此累计)
-  checkin_at: string;      // 刷卡签到时间(未签到为空)
+  checkin_at: string;      // 刷卡/输码签到时间(未签到为空)
+  category: string;        // 报名时的活动类别快照
+  signout_at: string;      // 签退时间(空 = 未签退)
 }
 
 // 学时排行
@@ -59,6 +63,41 @@ export interface HoursDetail {
   activity: string;
   hours: number;
   audited_at: string;
+  category: string;
+}
+
+// 分类学时汇总(图表用)
+export interface CategoryStat {
+  category: string;
+  hours: number;
+  count: number;
+}
+
+// 学分预警行(未达标名单)
+export interface WarningRow {
+  stu_no: string;
+  name: string;
+  dept: string;
+  total_hours: number;
+  sign_count: number;
+  gap: number;              // 距离达标线还差的学时
+  last_activity_at: string; // 最近一次认定时间(空 = 从未认定)
+}
+
+// ---------- 活动类别(七大类) ----------
+export const CATEGORY_KEYS: string[] = ['thought', 'practice', 'volunteer', 'innovation', 'sports', 'social', 'skill'];
+export const CATEGORY_LABELS: string[] = ['思想成长', '实践实习', '志愿公益', '创新创业', '文体活动', '社会工作', '技能特长'];
+
+/** 类别 key -> 中文名(未知值按文体活动处理, 与服务端回落口径一致) */
+export function categoryText(key: string): string {
+  const i = CATEGORY_KEYS.indexOf(key);
+  return i >= 0 ? CATEGORY_LABELS[i] : CATEGORY_LABELS[4];
+}
+
+/** 类别 key -> 在列表中的下标(用于选择器默认值) */
+export function categoryIndex(key: string): number {
+  const i = CATEGORY_KEYS.indexOf(key);
+  return i >= 0 ? i : 4;
 }
 
 // 请求日志
@@ -84,6 +123,7 @@ export interface LocalDraft {
   hours: number;
   capacity: number;
   publisher: string;
+  category: string;    // 七大类 key, 发布时随活动一起提交
   synced: number;
   created_at: string;
 }
@@ -187,7 +227,9 @@ export function parseActivities(resp: Record<string, Object>): ActivityInfo[] {
       valid_count: numOf(item, 'valid_count', numOf(item, 'signed_count')),
       remaining: numOf(item, 'remaining', -1),
       expired: boolOf(item, 'expired'),
-      status: numOf(item, 'status', 1)
+      status: numOf(item, 'status', 1),
+      category: strOf(item, 'category', 'sports'),
+      taken: numOf(item, 'taken', numOf(item, 'valid_count'))
     });
   }
   return out;
@@ -216,7 +258,9 @@ export function parseSignups(resp: Record<string, Object>): SignupInfo[] {
       audited_at: strOf(item, 'audited_at'),
       activity_title: strOf(item, 'activity_title'),
       activity_hours: numOf(item, 'activity_hours'),
-      checkin_at: strOf(item, 'checkin_at')
+      checkin_at: strOf(item, 'checkin_at'),
+      category: strOf(item, 'category', 'sports'),
+      signout_at: strOf(item, 'signout_at')
     });
   }
   return out;
@@ -259,7 +303,48 @@ export function parseHoursDetail(resp: Record<string, Object>): HoursDetail[] {
       name: strOf(item, 'name'),
       activity: strOf(item, 'activity'),
       hours: numOf(item, 'hours'),
-      audited_at: strOf(item, 'audited_at')
+      audited_at: strOf(item, 'audited_at'),
+      category: strOf(item, 'category', 'sports')
+    });
+  }
+  return out;
+}
+
+/** 解析分类学时汇总 */
+export function parseCategoryStats(resp: Record<string, Object>): CategoryStat[] {
+  const out: CategoryStat[] = [];
+  if (resp['code'] !== 0) return out;
+  const data = resp['data'] as Record<string, Object> | null;
+  if (!data || typeof data !== 'object') return out;
+  const list = data['by_category'] as Array<Record<string, Object>> | null;
+  if (!list) return out;
+  for (const item of list) {
+    out.push({
+      category: strOf(item, 'category', 'sports'),
+      hours: numOf(item, 'hours'),
+      count: numOf(item, 'count')
+    });
+  }
+  return out;
+}
+
+/** 解析学分预警名单 */
+export function parseWarningList(resp: Record<string, Object>): WarningRow[] {
+  const out: WarningRow[] = [];
+  if (resp['code'] !== 0) return out;
+  const data = resp['data'] as Record<string, Object> | null;
+  if (!data || typeof data !== 'object') return out;
+  const list = data['list'] as Array<Record<string, Object>> | null;
+  if (!list) return out;
+  for (const item of list) {
+    out.push({
+      stu_no: strOf(item, 'stu_no'),
+      name: strOf(item, 'name'),
+      dept: strOf(item, 'dept'),
+      total_hours: numOf(item, 'total_hours'),
+      sign_count: numOf(item, 'sign_count'),
+      gap: numOf(item, 'gap'),
+      last_activity_at: strOf(item, 'last_activity_at')
     });
   }
   return out;

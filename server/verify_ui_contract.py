@@ -67,8 +67,15 @@ check('下发 total', isinstance(d.get('total'), int) and d.get('total') >= 8, '
 check('下发 has_more=True', d.get('has_more') is True)
 check('下发 page=1/size=3', d.get('page') == 1 and d.get('size') == 3)
 row = (d.get('list') or [{}])[0]
-for k in ('id', 'title', 'valid_count', 'remaining', 'expired', 'status', 'hours', 'capacity'):
+for k in ('id', 'title', 'valid_count', 'remaining', 'expired', 'status', 'hours', 'capacity',
+          'category', 'taken'):
     check('活动行字段 ' + k, k in row, str(row.get(k)))
+check('活动 category 为七大类之一',
+      row.get('category') in ('thought', 'practice', 'volunteer', 'innovation', 'sports', 'social', 'skill'),
+      str(row.get('category')))
+check('活动 taken 为整数且与 valid_count 同口径',
+      isinstance(row.get('taken'), int) and int(row.get('taken')) == int(row.get('valid_count')),
+      'taken=%s valid=%s' % (row.get('taken'), row.get('valid_count')))
 r, _ = call('GET', '/api/activity/list?page=99&size=3', token=stu)
 d = r.get('data') or {}
 check('越界页返回空且 has_more=False',
@@ -89,8 +96,11 @@ check('kw=张 命中且仅命中该姓名',
 r, _ = call('GET', '/api/signup/list?page=1&size=50&activity_id=1', token=admin)
 rows = (r.get('data') or {}).get('list') or []
 check('activity_id=1 过滤生效', rows and all(x['activity_id'] == 1 for x in rows), 'n=%d' % len(rows))
-key = ('id', 'name', 'stu_no', 'status', 'activity_title', 'activity_hours', 'created_at', 'checkin')
+key = ('id', 'name', 'stu_no', 'status', 'activity_title', 'activity_hours', 'created_at', 'checkin',
+       'category', 'checkin_at', 'signout_at')
 check('报名行字段齐全', rows and all(k in rows[0] for k in key))
+check('报名行 signout_at 为字符串(空 = 未签退)',
+      rows and isinstance(rows[0].get('signout_at'), str), str(rows[0].get('signout_at')) if rows else 'n/a')
 r, _ = call('GET', '/api/signup/list?page=1&size=5', token=stu)
 rows = (r.get('data') or {}).get('list') or []
 check('学生只看本人', rows and all(x['stu_no'] == '2023001' for x in rows), 'n=%d' % len(rows))
@@ -203,6 +213,36 @@ if target:
     check('不存在的活动 404', r0.get('code') == 404)
     r0, _ = call('POST', '/api/activity/update', body, token=stu)
     check('成员不能编辑(403)', r0.get('code') == 403)
+
+print('== 6. v3.2 新增契约(签到码 / 预警 / 分类图表) ==')
+r, _ = call('GET', '/api/hours/report', token=admin)
+d = r.get('data') or {}
+check('报表下发 by_category(图表数据源)',
+      isinstance(d.get('by_category'), list) and len(d.get('by_category') or []) > 0,
+      'n=%d' % len(d.get('by_category') or []))
+check('明细行含 category', all('category' in x for x in (d.get('detail') or [])))
+r, _ = call('GET', '/api/report/warning', token=admin)
+d = r.get('data') or {}
+wx = d.get('list') or []
+key = ('stu_no', 'name', 'dept', 'total_hours', 'sign_count', 'gap', 'last_activity_at')
+check('预警行字段齐全', len(wx) == 0 or all(k in wx[0] for k in key), 'n=%d' % len(wx))
+check('预警按缺口降序',
+      all(wx[i]['gap'] >= wx[i + 1]['gap'] for i in range(len(wx) - 1)), 'n=%d' % len(wx))
+r0, _ = call('GET', '/api/report/warning', token=stu)
+check('成员不能看预警名单(403)', r0.get('code') == 403)
+
+aid = 1
+r, _ = call('GET', '/api/activity/signin_code?activity_id=%d' % aid, token=admin)
+d = r.get('data') or {}
+check('管理员取签到码成功', r.get('code') == 0, str(r.get('msg')))
+check('签到码为 6 位数字', isinstance(d.get('code'), str) and len(d.get('code')) == 6 and d.get('code').isdigit(),
+      str(d.get('code')))
+check('下发 window/expire_in(0<expire<=60)',
+      isinstance(d.get('window'), int) and isinstance(d.get('expire_in'), int)
+      and 0 < d.get('expire_in') <= 60,
+      'window=%s expire=%s' % (d.get('window'), d.get('expire_in')))
+r0, _ = call('GET', '/api/activity/signin_code?activity_id=%d' % aid, token=stu)
+check('成员不能取签到码(403)', r0.get('code') == 403)
 
 print('=' * 66)
 print('  结果: 通过 %d / 失败 %d' % (PASS, FAIL))

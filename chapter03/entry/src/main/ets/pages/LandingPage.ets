@@ -70,7 +70,7 @@ struct LandingPage {
    * 这里统一成圆角方块 + 单字, 任何字体下都稳定, 也与主界面的管理卡一致。
    */
   @Builder
-  entryCard(icon: string, title: string, desc: string, color: string, bg: string, url: string) {
+  entryCard(icon: string, title: string, desc: string, color: ResourceColor, bg: ResourceColor, url: string) {
     Column() {
       Text(icon)
         .fontSize(19).fontWeight(FontWeight.Bold).fontColor(color)
@@ -80,7 +80,7 @@ struct LandingPage {
       Text(desc).fontSize(11).fontColor(Theme.textTertiary).margin({ top: 4 })
     }
     .width('31%').padding({ top: 18, bottom: 18 })
-    .backgroundColor(Color.White)
+    .backgroundColor(Theme.bgCard)
     .borderRadius(16)
     .alignItems(HorizontalAlign.Center)
     .shadow({ radius: 10, color: 'rgba(0,0,0,0.06)', offsetY: 3 })
@@ -94,13 +94,13 @@ struct LandingPage {
           // ---- 渐变头部 ----
           Column() {
             Text('社')
-              .fontSize(30).fontWeight(FontWeight.Bold).fontColor(Color.White)
+              .fontSize(30).fontWeight(FontWeight.Bold).fontColor(Theme.textOnPrimary)
               .textAlign(TextAlign.Center)
               .width(72).height(72)
               .backgroundColor('rgba(255,255,255,0.22)')
               .borderRadius(24)
             Text('社团活动报名与学时认定系统')
-              .fontSize(22).fontWeight(FontWeight.Bold).fontColor(Color.White).margin({ top: 10 })
+              .fontSize(22).fontWeight(FontWeight.Bold).fontColor(Theme.textOnPrimary).margin({ top: 10 })
             Text('报名 · 审核 · 学时认定 · RFID 刷卡签到')
               .fontSize(13).fontColor('rgba(255,255,255,0.88)').margin({ top: 8 })
             // 服务器状态
@@ -108,7 +108,7 @@ struct LandingPage {
               Text(this.checking ? '检测中...' : (this.serverOk ? '● 服务器在线' : '● 服务器未连接'))
                 .fontSize(11).fontColor(this.serverOk ? Theme.onColorSuccess : Theme.onColorDanger)
               if (!this.checking) {
-                Text('点此重试').fontSize(10).fontColor(Color.White)
+                Text('点此重试').fontSize(10).fontColor(Theme.textOnPrimary)
                   .padding({ left: 6, right: 6, top: 1, bottom: 1 })
                   .backgroundColor('rgba(255,255,255,0.25)').borderRadius(6)
               }
@@ -124,7 +124,7 @@ struct LandingPage {
           .width('100%').padding({ top: 56, bottom: 44 })
           .linearGradient({
             angle: 135,
-            colors: [['#4B8DFF', 0], [Theme.primary, 1]]
+            colors: [[Theme.gradientStart, 0], [Theme.primary, 1]]
           })
           .borderRadius({ bottomLeft: 28, bottomRight: 28 })
 
@@ -132,7 +132,7 @@ struct LandingPage {
           if (this.loggedIn) {
             Row({ space: 10 }) {
               Text(this.name.substring(0, 1))
-                .fontSize(18).fontWeight(FontWeight.Bold).fontColor(Color.White).textAlign(TextAlign.Center)
+                .fontSize(18).fontWeight(FontWeight.Bold).fontColor(Theme.textOnPrimary).textAlign(TextAlign.Center)
                 .width(40).height(40)
                 .backgroundColor(this.isAdmin ? Theme.admin : Theme.success)
                 .borderRadius(20)
@@ -146,7 +146,7 @@ struct LandingPage {
                 .onClick(() => this.enter())
             }
             .width('100%').padding(14).margin({ top: 14, left: 14, right: 14 })
-            .backgroundColor(Color.White).borderRadius(16)
+            .backgroundColor(Theme.bgCard).borderRadius(16)
             .shadow({ radius: 8, color: 'rgba(0,0,0,0.05)', offsetY: 2 })
           }
 
@@ -162,15 +162,15 @@ struct LandingPage {
             }.width('100%')
           }
           .width('100%').padding(14).margin({ left: 14, right: 14, top: 14 })
-          .backgroundColor(Color.White).borderRadius(16)
+          .backgroundColor(Theme.bgCard).borderRadius(16)
 
           // ---- 主登录按钮 ----
           Button(this.loggedIn ? '进入主界面 ›' : '登 录 ›')
-            .width('92%').height(46).fontSize(16).fontColor(Color.White)
+            .width('92%').height(46).fontSize(16).fontColor(Theme.textOnPrimary)
             .margin({ top: 18 })
             .linearGradient({
               angle: 90,
-              colors: [['#4B8DFF', 0], [Theme.primary, 1]]
+              colors: [[Theme.gradientStart, 0], [Theme.primary, 1]]
             })
             .borderRadius(23)
             .onClick(() => this.enter())

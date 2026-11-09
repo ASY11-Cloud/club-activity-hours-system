@@ -71,7 +71,25 @@ t2 = q("SELECT COALESCE(SUM(hours),0) FROM signup WHERE status=1")[0][0]
 check("学时总额 == 已通过报名学时之和", abs(float(t1) - float(t2)) < 0.05,
       "total=%s detail=%s" % (t1, t2))
 
-# 4. 演示基线
+# 4. 名额计数自洽(v3.2): activity.taken 必须等于有效报名数(status<>2), 且不为负
+taken_rows = q("""
+SELECT a.id, a.title, a.taken,
+       (SELECT COUNT(*) FROM signup s WHERE s.activity_id=a.id AND s.status<>2)
+FROM activity a
+""")
+taken_drift = []
+for r in taken_rows:
+    if int(r[2]) != int(r[3]):
+        taken_drift.append("#%s %s taken=%s 有效=%s" % (r[0], r[1], r[2], r[3]))
+check("每个活动 taken == 有效报名数", len(taken_drift) == 0, "; ".join(taken_drift[:3]))
+neg = [r[0] for r in taken_rows if int(r[2]) < 0]
+check("taken 不为负", len(neg) == 0, "ids=%s" % neg[:5])
+sum_taken = sum(int(r[2]) for r in taken_rows)
+total_valid = len(q("SELECT id FROM signup WHERE status<>2"))
+check("taken 合计 == 有效报名总数", sum_taken == total_valid,
+      "sum=%d valid=%d" % (sum_taken, total_valid))
+
+# 5. 演示基线
 act = int(q("SELECT COUNT(*) FROM activity WHERE status=1")[0][0])
 sg = int(q("SELECT COUNT(*) FROM signup")[0][0])
 stu = int(q("SELECT COUNT(*) FROM student WHERE status=1")[0][0])

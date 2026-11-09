@@ -164,3 +164,64 @@
 - 接口实测：密码登录 / 姓名登录被拒 401 / 排行明文 + `is_me` / 改密闭环 / 无密码注册 400 / 错密码注销 403 / 正确密码注销 200 / 旧 Token 401 / 5 次错密码 429
 - App `hvigorw assembleHap` BUILD SUCCESSFUL
 - 基线未漂移：8 活动 / 19 报名 / 20.5 学时 / 榜首李铭 5.5
+
+---
+
+## v3.2：P0 全部修复 + P1 首批四项（2026-11-09，第三版定稿）
+
+版本口径：`/api/health.version = 3.2`，README / VERSION / 使用说明三处一致。
+
+### P0：先修问题，再谈功能
+
+| 问题 | 原状 | v3.2 |
+|---|---|---|
+| 报名时间冲突 | 同一学生可同时报两个重叠活动，学时双算 | 服务端事务内按学生行锁串行化，再查重叠报名；命中返回 409 + 冲突活动名。活动缺时间时跳过校验（兼容老数据） |
+| 同步 prune 隐患 | 只拉前 5 页（≤1000 条）就删除"服务器没有"的本地记录，超限误删 | 循环拉到 `has_more=false`（最多 50 页保护）；**未拉完则跳过清理**，并在提示里说明 |
+| 深色模式 | Theme 全硬编码浅色，dark 只有启动背景，系统深色下发白 | 20+ 颜色 token 化（`$r('app.color.*')`），base/dark 两套同名色板；散落的 `Color.White` / 十六进制色一并收敛 |
+| 报表无图表 | 只有进度条 | 达标率 `Progress(Ring)` 环形图 + 七大类横向百分比条形图（纯 ArkUI，无图表库） |
+| CSV 拿不到 | 只写应用沙箱并显示路径 | `DocumentViewPicker().save()` 用户自选目录落盘（UTF-8 BOM）；取消/失败回退剪贴板 + 沙箱路径 |
+| 登录失败计数只增不减 | `g_login_fail` 无上限 | 超过 4096 项时扫描清理过期记录（摊还 O(n)，低频触发） |
+
+### P1：四项功能
+
+1. **活动分类 + 学时规则**：`activity.category`（七大类）/ `signup.category`（报名快照）；规则存 `sys_config`：`rule.<cat>.max_activity`、`rule.<cat>.max_total`（0 = 不限，默认全 0）；审核通过按"单活动上限 → 类别累计上限"依次裁剪，结果为 0 仍通过并注明原因；
+2. **学分预警 + 一键导出**：`GET /api/report/warning` 返回未达标名单（缺口降序），App 报表页新增"预警"页签与 CSV 导出；
+3. **动态签到码 + 签退**：`GET /api/activity/signin_code`（管理员）返回 60 秒码；`POST /api/signin/code`（成员）输码签到，宽限前后各 60 秒；`POST /api/signin/out` 签退后按在场时长折算（0.5 步进、下限 0.5、上限活动学时）；管理端密钥启动随机生成，重启即失效；
+4. **库存条件更新**：`activity.taken` 计数 + `UPDATE ... WHERE taken < capacity` 占位，取代 `SELECT ... FOR UPDATE` 长事务；`signupTakeSlot` / `signupReleaseSlot` 两个 helper 统一维护，启动时按 `COUNT(*)` 对账。
+
+### 数据库增量
+
+```sql
+ALTER TABLE activity ADD COLUMN category VARCHAR(20) NOT NULL DEFAULT 'sports';
+ALTER TABLE activity ADD COLUMN taken    INT NOT NULL DEFAULT 0;
+ALTER TABLE signup   ADD COLUMN category VARCHAR(20) NOT NULL DEFAULT '';
+ALTER TABLE signup   ADD COLUMN signout_at DATETIME NULL;
+INSERT INTO sys_config (cfg_key,cfg_value) VALUES
+  ('rule.volunteer.max_activity','0'), ('rule.volunteer.max_total','0') ...
+```
+
+`init_db.sql` 与 `dbEnsureSchema` 同步；纯 SQL 初始化与 seed 脚本末尾都做一次 `taken` 回填，服务端启动再做一次对账，三层保证计数不漂移。
+
+### 兼容与防回归
+
+- 接口只增字段不改语义：`activity` 增 `category`/`taken`，`signup` 增 `category`/`checkin_at`/`signout_at`，报表增 `by_category`；
+- 活动编辑接口**未显式传 category 时保留原值**，旧版 App / 老脚本不会把类别刷回默认；
+- 新增规则默认 0（不限）+ 学时折算只对 `signout_at` 非空生效，因此**演示基线零漂移**：8 活动 / 19 报名 / 5 人 / 20.5 学时 / 榜首李铭 5.5 / 待审注册 3。
+
+### 验证（2026-11-09）
+
+- 服务端 `-O2 -Wall` 编译零警告（`build.log` 为空），`server.exe` 已更新并常驻 8000；
+- PowerShell 接口冒烟 22 项全绿：冲突报名 409、`taken` 自洽、签到码 6 位/剩余秒数、错码 403、输码签到、签退折算 0.5、重复签退 409、类别上限裁剪 2.0、预警权限、基线 8/19/5/20.5/5.5/3；
+- App `hvigorw assembleHap` **BUILD SUCCESSFUL**（0 error）；
+- 7 个 Python 脚本断言同步（本机无 Python，脚本逻辑与接口口径已按实测行为对齐，留待有 Python 环境复跑）。
+
+## v4 待办（P2，本轮刻意不做）
+
+1. 活动二维码/动态码离线校验（当前码只在线校验，断网无法签到）；
+2. 签到异常检测（同码多人异地、短时间批量签到告警）；
+3. 学时申诉流程（学生对认定结果申诉，管理员复核留痕）；
+4. 分类规则可视化编辑（当前需改 `sys_config`，缺管理界面）；
+5. 报表导出 Excel 多 Sheet + 图表（当前 CSV 单表）；
+6. 服务端配置热加载（改规则需重启才生效的项收敛）；
+7. 数据归档与冷热分离（`request_log` 已裁剪，`signup` 长期增长无归档）；
+8. 单元测试补全（C++ 侧目前依赖接口级脚本）。

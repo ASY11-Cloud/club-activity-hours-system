@@ -3,6 +3,122 @@
     {
       "name": "start_window_background",
       "value": "#FFFFFF"
+    },
+    {
+      "name": "c_primary",
+      "value": "#1E6FFF"
+    },
+    {
+      "name": "c_primary_dark",
+      "value": "#1557CC"
+    },
+    {
+      "name": "c_primary_bg",
+      "value": "#EAF1FF"
+    },
+    {
+      "name": "c_gradient_start",
+      "value": "#4B8DFF"
+    },
+    {
+      "name": "c_success",
+      "value": "#07C160"
+    },
+    {
+      "name": "c_success_bg",
+      "value": "#E8F8EF"
+    },
+    {
+      "name": "c_danger",
+      "value": "#E84026"
+    },
+    {
+      "name": "c_danger_bg",
+      "value": "#FDECEA"
+    },
+    {
+      "name": "c_warning",
+      "value": "#B25E00"
+    },
+    {
+      "name": "c_warning_bg",
+      "value": "#FFF3E0"
+    },
+    {
+      "name": "c_admin",
+      "value": "#F5652F"
+    },
+    {
+      "name": "c_admin_bg",
+      "value": "#FFF0E9"
+    },
+    {
+      "name": "c_signin",
+      "value": "#6C5CE7"
+    },
+    {
+      "name": "c_signin_bg",
+      "value": "#EFECFF"
+    },
+    {
+      "name": "c_report",
+      "value": "#00A884"
+    },
+    {
+      "name": "c_report_bg",
+      "value": "#E6F7F3"
+    },
+    {
+      "name": "c_on_success",
+      "value": "#D4F5DD"
+    },
+    {
+      "name": "c_on_danger",
+      "value": "#FFD9D2"
+    },
+    {
+      "name": "c_text_primary",
+      "value": "#1F2329"
+    },
+    {
+      "name": "c_text_body",
+      "value": "#333333"
+    },
+    {
+      "name": "c_text_secondary",
+      "value": "#666666"
+    },
+    {
+      "name": "c_text_tertiary",
+      "value": "#999999"
+    },
+    {
+      "name": "c_text_disabled",
+      "value": "#BBBBBB"
+    },
+    {
+      "name": "c_text_on_primary",
+      "value": "#FFFFFF"
+    },
+    {
+      "name": "c_bg_page",
+      "value": "#F5F7FA"
+    },
+    {
+      "name": "c_bg_card",
+      "value": "#FFFFFF"
+    },
+    {
+      "name": "c_bg_subtle",
+      "value": "#F2F4F8"
+    },
+    {
+      "name": "c_bg_neutral",
+      "value": "#E9ECF3"
+    },
+    {
+      "name": "c_divider",
+      "value": "#EEEEEE"
     }
   ]
 }

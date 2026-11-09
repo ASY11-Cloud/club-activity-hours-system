@@ -171,6 +171,23 @@ acts = r.get("data", {}).get("list", [])
 t("activity list has valid_count/remaining/expired",
   bool(acts) and all(("valid_count" in a and "remaining" in a and "expired" in a) for a in acts),
   acts[0] if acts else None)
+t("activity list has category/taken (v3.2)",
+  bool(acts) and all(("category" in a and "taken" in a) for a in acts),
+  acts[0] if acts else None)
+
+r = call("GET", "/api/activity/signin_code?activity_id=1", token=ADMIN)
+d = r.get("data") or {}
+t("admin signin code: 6 digits", r.get("code") == 0 and isinstance(d.get("code"), str)
+  and len(d.get("code", "")) == 6 and d.get("code", "").isdigit(), d.get("code"))
+t("admin signin code: expire_in in (0,60]", 0 < int(d.get("expire_in") or 0) <= 60, d.get("expire_in"))
+r = call("GET", "/api/activity/signin_code?activity_id=1", token=STU1)
+t("student cannot fetch signin code", r.get("code") == 403, r.get("code"))
+
+r = call("GET", "/api/report/warning", token=ADMIN)
+t("admin warning list ok", r.get("code") == 0
+  and isinstance((r.get("data") or {}).get("list"), list), r.get("code"))
+r = call("GET", "/api/report/warning", token=STU1)
+t("student warning list -> 403", r.get("code") == 403, r.get("code"))
 
 r = call("POST", "/api/signup/cancel", {"signup_id": 999999}, token=STU1)
 t("cancel nonexistent rejected", r.get("code") == 404, r)

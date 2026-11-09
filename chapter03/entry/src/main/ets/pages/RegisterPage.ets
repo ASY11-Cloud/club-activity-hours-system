@@ -96,17 +96,17 @@ struct RegisterPage {
           // 头部
           Column({ space: 6 }) {
             Text('注')
-              .fontSize(26).fontWeight(FontWeight.Bold).fontColor(Color.White)
+              .fontSize(26).fontWeight(FontWeight.Bold).fontColor(Theme.textOnPrimary)
               .textAlign(TextAlign.Center).width(64).height(64)
               .backgroundColor('rgba(255,255,255,0.22)').borderRadius(20)
-            Text('成员注册').fontSize(22).fontWeight(FontWeight.Bold).fontColor(Color.White)
+            Text('成员注册').fontSize(22).fontWeight(FontWeight.Bold).fontColor(Theme.textOnPrimary)
             Text('提交后由管理员审核, 通过方可登录系统')
               .fontSize(12).fontColor('rgba(255,255,255,0.88)')
           }
           .width('100%').padding({ top: 46, bottom: 36 })
           .linearGradient({
             angle: 135,
-            colors: [['#4B8DFF', 0], [Theme.primary, 1]]
+            colors: [[Theme.gradientStart, 0], [Theme.primary, 1]]
           })
           .borderRadius({ bottomLeft: 24, bottomRight: 24 })
           .alignItems(HorizontalAlign.Center)
@@ -176,7 +176,7 @@ struct RegisterPage {
               .backgroundColor(Theme.successBg).borderRadius(12)
             } else {
               Button(this.busy ? '提交中...' : '提交注册申请')
-                .width('100%').height(44).fontSize(16).fontColor(Color.White)
+                .width('100%').height(44).fontSize(16).fontColor(Theme.textOnPrimary)
                 .backgroundColor(Theme.primary)
                 .enabled(!this.busy)
                 .margin({ top: 6 })
@@ -190,7 +190,7 @@ struct RegisterPage {
             }
           }
           .width('100%').padding(16)
-          .backgroundColor(Color.White).borderRadius(16)
+          .backgroundColor(Theme.bgCard).borderRadius(16)
           .margin({ top: -16, left: 14, right: 14 })
           .shadow({ radius: 12, color: 'rgba(0,0,0,0.08)', offsetY: 4 })
 

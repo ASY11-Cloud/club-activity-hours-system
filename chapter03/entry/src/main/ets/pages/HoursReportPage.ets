@@ -5,14 +5,15 @@
  */
 import { router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
-import { fileIo } from '@kit.CoreFileKit';
+import { fileIo, picker } from '@kit.CoreFileKit';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { ApiClient } from '../common/ApiClient';
 import { DbHelper } from '../common/DbHelper';
 import { AppConfig } from '../common/AppConfig';
 import { LoginGuardView } from '../common/GuardViews';
 import {
-  HoursRow, HoursDetail, parseHoursReport, parseHoursDetail, parseSignups, dataOf, numOf, csvCell
+  HoursRow, HoursDetail, CategoryStat, WarningRow, parseHoursReport, parseHoursDetail,
+  parseCategoryStats, parseWarningList, parseSignups, dataOf, numOf, csvCell, categoryText
 } from '../common/Models';
 import { Theme } from '../common/Theme';
 
@@ -21,6 +22,8 @@ import { Theme } from '../common/Theme';
 struct HoursReportPage {
   @State report: HoursRow[] = [];
   @State detail: HoursDetail[] = [];
+  @State categoryStats: CategoryStat[] = [];   // 分类学时汇总(条形图)
+  @State warnList: WarningRow[] = [];          // 学分预警名单(管理员)
   @State localHours: number = 0;
   @State localCount: number = 0;
   @State serverTotal: number = 0;      // 服务端合计学时(管理员=全量, 成员=本人排行行求和等价)
@@ -28,7 +31,7 @@ struct HoursReportPage {
   @State achievedCount: number = 0;    // 达标人数
   @State requiredInput: string = '';   // 管理员编辑达标线的输入框
   @State msg: string = '';
-  @State tab: number = 0; // 0 排行 1 明细
+  @State tab: number = 0; // 0 排行 1 明细 2 预警(管理员)
   @State notLoggedIn: boolean = false;
   @State exporting: boolean = false;
   @State calibrating: boolean = false;
@@ -57,6 +60,7 @@ struct HoursReportPage {
     if (resp['code'] === 0) {
       this.report = parseHoursReport(resp);
       this.detail = parseHoursDetail(resp);
+      this.categoryStats = parseCategoryStats(resp);
       const d = dataOf(resp);
       if (d !== null) {
         this.serverTotal = numOf(d, 'total_hours');
@@ -67,6 +71,11 @@ struct HoursReportPage {
       this.msg = '服务器学时报表(MySQL hours_total 自动累计)';
     } else {
       this.msg = '拉取失败: ' + (resp['msg'] as string);
+    }
+    // 学分预警名单(仅管理员): 未达标学生 + 缺口学时, 可直接导出
+    if (AppConfig.isAdmin) {
+      const w = await ApiClient.get('/api/report/warning');
+      this.warnList = w['code'] === 0 ? parseWarningList(w) : [];
     }
     // 本地统计(双端对比): 管理员统计本机全部成员记录, 成员只统计本人
     try {
@@ -109,46 +118,79 @@ struct HoursReportPage {
           r.sign_count.toString(), r.achieved ? '达标' : (this.requiredHours > 0 ? '未达标' : '未设置')]
           .map((s: string) => csvCell(s)).join(','));
       }
+    } else if (this.tab === 2) {
+      lines.push('学号,姓名,班级,已认定学时,通过次数,缺口学时,最近认定');
+      for (const w of this.warnList) {
+        lines.push([w.stu_no, w.name, w.dept, w.total_hours.toString(), w.sign_count.toString(),
+          w.gap.toString(), w.last_activity_at].map((s: string) => csvCell(s)).join(','));
+      }
     } else {
-      lines.push('学号,姓名,活动,认定学时,认定时间');
+      lines.push('学号,姓名,活动,类别,认定学时,认定时间');
       for (const d of this.detail) {
-        lines.push([d.stu_no, d.name, d.activity, d.hours.toString(), d.audited_at]
+        lines.push([d.stu_no, d.name, d.activity, categoryText(d.category), d.hours.toString(), d.audited_at]
           .map((s: string) => csvCell(s)).join(','));
       }
     }
     return lines.join('\n');
   }
 
+  stamp(): string {
+    const now = new Date();
+    const pad = (n: number): string => (n < 10 ? '0' + n.toString() : n.toString());
+    return now.getFullYear().toString() + pad(now.getMonth() + 1) + pad(now.getDate()) +
+      '_' + pad(now.getHours()) + pad(now.getMinutes()) + pad(now.getSeconds());
+  }
+
   /**
-   * 导出当前标签页为 CSV 文件(写入应用沙箱 filesDir)。
-   * 鸿蒙应用沙箱文件无法直接被电脑打开, 因此同时提供「复制到剪贴板」便于粘贴到 Excel。
+   * 导出当前标签页为 CSV。
+   * 首选系统「保存到…」选择器(DocumentViewPicker): 用户自己选下载/文档目录,
+   * 导出后能真的在文件管理里找到; 选择器不可用或用户取消时回退到
+   * 「写沙箱 + 复制到剪贴板」, 保证离线/受限环境也能拿到数据。
    */
   async exportCsv(): Promise<void> {
     if (this.exporting) return;
-    const rows = this.tab === 0 ? this.report.length : this.detail.length;
+    const rows = this.tab === 0 ? this.report.length : (this.tab === 1 ? this.detail.length : this.warnList.length);
     if (rows === 0) {
       this.msg = '当前页没有数据可导出';
       return;
     }
     this.exporting = true;
+    // UTF-8 BOM: 不加的话 Excel 双击打开中文全是乱码(Excel 只认带 BOM 的 UTF-8)
+    const text = '\uFEFF' + this.buildCsv();
+    const prefix = this.tab === 0 ? 'hours_rank_' : (this.tab === 1 ? 'hours_detail_' : 'hours_warning_');
+    const name = prefix + this.stamp() + '.csv';
     try {
       const ctx = getContext(this) as common.UIAbilityContext;
-      const now = new Date();
-      const pad = (n: number): string => (n < 10 ? '0' + n.toString() : n.toString());
-      const stamp = now.getFullYear().toString() + pad(now.getMonth() + 1) + pad(now.getDate()) +
-        '_' + pad(now.getHours()) + pad(now.getMinutes()) + pad(now.getSeconds());
-      const name = (this.tab === 0 ? 'hours_rank_' : 'hours_detail_') + stamp + '.csv';
+      const opts = new picker.DocumentSaveOptions();
+      opts.newFileNames = [name];
+      const saveUri = await new picker.DocumentViewPicker(ctx).save(opts);
+      if (saveUri.length === 0) {
+        this.msg = '已取消保存';
+        return;
+      }
+      const file = fileIo.openSync(saveUri[0], fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.TRUNC);
+      fileIo.writeSync(file.fd, text);
+      fileIo.closeSync(file);
+      this.msg = '已保存 ' + rows + ' 行 CSV: ' + name;
+    } catch (e) {
+      await this.fallbackExport(text, name, rows, (e as Error).message);
+    } finally {
+      this.exporting = false;
+    }
+  }
+
+  /** 选择器不可用时的兜底: 写应用沙箱 + 提供复制到剪贴板 */
+  async fallbackExport(text: string, name: string, rows: number, reason: string): Promise<void> {
+    try {
+      const ctx = getContext(this) as common.UIAbilityContext;
       const path = ctx.filesDir + '/' + name;
-      // UTF-8 BOM: 不加的话 Excel(WPS 不受影响)双击打开中文全是乱码,
-      // Excel 只认带 BOM 的 UTF-8, 演示现场用 Excel 打开导出文件会非常尴尬
-      const text = '\uFEFF' + this.buildCsv();
       const file = fileIo.openSync(path, fileIo.OpenMode.CREATE | fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.TRUNC);
       fileIo.writeSync(file.fd, text);
       fileIo.closeSync(file);
-      this.msg = '已导出 ' + rows + ' 行 CSV: ' + path;
+      this.msg = '已导出到应用沙箱(选择器不可用: ' + reason + ')';
       AlertDialog.show({
         title: 'CSV 已导出',
-        message: '文件: ' + name + '\n路径: ' + path + '\n\n也可直接复制内容粘贴到 Excel/WPS。',
+        message: '文件: ' + name + '\n路径: ' + path + '\n\n也可复制内容粘贴到 Excel/WPS。',
         autoCancel: true,
         alignment: DialogAlignment.Center,
         primaryButton: { value: '知道了', action: () => {
@@ -163,10 +205,8 @@ struct HoursReportPage {
           }
         }
       });
-    } catch (e) {
-      this.msg = '导出失败: ' + (e as Error).message;
-    } finally {
-      this.exporting = false;
+    } catch (e2) {
+      this.msg = '导出失败: ' + (e2 as Error).message;
     }
   }
 
@@ -192,7 +232,7 @@ struct HoursReportPage {
         Row({ space: 6 }) {
           Text(r.name + '  (' + r.stu_no + ')').fontSize(14).fontWeight(FontWeight.Medium)
           if (r.achieved) {
-            Text('达标').fontSize(9).fontColor(Color.White)
+            Text('达标').fontSize(9).fontColor(Theme.textOnPrimary)
               .padding({ left: 5, right: 5, top: 1, bottom: 1 })
               .backgroundColor(Theme.success).borderRadius(6)
           }
@@ -203,7 +243,35 @@ struct HoursReportPage {
       }.alignItems(HorizontalAlign.Start).layoutWeight(1)
       Text(r.total_hours + ' 学时').fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.primary)
     }
-    .width('100%').padding(12).backgroundColor(Color.White).borderRadius(12).margin({ bottom: 8 })
+    .width('100%').padding(12).backgroundColor(Theme.bgCard).borderRadius(12).margin({ bottom: 8 })
+  }
+
+  @Builder
+  categoryBar(c: CategoryStat) {
+    Row({ space: 8 }) {
+      Text(categoryText(c.category)).fontSize(10).fontColor(Theme.textSecondary).width(56)
+      Stack({ alignContent: Alignment.Start }) {
+        Row()
+          .width(this.barPct(c.hours).toString() + '%')
+          .height(8).backgroundColor(Theme.primary).borderRadius(4)
+      }.layoutWeight(1).height(8).backgroundColor(Theme.bgNeutral).borderRadius(4)
+      Text(c.hours.toString() + 'h').fontSize(10).fontColor(Theme.textTertiary)
+        .width(40).textAlign(TextAlign.End)
+    }.width('100%')
+  }
+
+  @Builder
+  warnRow(w: WarningRow) {
+    Row() {
+      Column({ space: 2 }) {
+        Text(w.name + '  ' + w.stu_no).fontSize(13).fontWeight(FontWeight.Medium)
+        Text(w.dept + ' · 已认定 ' + w.total_hours + ' 学时 · 通过 ' + w.sign_count + ' 次' +
+          (w.last_activity_at === '' ? ' · 从未认定' : ''))
+          .fontSize(11).fontColor(Theme.textTertiary)
+      }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+      Text('缺 ' + w.gap).fontSize(13).fontWeight(FontWeight.Bold).fontColor(Theme.danger)
+    }
+    .width('100%').padding(12).backgroundColor(Theme.bgCard).borderRadius(12).margin({ bottom: 8 })
   }
 
   @Builder
@@ -215,7 +283,7 @@ struct HoursReportPage {
       }.alignItems(HorizontalAlign.Start).layoutWeight(1)
       Text('+' + d.hours + ' 学时').fontSize(14).fontWeight(FontWeight.Bold).fontColor(Theme.success)
     }
-    .width('100%').padding(12).backgroundColor(Color.White).borderRadius(12).margin({ bottom: 8 })
+    .width('100%').padding(12).backgroundColor(Theme.bgCard).borderRadius(12).margin({ bottom: 8 })
   }
 
   @Builder
@@ -234,7 +302,7 @@ struct HoursReportPage {
             .onClick(() => router.back())
           Text('学时统计报表').fontSize(18).fontWeight(FontWeight.Bold).layoutWeight(1)
           Text(AppConfig.isAdmin ? '管理员·全量' : '成员·本人明细')
-            .fontSize(10).fontColor(Color.White)
+            .fontSize(10).fontColor(Theme.textOnPrimary)
             .padding({ left: 7, right: 7, top: 2, bottom: 2 })
             .backgroundColor(AppConfig.isAdmin ? Theme.admin : Theme.success)
             .borderRadius(8)
@@ -267,7 +335,7 @@ struct HoursReportPage {
             }.width('100%')
           }
           .width('100%').padding(12).margin({ left: 14, right: 14, bottom: 8 })
-          .backgroundColor(Color.White).borderRadius(12)
+          .backgroundColor(Theme.bgCard).borderRadius(12)
         }
 
         // CSV 导出: 导出当前标签页(排行 / 明细), 便于交作业或表格留档
@@ -312,9 +380,46 @@ struct HoursReportPage {
             .onClick(() => this.calibrate())
         }.width('100%').padding({ left: 14, right: 14, bottom: 8 })
 
+        // 可视化: 达标率环形图 + 分类学时条形图(纯布局实现, 不引第三方图表库)
+        if (this.report.length > 0) {
+          Column({ space: 10 }) {
+            Row({ space: 12 }) {
+              Stack() {
+                Progress({ value: this.achievePct(), total: 100, type: ProgressType.Ring })
+                  .width(64).height(64).color(Theme.success).backgroundColor(Theme.bgNeutral)
+                Column({ space: 0 }) {
+                  Text(this.achievePct().toString() + '%')
+                    .fontSize(14).fontWeight(FontWeight.Bold).fontColor(Theme.textPrimary)
+                  Text('达标率').fontSize(9).fontColor(Theme.textTertiary)
+                }
+              }
+
+              Column({ space: 4 }) {
+                Text('已达标 ' + this.achievedCount + ' / ' + this.report.length + ' 人')
+                  .fontSize(13).fontWeight(FontWeight.Medium).fontColor(Theme.textPrimary)
+                Text(this.requiredHours > 0 ? '达标线 ' + this.requiredHours + ' 学时' : '未设置达标线')
+                  .fontSize(11).fontColor(Theme.textTertiary)
+                Text('合计 ' + this.serverTotal + ' 学时 · 分类 ' + this.categoryStats.length + ' 类')
+                  .fontSize(11).fontColor(Theme.textTertiary)
+              }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+            }.width('100%')
+
+            if (this.categoryStats.length > 0) {
+              ForEach(this.categoryStats, (c: CategoryStat) => {
+                this.categoryBar(c)
+              }, (c: CategoryStat) => c.category + '-' + c.hours.toString())
+            }
+          }
+          .width('100%').padding(12).margin({ left: 14, right: 14, bottom: 8 })
+          .backgroundColor(Theme.bgCard).borderRadius(12)
+        }
+
         Row({ space: 8 }) {
           this.tabBtn('学时排行', 0)
           this.tabBtn('认定明细', 1)
+          if (AppConfig.isAdmin) {
+            this.tabBtn('学分预警', 2)
+          }
         }.width('100%').padding({ left: 14, right: 14, bottom: 8 })
 
         Text(this.msg).fontSize(12).fontColor(Theme.textTertiary).width('100%').padding({ left: 14, bottom: 6 })
@@ -328,6 +433,14 @@ struct HoursReportPage {
                 ForEach(this.report, (r: HoursRow) => {
                   this.rankRow(r)
                 }, (r: HoursRow) => r.stu_no + '-' + r.total_hours.toString())
+              }
+            } else if (this.tab === 2) {
+              if (this.warnList.length === 0) {
+                Text('全员均已达标, 暂无需预警').fontSize(13).fontColor(Theme.textDisabled).margin({ top: 40 })
+              } else {
+                ForEach(this.warnList, (w: WarningRow) => {
+                  this.warnRow(w)
+                }, (w: WarningRow) => w.stu_no + '-' + w.gap.toString())
               }
             } else {
               if (this.detail.length === 0) {
@@ -344,6 +457,20 @@ struct HoursReportPage {
       }
     }
     .width('100%').height('100%').backgroundColor(Theme.bgPage)
+  }
+
+  /** 达标率(0~100): 未设达标线时按"有学时即达标"口径展示 0 */
+  achievePct(): number {
+    if (this.report.length === 0 || this.requiredHours <= 0) return 0;
+    return Math.round(this.achievedCount * 100 / this.report.length);
+  }
+
+  /** 分类条形长度: 相对最大值取百分比, 最小 2% 保证极小值也可见 */
+  barPct(hours: number): number {
+    let max = 0;
+    for (const c of this.categoryStats) if (c.hours > max) max = c.hours;
+    if (max <= 0) return 0;
+    return Math.max(2, Math.round(hours * 100 / max));
   }
 
   serverHours(): number {
@@ -424,7 +551,7 @@ struct HoursReportPage {
   tabBtn(label: string, t: number) {
     Text(label)
       .fontSize(12)
-      .fontColor(this.tab === t ? Color.White : Theme.textBody)
+      .fontColor(this.tab === t ? Theme.textOnPrimary : Theme.textBody)
       .padding({ left: 14, right: 14, top: 5, bottom: 5 })
       .backgroundColor(this.tab === t ? Theme.primary : Theme.bgNeutral)
       .borderRadius(14)

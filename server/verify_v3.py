@@ -10,6 +10,7 @@ v3 新增能力回归测试(只增不改, 结束后自动清理测试数据)
   6. 日志筛选 level/method/kw
   7. HTTP keep-alive(单连接连续多请求)
   8. 权限: 普通成员不得编辑活动 / 改配置
+  9. v3.2: 活动分类(category/taken) + 动态签到码 + 学分预警接口
 
 用法: python verify_v3.py [port]   默认 8000
 """
@@ -97,6 +98,23 @@ ed = [a for a in lst if a["id"] == NEW_ID]
 check("字段已更新(标题/学时/地点)",
       bool(ed) and ed[0]["title"] == "v3 编辑后标题" and ed[0]["hours"] == 3.0 and ed[0]["location"] == "新地点",
       ed[0] if ed else "not found")
+check("新建活动默认类别 sports", bool(ed) and ed[0].get("category") == "sports",
+      ed[0].get("category") if ed else None)
+check("活动行下发 taken(名额计数)", bool(ed) and isinstance(ed[0].get("taken"), int),
+      ed[0].get("taken") if ed else None)
+call("POST", "/api/activity/update",
+     {"activity_id": NEW_ID, "title": "v3 编辑后标题", "content": "改后内容", "location": "新地点",
+      "start_time": "2099-01-02 09:00", "end_time": "2099-01-02 11:30",
+      "hours": 3.0, "capacity": 20, "publisher": "管理员", "category": "volunteer"}, tok=ATOK)
+ed = [a for a in call("GET", "/api/activity/list?all=1", tok=ATOK)["data"]["list"] if a["id"] == NEW_ID]
+check("类别可改为 volunteer", bool(ed) and ed[0].get("category") == "volunteer",
+      ed[0].get("category") if ed else None)
+call("POST", "/api/activity/update",
+     {"activity_id": NEW_ID, "title": "v3 编辑后标题", "start_time": "2099-01-02 09:00",
+      "end_time": "2099-01-02 11:30", "hours": 3.0, "capacity": 20, "category": "not-a-category"}, tok=ATOK)
+ed = [a for a in call("GET", "/api/activity/list?all=1", tok=ATOK)["data"]["list"] if a["id"] == NEW_ID]
+check("非法类别回落 sports", bool(ed) and ed[0].get("category") == "sports",
+      ed[0].get("category") if ed else None)
 check("编辑时允许开始时间早于当前(历史活动可改)",
       call("POST", "/api/activity/update",
            {"activity_id": NEW_ID, "title": "历史活动", "start_time": "2020-01-01 10:00",
@@ -174,6 +192,22 @@ try:
     check("同一连接连续 3 次请求全部成功", okc == 3, okc)
 except Exception as e:  # noqa: BLE001
     check("同一连接连续 3 次请求全部成功", False, e)
+
+# ---------- 9. v3.2 签到码 / 学分预警 ----------
+print("\n[9] 动态签到码 / 学分预警")
+sc = call("GET", "/api/activity/signin_code?activity_id=%d" % NEW_ID, tok=ATOK)
+sd = sc.get("data") or {}
+check("管理员可取 6 位签到码", sc.get("code") == 0 and len(sd.get("code", "")) == 6
+      and sd.get("code", "").isdigit(), sd.get("code"))
+check("签到码带剩余秒数(0<expire<=60)", 0 < int(sd.get("expire_in") or 0) <= 60, sd.get("expire_in"))
+check("成员不能取签到码(403)",
+      call("GET", "/api/activity/signin_code?activity_id=%d" % NEW_ID, tok=STOK).get("code") == 403)
+w = call("GET", "/api/report/warning", tok=ATOK)
+check("预警名单接口可用", w.get("code") == 0
+      and isinstance((w.get("data") or {}).get("list"), list), w.get("msg"))
+check("成员不能看预警名单(403)", call("GET", "/api/report/warning", tok=STOK).get("code") == 403)
+rep = call("GET", "/api/hours/report", tok=ATOK)
+check("报表下发 by_category(图表)", isinstance((rep.get("data") or {}).get("by_category"), list))
 
 print("\n" + "=" * 66)
 print(" 结果: 通过 %d / 失败 %d" % (PASS, FAIL))

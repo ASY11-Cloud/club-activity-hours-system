@@ -71,6 +71,13 @@ check("test student login", stu is not None)
 r = call("POST", "/api/signup/add", {"activity_id": 1, "client_id": "test-cancel-1"}, stu)
 check("test student signup", r.get("code") == 0, r.get("msg", ""))
 
+# 报名占用名额: 注销级联删报名后 taken 必须回补(否则活动会永久"少一个名额")
+acts = call("GET", "/api/activity/list?all=1", None, admin)
+a1 = [a for a in (acts.get("data") or {}).get("list", []) if a["id"] == 1]
+taken_after_signup = int(a1[0]["taken"]) if a1 else -1
+check("signup 占用名额(taken = valid_count)", bool(a1) and taken_after_signup == int(a1[0]["valid_count"]),
+      "taken=%s" % taken_after_signup)
+
 # ---- 3. 影响面预览 ----
 r = call("GET", "/api/student/impact", None, stu)
 d = r.get("data") or {}
@@ -99,6 +106,15 @@ dd = r.get("data") or {}
 check("self cancel ok", r.get("code") == 0, r.get("msg", ""))
 check("cancel reports 1 signup deleted", dd.get("signup_deleted") == 1, "got %s" % dd.get("signup_deleted"))
 check("cancel reports token revoked>=1", (dd.get("token_revoked") or 0) >= 1, "got %s" % dd.get("token_revoked"))
+
+# 注销级联删掉报名后, 活动名额必须还回去(taken 与有效报名数继续自洽)
+acts = call("GET", "/api/activity/list?all=1", None, admin)
+a1 = [a for a in (acts.get("data") or {}).get("list", []) if a["id"] == 1]
+taken_after_cancel = int(a1[0]["taken"]) if a1 else -1
+check("注销后 taken 回补 1 个名额", bool(a1) and taken_after_cancel == taken_after_signup - 1,
+      "before=%d after=%d" % (taken_after_signup, taken_after_cancel))
+check("注销后 taken 与 valid_count 仍自洽", bool(a1) and taken_after_cancel == int(a1[0]["valid_count"]),
+      "taken=%d valid=%s" % (taken_after_cancel, a1[0]["valid_count"] if a1 else "n/a"))
 
 # ---- 8. 旧 token 必须立即失效 ----
 r = call("GET", "/api/signup/list", None, stu)

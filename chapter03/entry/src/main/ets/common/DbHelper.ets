@@ -42,6 +42,7 @@ export class DbHelper {
       'title TEXT NOT NULL, content TEXT, location TEXT, ' +
       'start_time TEXT, end_time TEXT, ' +
       'hours REAL DEFAULT 1.0, capacity INTEGER DEFAULT 0, ' +
+      "category TEXT DEFAULT 'sports', " +
       'publisher TEXT, synced INTEGER DEFAULT 0, ' +
       'created_at TEXT DEFAULT CURRENT_TIMESTAMP)'
     );
@@ -68,6 +69,16 @@ export class DbHelper {
     if (!hasCheckin) {
       await store.executeSql('ALTER TABLE local_signup ADD COLUMN checkin INTEGER DEFAULT 0');
     }
+    // v3.2: 草稿补分类列。老库没有该列时补上并统一回填 'sports', 与七大类默认值一致。
+    let hasCategory = false;
+    const rsCat = await store.querySql('PRAGMA table_info(local_activity)');
+    while (rsCat.goToNextRow()) {
+      if (DbHelper.safeStr(rsCat, 'name') === 'category') hasCategory = true;
+    }
+    rsCat.close();
+    if (!hasCategory) {
+      await store.executeSql("ALTER TABLE local_activity ADD COLUMN category TEXT DEFAULT 'sports'");
+    }
     DbHelper.rdb = store;
   }
 
@@ -76,7 +87,7 @@ export class DbHelper {
   /** 保存活动草稿(本地), 返回草稿 id */
   static async addDraft(title: string, content: string, location: string,
     startTime: string, endTime: string, hours: number, capacity: number,
-    publisher: string): Promise<number> {
+    publisher: string, category: string): Promise<number> {
     const store = DbHelper.rdb;
     if (!store) return 0;
     const vb: relationalStore.ValuesBucket = {
@@ -88,6 +99,7 @@ export class DbHelper {
       'hours': hours,
       'capacity': capacity,
       'publisher': publisher,
+      'category': category,
       'synced': 0
     };
     return await store.insert('local_activity', vb);
@@ -134,7 +146,7 @@ export class DbHelper {
   /** 更新草稿(表单回填后再次保存, 不新增记录) */
   static async updateDraft(id: number, title: string, content: string, location: string,
     startTime: string, endTime: string, hours: number, capacity: number,
-    publisher: string): Promise<void> {
+    publisher: string, category: string): Promise<void> {
     const store = DbHelper.rdb;
     if (!store) return;
     const vb: relationalStore.ValuesBucket = {
@@ -145,7 +157,8 @@ export class DbHelper {
       'end_time': endTime,
       'hours': hours,
       'capacity': capacity,
-      'publisher': publisher
+      'publisher': publisher,
+      'category': category
     };
     const pred = new relationalStore.RdbPredicates('local_activity');
     pred.equalTo('id', id);
@@ -154,7 +167,7 @@ export class DbHelper {
 
   /** 草稿字段列表(查询与映射共用, 避免两处字段顺序不一致) */
   private static readonly DRAFT_COLS: string[] = ['id', 'server_id', 'title', 'content', 'location',
-    'start_time', 'end_time', 'hours', 'capacity', 'publisher', 'synced', 'created_at'];
+    'start_time', 'end_time', 'hours', 'capacity', 'publisher', 'category', 'synced', 'created_at'];
 
   private static mapDraft(rs: relationalStore.ResultSet): LocalDraft {
     return {
@@ -168,6 +181,7 @@ export class DbHelper {
       hours: rs.getDouble(rs.getColumnIndex('hours')),
       capacity: rs.getLong(rs.getColumnIndex('capacity')),
       publisher: DbHelper.safeStr(rs, 'publisher'),
+      category: DbHelper.safeStr(rs, 'category', 'sports'),
       synced: rs.getLong(rs.getColumnIndex('synced')),
       created_at: DbHelper.safeStr(rs, 'created_at')
     };
@@ -437,9 +451,9 @@ export class DbHelper {
   }
 
   // ==================== 工具 ====================
-  private static safeStr(rs: relationalStore.ResultSet, col: string): string {
+  private static safeStr(rs: relationalStore.ResultSet, col: string, def: string = ''): string {
     const i = rs.getColumnIndex(col);
-    if (i < 0 || rs.isColumnNull(i)) return '';
+    if (i < 0 || rs.isColumnNull(i)) return def;
     return rs.getString(i);
   }
 }

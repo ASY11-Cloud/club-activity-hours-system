@@ -7,7 +7,7 @@ import { router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { ApiClient } from '../common/ApiClient';
 import { AppConfig } from '../common/AppConfig';
-import { ActivityInfo, parseActivities } from '../common/Models';
+import { ActivityInfo, parseActivities, CATEGORY_KEYS, CATEGORY_LABELS } from '../common/Models';
 import { AdminGuardView } from '../common/GuardViews';
 import { Theme } from '../common/Theme';
 
@@ -23,6 +23,7 @@ struct ActivityEditPage {
   @State hours: string = '1.0';
   @State capacity: string = '0';
   @State publisher: string = '';
+  @State category: string = 'sports';
   @State validCount: number = 0;     // 当前有效报名数(提示人数上限下限)
   @State status: number = 1;
   @State msg: string = '';
@@ -85,6 +86,7 @@ struct ActivityEditPage {
     this.hours = found.hours.toString();
     this.capacity = found.capacity.toString();
     this.publisher = found.publisher;
+    this.category = found.category === '' ? 'sports' : found.category;
     this.validCount = found.valid_count;
     this.status = found.status;
     const s = this.parseTime(found.start_time);
@@ -201,7 +203,8 @@ struct ActivityEditPage {
         'end_time': this.fmtDate(this.endDate),
         'hours': Number(this.hours),
         'capacity': Number(this.capacity),
-        'publisher': this.publisher.trim()
+        'publisher': this.publisher.trim(),
+        'category': this.category
       };
       const resp = await ApiClient.post('/api/activity/update', body);
       if (resp['code'] === 0) {
@@ -217,6 +220,27 @@ struct ActivityEditPage {
   @Builder
   deniedView() {
     AdminGuardView({ tip: '活动编辑仅限管理员, 请以管理员身份登录后访问' })
+  }
+
+  /** 类别选择(与发布页同口径): 改类别只影响之后审核通过的学时规则, 已认定学时不变 */
+  @Builder
+  categoryPicker() {
+    Column({ space: 6 }) {
+      Text('活动类别(与发布页同口径, 已认定学时不受影响)')
+        .fontSize(11).fontColor(Theme.textTertiary).width('100%')
+      Flex({ wrap: FlexWrap.Wrap }) {
+        ForEach(CATEGORY_KEYS, (k: string, i: number) => {
+          Text(CATEGORY_LABELS[i])
+            .fontSize(12)
+            .fontColor(this.category === k ? Theme.textOnPrimary : Theme.textSecondary)
+            .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+            .margin({ right: 6, bottom: 6 })
+            .backgroundColor(this.category === k ? Theme.primary : Theme.bgSubtle)
+            .borderRadius(Theme.radiusPill)
+            .onClick(() => this.category = k)
+        }, (k: string) => k)
+      }.width('100%')
+    }.width('100%').alignItems(HorizontalAlign.Start)
   }
 
   @Builder
@@ -247,7 +271,7 @@ struct ActivityEditPage {
           Text('编辑活动' + (this.activityId > 0 ? ' #' + this.activityId : ''))
             .fontSize(18).fontWeight(FontWeight.Bold).layoutWeight(1)
           Text(this.status === 0 ? '已下线' : '已发布')
-            .fontSize(11).fontColor(Color.White)
+            .fontSize(11).fontColor(Theme.textOnPrimary)
             .padding({ left: 8, right: 8, top: 2, bottom: 2 })
             .backgroundColor(this.status === 0 ? Theme.textTertiary : Theme.success)
             .borderRadius(8)
@@ -266,6 +290,8 @@ struct ActivityEditPage {
                 .onChange((v: string) => this.content = v)
               TextInput({ text: this.location, placeholder: '活动地点(如: 教学楼 A-301)' })
                 .onChange((v: string) => this.location = v)
+
+              this.categoryPicker()
 
               this.timeCell('开始时间', true)
               this.timeCell('结束时间', false)
@@ -294,7 +320,7 @@ struct ActivityEditPage {
               }
             }
           }
-          .width('100%').padding(14).backgroundColor(Color.White).borderRadius(14).margin({ top: 4 })
+          .width('100%').padding(14).backgroundColor(Theme.bgCard).borderRadius(14).margin({ top: 4 })
         }
         .layoutWeight(1).scrollBar(BarState.Off).align(Alignment.Top)
         .padding({ left: 14, right: 14 })

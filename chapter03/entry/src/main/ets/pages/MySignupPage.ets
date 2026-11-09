@@ -187,13 +187,13 @@ struct MySignupPage {
     }
   }
 
-  statusColor(s: number): string {
+  statusColor(s: number): ResourceColor {
     if (s === 1) return Theme.success;
     if (s === 2) return Theme.danger;
     return Theme.warning;
   }
 
-  statusBg(s: number): string {
+  statusBg(s: number): ResourceColor {
     if (s === 1) return Theme.successBg;
     if (s === 2) return Theme.dangerBg;
     return Theme.warningBg;

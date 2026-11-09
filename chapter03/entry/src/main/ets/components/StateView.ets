@@ -18,7 +18,7 @@ export struct StateView {
   };
 
   @Builder
-  markCircle(symbol: string, color: string, bg: string) {
+  markCircle(symbol: string, color: ResourceColor, bg: ResourceColor) {
     Text(symbol)
       .fontSize(26).fontColor(color).textAlign(TextAlign.Center)
       .width(64).height(64)

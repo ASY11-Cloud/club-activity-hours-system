@@ -2,42 +2,46 @@
  * 设计 token 统一出口
  * 目的: 颜色/字号/圆角/间距不再散落在各页面的字面量里。
  * 改主色、调圆角只需要动这一个文件; 也便于说明"本项目有统一视觉规范"。
- * 注意: 本文件是全项目唯一的颜色字面量落点, 不要改成引用自身。
+ *
+ * v3.2: 颜色改为资源引用($r('app.color.c_xxx')), 由 resources/base 与 resources/dark
+ * 两套调色板分别提供浅色/深色值 —— 系统切换深色模式时自动生效, 页面代码零改动。
+ * 注意: 颜色只在这里出口, 页面里不要再写死十六进制; 新增颜色要同时补 base 与 dark。
  */
 export class Theme {
   // ---- 主色与语义色 ----
-  static readonly primary: string = '#1E6FFF';        // 主色(按钮/选中/链接)
-  static readonly primaryDark: string = '#1557CC';    // 主色按压态
-  static readonly primaryBg: string = '#EAF1FF';      // 主色浅底(标签/选中块)
-  static readonly success: string = '#07C160';        // 通过/已认定/在线
-  static readonly successBg: string = '#E8F8EF';
-  static readonly danger: string = '#E84026';         // 驳回/已结束/退出
-  static readonly dangerBg: string = '#FDECEA';
-  static readonly warning: string = '#B25E00';        // 待审核/名额已满
-  static readonly warningBg: string = '#FFF3E0';
-  static readonly admin: string = '#F5652F';          // 管理员身份标识
-  static readonly adminBg: string = '#FFF0E9';
-  static readonly signin: string = '#6C5CE7';         // 刷卡/RFID 相关
-  static readonly signinBg: string = '#EFECFF';
-  static readonly report: string = '#00A884';         // 报表/导出
-  static readonly reportBg: string = '#E6F7F3';
-  static readonly onColorSuccess: string = '#D4F5DD';  // 深底上的成功浅色文字(如头部在线状态)
-  static readonly onColorDanger: string = '#FFD9D2';   // 深底上的失败浅色文字(如头部离线状态)
+  static readonly primary: ResourceColor = $r('app.color.c_primary');            // 主色(按钮/选中/链接)
+  static readonly primaryDark: ResourceColor = $r('app.color.c_primary_dark');   // 主色按压态
+  static readonly primaryBg: ResourceColor = $r('app.color.c_primary_bg');       // 主色浅底(标签/选中块)
+  static readonly gradientStart: ResourceColor = $r('app.color.c_gradient_start'); // 渐变头图起点色
+  static readonly success: ResourceColor = $r('app.color.c_success');            // 通过/已认定/在线
+  static readonly successBg: ResourceColor = $r('app.color.c_success_bg');
+  static readonly danger: ResourceColor = $r('app.color.c_danger');              // 驳回/已结束/退出
+  static readonly dangerBg: ResourceColor = $r('app.color.c_danger_bg');
+  static readonly warning: ResourceColor = $r('app.color.c_warning');            // 待审核/名额已满
+  static readonly warningBg: ResourceColor = $r('app.color.c_warning_bg');
+  static readonly admin: ResourceColor = $r('app.color.c_admin');                // 管理员身份标识
+  static readonly adminBg: ResourceColor = $r('app.color.c_admin_bg');
+  static readonly signin: ResourceColor = $r('app.color.c_signin');              // 刷卡/签到码相关
+  static readonly signinBg: ResourceColor = $r('app.color.c_signin_bg');
+  static readonly report: ResourceColor = $r('app.color.c_report');              // 报表/导出
+  static readonly reportBg: ResourceColor = $r('app.color.c_report_bg');
+  static readonly onColorSuccess: ResourceColor = $r('app.color.c_on_success');  // 深底上的成功浅色文字
+  static readonly onColorDanger: ResourceColor = $r('app.color.c_on_danger');    // 深底上的失败浅色文字
 
   // ---- 文本 ----
-  static readonly textPrimary: string = '#1F2329';
-  static readonly textBody: string = '#333333';
-  static readonly textSecondary: string = '#666666';
-  static readonly textTertiary: string = '#999999';
-  static readonly textDisabled: string = '#BBBBBB';
-  static readonly textOnPrimary: string = '#FFFFFF';
+  static readonly textPrimary: ResourceColor = $r('app.color.c_text_primary');
+  static readonly textBody: ResourceColor = $r('app.color.c_text_body');
+  static readonly textSecondary: ResourceColor = $r('app.color.c_text_secondary');
+  static readonly textTertiary: ResourceColor = $r('app.color.c_text_tertiary');
+  static readonly textDisabled: ResourceColor = $r('app.color.c_text_disabled');
+  static readonly textOnPrimary: ResourceColor = $r('app.color.c_text_on_primary');
 
   // ---- 背景与描边 ----
-  static readonly bgPage: string = '#F5F7FA';
-  static readonly bgCard: string = '#FFFFFF';
-  static readonly bgSubtle: string = '#F2F4F8';
-  static readonly bgNeutral: string = '#E9ECF3';
-  static readonly divider: string = '#EEEEEE';
+  static readonly bgPage: ResourceColor = $r('app.color.c_bg_page');
+  static readonly bgCard: ResourceColor = $r('app.color.c_bg_card');
+  static readonly bgSubtle: ResourceColor = $r('app.color.c_bg_subtle');
+  static readonly bgNeutral: ResourceColor = $r('app.color.c_bg_neutral');
+  static readonly divider: ResourceColor = $r('app.color.c_divider');
 
   // ---- 字号 ----
   static readonly fsCaption: number = 11;   // 辅助说明

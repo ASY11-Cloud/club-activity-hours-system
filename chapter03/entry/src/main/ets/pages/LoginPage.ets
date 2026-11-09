@@ -89,7 +89,7 @@ struct LoginPage {
   roleTab(label: string, r: string, hint: string) {
     Column({ space: 3 }) {
       Text(label).fontSize(15).fontWeight(FontWeight.Bold)
-        .fontColor(this.role === r ? Color.White : Theme.textBody)
+        .fontColor(this.role === r ? Theme.textOnPrimary : Theme.textBody)
       Text(hint).fontSize(10)
         .fontColor(this.role === r ? 'rgba(255,255,255,0.85)' : Theme.textTertiary)
     }
@@ -108,7 +108,7 @@ struct LoginPage {
           // 头部
           Column({ space: 6 }) {
             Text('社团活动报名与学时认定系统')
-              .fontSize(22).fontWeight(FontWeight.Bold).fontColor(Color.White)
+              .fontSize(22).fontWeight(FontWeight.Bold).fontColor(Theme.textOnPrimary)
             Text('HarmonyOS + SQLite 本地库 · 服务端 MySQL · 双端同步')
               .fontSize(12).fontColor('rgba(255,255,255,0.85)')
           }
@@ -148,7 +148,7 @@ struct LoginPage {
               }
 
               Button(this.busy ? '登录中...' : '登 录')
-                .width('100%').height(44).fontSize(16).fontColor(Color.White)
+                .width('100%').height(44).fontSize(16).fontColor(Theme.textOnPrimary)
                 .backgroundColor(Theme.primary)
                 .enabled(!this.busy)
                 .margin({ top: 6 })
@@ -163,7 +163,7 @@ struct LoginPage {
             .width('100%').margin({ top: 16 })
           }
           .width('100%').padding(16)
-          .backgroundColor(Color.White).borderRadius(16)
+          .backgroundColor(Theme.bgCard).borderRadius(16)
           .margin({ top: -16, left: 14, right: 14 })
           .shadow({ radius: 12, color: 'rgba(0,0,0,0.08)', offsetY: 4 })
 

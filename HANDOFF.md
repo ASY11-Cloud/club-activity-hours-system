@@ -890,3 +890,80 @@ static bool dbDeleteStudent(MYSQL* c, const string& stuNo,
 | `server/build.log` | 删除（0 字节生成物，`build.bat` 每次重建） |
 | `.gitignore` | 补 `.codebuddy/`（工具内部数据，防误提交） |
 | `server/stop_server.bat` | 新增并登记进 README / 使用说明 |
+
+## 27. v3.2 P0 修复（2026-11-09）
+
+六项都是"演示时会被当场问住"的问题，逐条给根因与修法。
+
+### 27.1 报名时间冲突（学时双算）
+
+**根因**：`handleSignupAdd` 只校验名额与活动状态，从不看该生已有报名的时间窗。同一时段报两个活动，两边都通过审核就双算学时。
+
+**修法**：事务内**先锁学生行**再查冲突，锁序固定"学生 → 活动"（报名与审核都走这个顺序，避免 ABBA 死锁）：
+
+```sql
+SELECT id FROM student WHERE stu_no=? FOR UPDATE;
+SELECT a.title FROM signup s JOIN activity a ON s.activity_id=a.id
+ WHERE s.stu_no=? AND s.status<>2 AND a.id<>?
+   AND a.start_time<? AND a.end_time>? LIMIT 1;
+```
+
+命中返回 `409「与「XX 活动」时间冲突，请先撤销原报名」`。活动时间为 NULL 时跳过校验（历史数据无时间窗，不能因此拒绝报名）。学生行锁顺带把"同一学生的并发报名"串行化——否则两个请求同时查冲突都为空，照样双报。
+
+### 27.2 同步 prune 误删
+
+**根因**：`SyncService.syncMySignups` 固定拉 5 页（`size=200`，上限 1000 条）就执行 prune，把"服务器没返回"的本地记录删掉。超过 1000 条时，后 5 页的有效记录会被当成"服务器已删"清掉。
+
+**修法**：循环拉到 `has_more=false`，最多 50 页保护；**只有完整拉完才 prune**，否则保留本地并提示"数据量超限，已跳过清理"。
+
+### 27.3 深色模式
+
+**根因**：`Theme.ets` 是 `static readonly primary: string = '#2F6BFF'` 这类硬编码，`resources/dark/color.json` 只有 `start_window_background`，系统切深色时整屏发白。
+
+**修法**：20 余个颜色常量改为 `ResourceColor = $r('app.color.c_xxx')`，`base/element/color.json` 与 `dark/element/color.json` 补齐**同名**两套 token（含 `c_gradient_start` 补渐变起点）。页面里散落的 `Color.White`、`'#F3F4F6'`、`Color.Yellow` 等一并收敛为 token。全项目没有对 Theme 颜色做字符串拼接/截取，因此调用点无需改语义。
+
+**踩坑**：批量替换后编译报 22 处 `Type 'ResourceColor' is not assignable to type 'string'`——都是辅助函数把颜色声明成 `string`（`actColor()`、`tag(color: string)`、`markCircle()` 等）。把参数/返回值类型改成 `ResourceColor` 即可，不要试图 `.toString()` 转回字符串（Resource 没有稳定字符串值）。
+
+### 27.4 报表图表
+
+达标率用 `Progress({ type: ProgressType.Ring, value, total })`，环中心叠百分比；分类分布用 `Row` 外层灰条 + 内层 `Row().width(pct%)` 的横向条形。零依赖、随主题变色。数据源是 `/api/hours/report` 新增的 `by_category`（与明细同口径）。
+
+### 27.5 CSV 落盘
+
+`picker.DocumentViewPicker().save()` 让用户自选目录，`fileIo` 写入并保留 UTF-8 BOM；用户取消或权限失败时**回退**到"复制剪贴板 + 显示沙箱路径"，保证任何情况下都能把数据取走。三个页签（排行 / 明细 / 预警）共用一套导出函数。
+
+### 27.6 登录失败计数清理
+
+`g_login_fail` 原先只增不减，长期运行会被扫描攻击撑大内存。现在 `loginFailAdd` 在 `size > 4096` 时先扫一遍删除过期项；触发频率低，摊还成本 O(1)。
+
+## 28. v3.2 P1 四项（2026-11-09）
+
+### 28.1 分类与学时规则
+
+- `activity.category`（七大类 key）/ `signup.category`（报名时快照，报表不依赖 JOIN）；
+- 规则全部存 `sys_config`：`rule.<cat>.max_activity`、`rule.<cat>.max_total`，**0 = 不限**，默认全 0；
+- 审核通过顺序：`hours = min(activity.hours, max_activity)` → 锁学生行统计该类别已认定 `used` → `allowed = min(hours, max_total - used)`；`allowed<=0` 仍通过但记 0，`remark` 追加"超出「XX」类别上限"；
+- 接口透出 `category`，活动增改做白名单校验（非法值回落 `sports`）。**编辑时未传 category 保留原值**，避免旧客户端把类别刷回默认。
+
+### 28.2 学分预警
+
+`GET /api/report/warning`（管理员）：`status=1 AND COALESCE(total_hours,0) < required_hours`，返回 `stu_no/name/dept/total_hours/sign_count/gap/last_activity_at`，按 `gap` 降序。App 报表页新增"预警"页签 + CSV 导出。
+
+### 28.3 动态签到码 + 签退
+
+- `g_signin_secret` 启动时 `BCryptGenRandom` 生成（重启即失效，不落盘）；
+- `code = HMAC-SHA256(secret, activity_id + ":" + window)` 取十进制 6 位，`window = now_ms / 60000`；
+- 管理员 `GET /api/activity/signin_code` 拿当前码与 `expire_in`；成员 `POST /api/signin/code` 校验 `window` / `window-1`（前后 60 秒宽限），通过后复用 RFID 的"无报名则建并通过 / 待审则通过 / 已通过仅签到 / 已驳回拒绝"逻辑，`client_id = code-<stu_no>-<activity_id>` 保证幂等；身份只取 Token，**不接受 body 里的学号**；
+- `POST /api/signin/out` 写 `signout_at`；折算 `ratio = min(1, 在场分钟/计划分钟)`，`hours = round(hours*ratio*2)/2`，下限 0.5，只在 `checkin=1 && signout_at IS NOT NULL` 时生效——**仅 RFID 单点签到的记录仍按全额学时**，这是基线不变的关键。
+
+### 28.4 库存条件更新
+
+`activity.taken` + `UPDATE activity SET taken=taken+1 WHERE id=? AND (capacity=0 OR taken<capacity)`，`affected_rows=1` 才算占位；为 0 时回查 `taken/capacity` 区分"名额已满"与"活动不存在/已下线"。占位/回补收敛为 `signupTakeSlot` / `signupReleaseSlot` 两个 helper，禁止业务代码散写 `taken`。回补覆盖：管理员驳回、学生撤销、学生注销级联删报名、审核撤销（若有）。启动时 `dbEnsureSchema` 按 `COUNT(*) WHERE status<>2` 重算一次，`init_db.sql` / `seed_demo_data.sql` 末尾各回填一次，防止历史漏改点长期漂移。
+
+### 28.5 约定与验证
+
+- **锁序**：任何同时碰 `student` 与 `activity` 的事务，一律学生行在前、活动行在后；
+- **基线保护**：新规则默认 0、签到折算只认 `signout_at`，因此 8 活动 / 19 报名 / 5 人 / 20.5 学时 / 榜首李铭 5.5 / 待审注册 3 全部不变（已实测）；
+- **接口只增不改**：`verify_ui_contract.py` 已放行并断言 `category` / `taken` / `signout_at` 类型；
+- **文档四处同步**：`docs/使用说明.md` §5.3/5.5/5.6/5.7/5.13/5.14、`README.md` 功能与接口表、`VERSION.md` v3.2 段与 v4 待办、本文件 §27/§28；`使用说明文档.docx` 由 md 重新生成；
+- **本轮实测**：服务端零警告编译 + 常驻 8000；PowerShell 冒烟 22 项全绿（冲突 409 / taken 自洽 / 签到码 / 签退折算 / 类别上限 / 预警权限 / 基线）；App `assembleHap` BUILD SUCCESSFUL 0 error。本机 `python` 仍是 Store 存根，7 个 Python 脚本未实跑，逻辑已按实测接口口径对齐。

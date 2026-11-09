@@ -2,7 +2,123 @@
   "color": [
     {
       "name": "start_window_background",
-      "value": "#000000"
+      "value": "#121418"
+    },
+    {
+      "name": "c_primary",
+      "value": "#4C8DFF"
+    },
+    {
+      "name": "c_primary_dark",
+      "value": "#3A73D9"
+    },
+    {
+      "name": "c_primary_bg",
+      "value": "#1B2A45"
+    },
+    {
+      "name": "c_gradient_start",
+      "value": "#2C4A8F"
+    },
+    {
+      "name": "c_success",
+      "value": "#34D07C"
+    },
+    {
+      "name": "c_success_bg",
+      "value": "#14301F"
+    },
+    {
+      "name": "c_danger",
+      "value": "#FF6B57"
+    },
+    {
+      "name": "c_danger_bg",
+      "value": "#3A1D1A"
+    },
+    {
+      "name": "c_warning",
+      "value": "#FFB454"
+    },
+    {
+      "name": "c_warning_bg",
+      "value": "#3A2A12"
+    },
+    {
+      "name": "c_admin",
+      "value": "#FF8A5B"
+    },
+    {
+      "name": "c_admin_bg",
+      "value": "#3A241A"
+    },
+    {
+      "name": "c_signin",
+      "value": "#9B8CFF"
+    },
+    {
+      "name": "c_signin_bg",
+      "value": "#241F45"
+    },
+    {
+      "name": "c_report",
+      "value": "#2FD3A8"
+    },
+    {
+      "name": "c_report_bg",
+      "value": "#0E2B26"
+    },
+    {
+      "name": "c_on_success",
+      "value": "#D4F5DD"
+    },
+    {
+      "name": "c_on_danger",
+      "value": "#FFD9D2"
+    },
+    {
+      "name": "c_text_primary",
+      "value": "#ECEDF0"
+    },
+    {
+      "name": "c_text_body",
+      "value": "#D7D9DE"
+    },
+    {
+      "name": "c_text_secondary",
+      "value": "#A8ACB4"
+    },
+    {
+      "name": "c_text_tertiary",
+      "value": "#84888F"
+    },
+    {
+      "name": "c_text_disabled",
+      "value": "#5C6066"
+    },
+    {
+      "name": "c_text_on_primary",
+      "value": "#FFFFFF"
+    },
+    {
+      "name": "c_bg_page",
+      "value": "#121418"
+    },
+    {
+      "name": "c_bg_card",
+      "value": "#1C1F26"
+    },
+    {
+      "name": "c_bg_subtle",
+      "value": "#23262E"
+    },
+    {
+      "name": "c_bg_neutral",
+      "value": "#2C3038"
+    },
+    {
+      "name": "c_divider",
+      "value": "#2E323A"
     }
   ]
 }

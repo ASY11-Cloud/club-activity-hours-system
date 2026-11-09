@@ -12,7 +12,7 @@ import { AppConfig } from '../common/AppConfig';
 import { AdminGuardView } from '../common/GuardViews';
 import {
   SignupInfo, parseSignups, statusText, StudentRequest, parseStudentRequests,
-  ActivityInfo, parseActivities, totalOf, hasMoreOf
+  ActivityInfo, parseActivities, totalOf, hasMoreOf, categoryText
 } from '../common/Models';
 import { Theme } from '../common/Theme';
 import { TimeFmt } from '../common/TimeFmt';
@@ -219,8 +219,10 @@ struct AuditPage {
       const resp = await ApiClient.post('/api/signup/audit', body);
       if (resp['code'] === 0) {
         const data = resp['data'] as Record<string, Object>;
+        const capped: boolean = data['hours_capped'] === true;
         this.msg = action === 'pass'
-          ? '已通过 ' + s.name + ', 自动累计学时 ' + (data['hours'] as number)
+          ? '已通过 ' + s.name + ', 自动累计学时 ' + (data['hours'] as number) +
+            (capped ? '(超出' + categoryText(s.category) + '类别上限, 已按规则折算)' : '')
           : '已驳回 ' + s.name + ', 理由已同步给成员';
         this.msgError = false;
         this.rejectId = -1;
@@ -373,6 +375,15 @@ struct AuditPage {
 
       Text('活动: ' + s.activity_title).fontSize(Theme.fsBody).fontColor(Theme.textBody)
         .width('100%').margin({ top: 6 })
+      Row({ space: 6 }) {
+        Text(categoryText(s.category))
+          .fontSize(Theme.fsCaption).fontColor(Theme.report)
+          .padding({ left: 6, right: 6, top: 1, bottom: 1 })
+          .backgroundColor(Theme.reportBg).borderRadius(Theme.radiusSm)
+        // 待审核记录 hours 仍为 0, 展示活动原学时; 通过后服务端可能按类别上限裁剪
+        Text('活动学时 ' + s.activity_hours + (s.status === 1 ? ' · 认定 ' + s.hours : ''))
+          .fontSize(Theme.fsCaption).fontColor(Theme.textTertiary)
+      }.width('100%').margin({ top: 4 })
       Row({ space: 10 }) {
         Text('报名: ' + TimeFmt.short(s.created_at)).fontSize(Theme.fsCaption).fontColor(Theme.textDisabled)
         if (s.checkin === 1) {
@@ -425,7 +436,7 @@ struct AuditPage {
         }.width('100%').margin({ top: 6 })
       }
     }
-    .width('100%').padding(12).backgroundColor(Color.White).borderRadius(12).margin({ bottom: 8 })
+    .width('100%').padding(12).backgroundColor(Theme.bgCard).borderRadius(12).margin({ bottom: 8 })
   }
 
   @Builder
@@ -469,7 +480,7 @@ struct AuditPage {
           .onClick(() => this.confirmReg(r, 'reject'))
       }.width('100%').margin({ top: 8 })
     }
-    .width('100%').padding(12).backgroundColor(Color.White).borderRadius(12).margin({ bottom: 8 })
+    .width('100%').padding(12).backgroundColor(Theme.bgCard).borderRadius(12).margin({ bottom: 8 })
   }
 
   @Builder
@@ -481,7 +492,7 @@ struct AuditPage {
   modeBtn(label: string, m: number) {
     Column({ space: 3 }) {
       Text(label).fontSize(13).fontWeight(FontWeight.Bold)
-        .fontColor(this.mode === m ? Color.White : Theme.textBody)
+        .fontColor(this.mode === m ? Theme.textOnPrimary : Theme.textBody)
       if (m === 1 && this.regs.length > 0) {
         Text(this.regs.length + ' 条待审批').fontSize(9)
           .fontColor(this.mode === m ? 'rgba(255,255,255,0.85)' : Theme.admin)
@@ -501,7 +512,7 @@ struct AuditPage {
   filterBtn(label: string, f: number) {
     Text(label)
       .fontSize(12)
-      .fontColor(this.filter === f ? Color.White : Theme.textBody)
+      .fontColor(this.filter === f ? Theme.textOnPrimary : Theme.textBody)
       .padding({ left: 12, right: 12, top: 5, bottom: 5 })
       .backgroundColor(this.filter === f ? Theme.primary : Theme.bgNeutral)
       .borderRadius(14)
@@ -516,14 +527,14 @@ struct AuditPage {
   pager() {
     Row({ space: 10 }) {
       Button('‹ 上一页').fontSize(12).height(30).layoutWeight(1)
-        .backgroundColor(this.page > 1 ? Theme.bgNeutral : '#F3F4F6')
+        .backgroundColor(this.page > 1 ? Theme.bgNeutral : Theme.bgSubtle)
         .fontColor(this.page > 1 ? Theme.textBody : Theme.textDisabled)
         .enabled(this.page > 1)
         .onClick(() => this.prevPage())
       Text('第 ' + this.page + ' 页 · 共 ' + this.total + ' 条')
         .fontSize(11).fontColor(Theme.textTertiary)
       Button('下一页 ›').fontSize(12).height(30).layoutWeight(1)
-        .backgroundColor(this.hasMore ? Theme.bgNeutral : '#F3F4F6')
+        .backgroundColor(this.hasMore ? Theme.bgNeutral : Theme.bgSubtle)
         .fontColor(this.hasMore ? Theme.textBody : Theme.textDisabled)
         .enabled(this.hasMore)
         .onClick(() => this.nextPage())

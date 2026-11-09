@@ -25,7 +25,8 @@ function blankAct(): ActivityInfo {
   return {
     id: 0, title: '', content: '', location: '', start_time: '', end_time: '',
     hours: 0, capacity: 0, publisher: '', signed_count: 0, passed_count: 0,
-    valid_count: 0, remaining: 0, expired: false, status: 1
+    valid_count: 0, remaining: 0, expired: false, status: 1,
+    category: 'sports', taken: 0
   };
 }
 
@@ -45,6 +46,14 @@ struct ActivityDetailPage {
   @State loadError: string = '';        // 网络/服务端错误(与"活动不存在"区分)
   @State loaded: boolean = false;
   @State justSigned: boolean = false;
+  // ---- v3.2 现场签到 ----
+  @State myCheckin: number = 0;         // 本人是否已签到
+  @State mySignoutAt: string = '';      // 本人签退时间(空 = 未签退)
+  @State codeInput: string = '';        // 学生输入的 6 位签到码
+  @State signinCode: string = '';       // 管理员展示的当前签到码
+  @State codeExpire: number = 60;       // 当前码剩余秒数
+  @State busy: boolean = false;         // 签到/签退请求进行中
+  private codeTimer: number = -1;
 
   aboutToAppear(): void {
     const ctx = getContext(this) as common.UIAbilityContext;
@@ -67,6 +76,80 @@ struct ActivityDetailPage {
     }
     // 从其他页面返回: 名额/报名状态可能已变化, 重新拉取
     if (this.found) this.loadActivity();
+  }
+
+  aboutToDisappear(): void {
+    if (this.codeTimer >= 0) {
+      clearInterval(this.codeTimer);
+      this.codeTimer = -1;
+    }
+  }
+
+  /** 管理员: 取当前 60 秒签到码(页面停留期间随剩余秒数自动刷新, 活动结束后停止) */
+  async loadSigninCode(): Promise<void> {
+    if (!AppConfig.isAdmin || !this.found || this.act.status !== 1 || this.act.expired) return;
+    const resp = await ApiClient.get('/api/activity/signin_code?activity_id=' + this.act.id.toString());
+    if (resp['code'] === 0) {
+      const d = resp['data'] as Record<string, Object>;
+      this.signinCode = String(d['code']);
+      this.codeExpire = Number(d['expire_in']);
+    }
+  }
+
+  startCodeTimer(): void {
+    if (!AppConfig.isAdmin || this.codeTimer >= 0) return;
+    // 1 秒一跳: 本地递减剩余秒数(显示不僵硬), 归零即向服务端换新码;
+    // 服务端返回的 expire_in 会校正本地漂移, 因此不需要额外的心跳接口。
+    this.codeTimer = setInterval(() => {
+      if (this.act.expired) return;
+      if (this.codeExpire > 0) this.codeExpire--;
+      if (this.codeExpire <= 0) this.loadSigninCode();
+    }, 1000);
+  }
+
+  /** 学生: 输入 6 位码签到(与 RFID 刷卡等效, 但凭证是"当时当场的码") */
+  async doCheckin(): Promise<void> {
+    if (this.busy) return;
+    const code = this.codeInput.trim();
+    if (code.length !== 6) {
+      this.msg = '请输入管理员出示的 6 位签到码';
+      return;
+    }
+    this.busy = true;
+    this.msg = '正在校验签到码...';
+    try {
+      const resp = await ApiClient.post('/api/signin/code',
+        { 'activity_id': this.act.id, 'code': code });
+      if (resp['code'] === 0) {
+        const d = resp['data'] as Record<string, Object>;
+        this.msg = '签到成功, 本次认定 ' + Number(d['hours']) + ' 学时';
+        this.codeInput = '';
+        await this.loadActivity();
+      } else {
+        this.msg = '签到失败: ' + (resp['msg'] as string);
+      }
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  /** 学生签退: 服务端按实际在场时长折算本次学时(下限 0.5, 上限活动学时) */
+  async doSignout(): Promise<void> {
+    if (this.busy) return;
+    this.busy = true;
+    this.msg = '正在签退...';
+    try {
+      const resp = await ApiClient.post('/api/signin/out', { 'activity_id': this.act.id });
+      if (resp['code'] === 0) {
+        const d = resp['data'] as Record<string, Object>;
+        this.msg = '已签退, 本次按在场 ' + Number(d['minutes']) + ' 分钟折算 ' + Number(d['hours']) + ' 学时';
+        await this.loadActivity();
+      } else {
+        this.msg = '签退失败: ' + (resp['msg'] as string);
+      }
+    } finally {
+      this.busy = false;
+    }
   }
 
   async loadActivity(): Promise<void> {
@@ -112,6 +195,10 @@ struct ActivityDetailPage {
     this.loaded = true;
     if (this.found) {
       await this.checkSigned();
+      if (AppConfig.isAdmin) {
+        await this.loadSigninCode();
+        this.startCodeTimer();
+      }
     }
   }
 
@@ -131,7 +218,9 @@ struct ActivityDetailPage {
     if (s !== null) {
       this.signed = true;
       this.mySignupStatus = s.status;
-      const signTag: string = s.checkin === 1 ? ' · 已刷卡签到' : '';
+      this.myCheckin = s.checkin;
+      this.mySignoutAt = s.signout_at;
+      const signTag: string = s.checkin === 1 ? (s.signout_at === '' ? ' · 已签到' : ' · 已签到/已签退') : '';
       if (s.status === 1) {
         this.myStatus = '已通过(' + s.hours + ' 学时)' + signTag;
       } else if (s.status === 2) {
@@ -147,12 +236,16 @@ struct ActivityDetailPage {
       if (l.activity_id === a.id) {
         this.signed = true;
         this.mySignupStatus = l.synced === 1 ? l.status : 0;
+        this.myCheckin = l.checkin;
+        this.mySignoutAt = '';
         this.myStatus = l.synced === 1 ? statusText(l.status) : '待审核(未同步)';
         return;
       }
     }
     this.signed = false;
     this.mySignupStatus = -1;
+    this.myCheckin = 0;
+    this.mySignoutAt = '';
     this.myStatus = '';
   }
 
@@ -328,7 +421,7 @@ struct ActivityDetailPage {
   }
 
   @Builder
-  tag(text: string, color: string, bg: string) {
+  tag(text: string, color: ResourceColor, bg: ResourceColor) {
     Text(text).fontSize(Theme.fsCaption).fontColor(color)
       .padding({ left: 8, right: 8, top: 2, bottom: 2 })
       .backgroundColor(bg).borderRadius(Theme.radiusSm)
@@ -405,6 +498,31 @@ struct ActivityDetailPage {
         }
         .width('100%').padding(16).backgroundColor(Theme.bgCard).borderRadius(Theme.radiusMd)
 
+        // ---- 现场签到码(管理员): 每 60 秒自动换码, 截图转发会因过期而失效 ----
+        if (AppConfig.isAdmin && this.act.status === 1 && !this.act.expired) {
+          Column({ space: 8 }) {
+            Row() {
+              Text('现场签到码').fontSize(Theme.fsSmall).fontColor(Theme.signin)
+              Blank()
+              Text('本码剩余 ' + this.codeExpire + ' 秒')
+                .fontSize(Theme.fsCaption).fontColor(Theme.textTertiary)
+            }.width('100%')
+
+            Text(this.signinCode === '' ? '------' : this.signinCode)
+              .fontSize(36).fontWeight(FontWeight.Bold).fontColor(Theme.signin)
+              .letterSpacing(8).width('100%').textAlign(TextAlign.Center)
+
+            Text('成员在活动详情输入此码即完成签到; 码随窗口自动更换, 转发到群里也来不及用')
+              .fontSize(Theme.fsCaption).fontColor(Theme.textTertiary).width('100%')
+
+            Button('立即刷新')
+              .height(32).fontSize(Theme.fsSmall).backgroundColor(Theme.signin)
+              .onClick(() => this.loadSigninCode())
+          }
+          .width('100%').padding(16).alignItems(HorizontalAlign.Start)
+          .backgroundColor(Theme.signinBg).borderRadius(Theme.radiusMd)
+        }
+
         // ---- 内容 ----
         Column({ space: 8 }) {
           Text('活动内容').fontSize(Theme.fsTitle).fontWeight(FontWeight.Medium)
@@ -427,6 +545,35 @@ struct ActivityDetailPage {
             if (this.mySignupStatus === 2) {
               Text('可按管理员给出的理由修改后重新报名').fontSize(Theme.fsCaption)
                 .fontColor(Theme.textTertiary).width('100%')
+            }
+            // 已通过: 输码签到 / 签退(活动结束后不再接受签到, 已签到的仍可签退)
+            if (this.mySignupStatus === 1) {
+              if (this.myCheckin === 0 && this.act.expired) {
+                Text('活动已结束, 未签到不再补记学时').fontSize(Theme.fsCaption)
+                  .fontColor(Theme.textTertiary).width('100%')
+              } else if (this.myCheckin === 0) {
+                Row({ space: 8 }) {
+                  TextInput({ text: this.codeInput, placeholder: '输入 6 位签到码' })
+                    .type(InputType.Number).maxLength(6).height(38).layoutWeight(1)
+                    .fontSize(Theme.fsBody)
+                    .onChange((v: string) => this.codeInput = v)
+                  Button(this.busy ? '校验中' : '签到')
+                    .height(38).width(76).fontSize(Theme.fsBody)
+                    .backgroundColor(Theme.signin).enabled(!this.busy)
+                    .onClick(() => this.doCheckin())
+                }.width('100%').margin({ top: 4 })
+              } else if (this.mySignoutAt === '') {
+                Column({ space: 6 }) {
+                  Text('已签到 ' + this.act.hours + ' 学时, 签退后按实际在场时长折算')
+                    .fontSize(Theme.fsCaption).fontColor(Theme.textTertiary).width('100%')
+                  Button(this.busy ? '签退中...' : '签退')
+                    .height(38).fontSize(Theme.fsBody).backgroundColor(Theme.signin)
+                    .enabled(!this.busy).onClick(() => this.doSignout())
+                }.width('100%').alignItems(HorizontalAlign.Start).margin({ top: 4 })
+              } else {
+                Text('已签退: ' + this.mySignoutAt).fontSize(Theme.fsCaption)
+                  .fontColor(Theme.success).width('100%')
+              }
             }
           }
           .width('100%').padding(14).alignItems(HorizontalAlign.Start)

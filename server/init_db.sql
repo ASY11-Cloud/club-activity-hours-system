@@ -57,6 +57,11 @@ CREATE TABLE activity (
   end_time   DATETIME      COMMENT '结束时间',
   hours      DECIMAL(5,1)  NOT NULL DEFAULT 1.0 COMMENT '本次活动学时数',
   capacity   INT           NOT NULL DEFAULT 0 COMMENT '人数上限, 0=不限',
+  -- 七大类: thought 思想成长 / practice 实践实习 / volunteer 志愿公益 / innovation 创新创业
+  --         sports 文体活动 / social 社会工作 / skill 技能特长(非法值由服务端回落 sports)
+  category   VARCHAR(20)   NOT NULL DEFAULT 'sports' COMMENT '活动类别(七大类之一)',
+  -- 有效报名数缓存(status<>2): 报名用条件 UPDATE 原子扣减, 启动时按真实行数对账
+  taken      INT           NOT NULL DEFAULT 0 COMMENT '有效报名数缓存',
   publisher  VARCHAR(50)   DEFAULT '' COMMENT '发布人姓名',
   status     TINYINT       NOT NULL DEFAULT 1 COMMENT '1=已发布 0=下线',
   created_at DATETIME      DEFAULT CURRENT_TIMESTAMP
@@ -72,8 +77,11 @@ CREATE TABLE signup (
   stu_no      VARCHAR(20)  NOT NULL COMMENT '学号',
   name        VARCHAR(50)  NOT NULL DEFAULT '' COMMENT '姓名',
   status      TINYINT      NOT NULL DEFAULT 0 COMMENT '0=待审核 1=已通过 2=已驳回',
-  checkin     TINYINT      NOT NULL DEFAULT 0 COMMENT '0=未签到 1=已刷卡签到(ESP32)',
-  checked_at  DATETIME     NULL COMMENT '刷卡签到时间',
+  -- 报名时的活动类别快照: 报表按类别汇总不再依赖 JOIN, 活动改类别也不影响历史认定
+  category    VARCHAR(20)  NOT NULL DEFAULT '' COMMENT '活动类别快照',
+  checkin     TINYINT      NOT NULL DEFAULT 0 COMMENT '0=未签到 1=已刷卡/输码签到',
+  checked_at  DATETIME     NULL COMMENT '签到时间(刷卡或签到码)',
+  signout_at  DATETIME     NULL COMMENT '签退时间(动态签到码签到后可用, 用于按在场时长折算)',
   card_no     VARCHAR(32)  DEFAULT '' COMMENT 'RFID卡号(嵌入式签到)',
   hours       DECIMAL(5,1) NOT NULL DEFAULT 0 COMMENT '认定学时(审核通过=活动学时)',
   remark      VARCHAR(200) DEFAULT '' COMMENT '审核备注',
@@ -128,6 +136,17 @@ INSERT INTO sys_config (cfg_key, cfg_value) VALUES
   ('required_hours', '20')
 ON DUPLICATE KEY UPDATE cfg_value = cfg_value;
 
+-- 类别学时规则(0 = 不限): max_activity 单活动上限 / max_total 该类别累计上限。
+-- 默认全 0, 因此历史数据与演示基线(20.5 学时)不受影响; 需要演示限额时改成非 0 即可。
+INSERT IGNORE INTO sys_config (cfg_key, cfg_value) VALUES
+  ('rule.thought.max_activity','0'),    ('rule.thought.max_total','0'),
+  ('rule.practice.max_activity','0'),   ('rule.practice.max_total','0'),
+  ('rule.volunteer.max_activity','0'),  ('rule.volunteer.max_total','0'),
+  ('rule.innovation.max_activity','0'), ('rule.innovation.max_total','0'),
+  ('rule.sports.max_activity','0'),     ('rule.sports.max_total','0'),
+  ('rule.social.max_activity','0'),     ('rule.social.max_total','0'),
+  ('rule.skill.max_activity','0'),      ('rule.skill.max_total','0');
+
 -- =====================================================================
 -- 演示数据
 -- =====================================================================
@@ -145,11 +164,16 @@ INSERT INTO student (stu_no, name, dept, card_no, status) VALUES
 INSERT INTO student (stu_no, name, dept, status) VALUES
   ('2023003', '王俊', '软工2203', 0);
 
--- 两条已发布活动
-INSERT INTO activity (title, content, location, start_time, end_time, hours, capacity, publisher, status) VALUES
-  ('ACM 算法训练营', '由 ACM 实验室组织的算法集训，涵盖图论与动态规划专题。', '教学楼 A-301', '2026-11-05 19:00:00', '2026-11-05 21:00:00', 2.0, 60, '管理员', 1),
-  ('嵌入式开发分享会', 'STM32 与鸿蒙开发实战经验分享。', '实验楼 B-102', '2026-11-12 14:00:00', '2026-11-12 16:30:00', 2.5, 40, '管理员', 1);
+-- 两条已发布活动(类别: skill 技能特长 / practice 实践实习)
+INSERT INTO activity (title, content, location, start_time, end_time, hours, capacity, category, publisher, status) VALUES
+  ('ACM 算法训练营', '由 ACM 实验室组织的算法集训，涵盖图论与动态规划专题。', '教学楼 A-301', '2026-11-05 19:00:00', '2026-11-05 21:00:00', 2.0, 60, 'skill', '管理员', 1),
+  ('嵌入式开发分享会', 'STM32 与鸿蒙开发实战经验分享。', '实验楼 B-102', '2026-11-12 14:00:00', '2026-11-12 16:30:00', 2.5, 40, 'practice', '管理员', 1);
 
 -- 一名学生已报名(待审核, 用于演示审核流程)
-INSERT INTO signup (client_id, activity_id, stu_no, name, status) VALUES
-  ('demo-signup-2023001-1', 1, '2023001', '张三', 0);
+INSERT INTO signup (client_id, activity_id, stu_no, name, status, category) VALUES
+  ('demo-signup-2023001-1', 1, '2023001', '张三', 0, 'skill');
+
+-- 名额计数缓存回填: taken 必须等于有效报名数(status<>2), 否则容量判断会误判。
+-- 服务端每次启动也会做同样的一次对账(dbEnsureSchema), 这里保证纯 SQL 初始化也自洽。
+UPDATE activity a
+SET a.taken = (SELECT COUNT(*) FROM signup s WHERE s.activity_id = a.id AND s.status <> 2);

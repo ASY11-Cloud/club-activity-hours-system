@@ -31,6 +31,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <fstream>
@@ -65,6 +67,11 @@ static const size_t LOG_CAP = 500;
 // 防止局域网内任意设备伪造卡号刷学时。默认为空(=不校验, 保持原有演示行为),
 // 可通过第 5 个启动参数或环境变量 CLUB_DEVICE_KEY 启用; 启用后 ESP32 固件需同步发送该头。
 static string g_device_key;
+
+// 动态签到码密钥: 启动时用系统 CSPRNG 生成, 重启即失效旧码。
+// 签到码 = HMAC 风格(sha256(secret|activity|窗口)) 取 6 位十进制, 60 秒一个窗口,
+// 现场大屏/管理员手机出示即可, 截图转发到群里的码 1 分钟内自动作废。
+static string g_signin_secret;
 
 // 登录失败节流: 同一账号 60 秒内连续失败 5 次后暂时拒绝, 防止口令暴力猜测
 struct LoginFail { int count = 0; long long first_ms = 0; };
@@ -837,6 +844,15 @@ static bool loginBlocked(const string& key, int maxCount = LOGIN_FAIL_MAX) {
 }
 static void loginFailAdd(const string& key, int maxCount = LOGIN_FAIL_MAX) {
   std::lock_guard<std::mutex> lk(g_login_mtx);
+  // 这里的 key 含 IP 与账号, 不同来源会不断产生新 key; 只按 key 惰性清理会让 map 单调增长,
+  // 因此超过阈值时做一次全量过期扫描(O(n) 摊销, 低频触发)。
+  if (g_login_fail.size() > 4096) {
+    long long now = nowMs();
+    for (auto it = g_login_fail.begin(); it != g_login_fail.end(); ) {
+      if (now - it->second.first_ms > LOGIN_FAIL_WINDOW_MS) it = g_login_fail.erase(it);
+      else ++it;
+    }
+  }
   LoginFail& f = g_login_fail[key];
   if (f.count == 0) f.first_ms = nowMs();
   if (f.count < maxCount) f.count++;
@@ -1390,6 +1406,8 @@ static string handleStudentImpact(const string& query, const string& role, const
  * 校验与删除之间不存在"被并发改密"的窗口(TOCTOU), 也不需要第二次查库。
  * 密码不匹配时回滚、置 pwdMismatch=true, 由调用方决定返回码。
  */
+static void signupReleaseSlotsOf(MYSQL* c, const string& stuNo);   // 定义在报名辅助区, 此处先用
+
 static bool dbDeleteStudent(MYSQL* c, const string& stuNo,
                             int& nSignup, double& hoursDeleted, string& err,
                             const string* expectPwd = nullptr, bool* pwdMismatch = nullptr) {
@@ -1427,6 +1445,8 @@ static bool dbDeleteStudent(MYSQL* c, const string& stuNo,
   }
 
   QueryResult r;
+  // 0) 级联删报名前先把该生占用的名额归还(按活动分组一次扣减), 否则活动会永久"假满员"
+  signupReleaseSlotsOf(c, stuNo);
   // 1) 报名记录(外键指向 student 与 activity, 必须先删)
   if (!dbQuery(c, "DELETE FROM signup WHERE stu_no=" + dbEscape(c, stuNo), r, err)) {
     mysql_rollback(c); mysql_autocommit(c, 1); return false;
@@ -1578,6 +1598,10 @@ static string handleStatsPending() {
   return jsonOk(d);
 }
 
+// 前向声明: 类别白名单在活动列表/表单(定义在文件更靠前的位置)里就要用到
+static bool   isCategory(const string& v);
+static string normCategory(const string& v);
+
 static string handleActivityList(const string& query, const string& role, const string& loginStuNo) {
   bool withOffline = (role == "admin" && query.find("all=1") != string::npos);
   // 分页: size<=0 表示不分页(向后兼容, 一次返回全部); 上限 200 防止被当作全表扫描入口
@@ -1598,8 +1622,8 @@ static string handleActivityList(const string& query, const string& role, const 
   if (kw.size() > 50) kw = kw.substr(0, 50);
   if (scope == "available") {
     where += " AND a.end_time>=NOW()";
-    where += " AND (a.capacity=0 OR (SELECT COUNT(*) FROM signup s1 WHERE s1.activity_id=a.id"
-             " AND s1.status<>2) < a.capacity)";
+    // 用 taken 缓存判定剩余名额(与报名时的条件 UPDATE 同一口径), 避免每行一次子查询
+    where += " AND (a.capacity=0 OR a.taken < a.capacity)";
   } else if (scope == "expired") {
     where += " AND a.end_time<NOW()";
   } else if (scope == "mine") {
@@ -1616,6 +1640,9 @@ static string handleActivityList(const string& query, const string& role, const 
     string like = dbEscape(c, "%" + kw + "%");
     where += " AND (a.title LIKE " + like + " OR a.location LIKE " + like + ")";
   }
+  // 按类别筛选(七大类白名单; 非法值忽略, 避免拼进 SQL)
+  string cat = qparam(query, "category");
+  if (!cat.empty() && isCategory(cat)) where += " AND a.category=" + dbEscape(c, cat);
   QueryResult cnt;
   string err;
   long long total = 0;
@@ -1629,7 +1656,8 @@ static string handleActivityList(const string& query, const string& role, const 
     "a.hours,a.capacity,a.publisher,a.status,a.created_at,"
     "COUNT(s.id) AS signed_count, "
     "SUM(CASE WHEN s.status=1 THEN 1 ELSE 0 END) AS passed_count, "
-    "SUM(CASE WHEN s.status<>2 THEN 1 ELSE 0 END) AS valid_count "
+    "SUM(CASE WHEN s.status<>2 THEN 1 ELSE 0 END) AS valid_count, "
+    "a.category,a.taken "
     "FROM activity a LEFT JOIN signup s ON a.id=s.activity_id "
     "WHERE " + where +
     " GROUP BY a.id ORDER BY a.created_at DESC";
@@ -1665,6 +1693,9 @@ static string handleActivityList(const string& query, const string& role, const 
     o.set("expired", Json::Bool(endTs > 0 && endTs < now));
     // 上下线状态(0 已下线 / 1 已发布): 管理员活动管理页据此显示"上线/下线"
     o.set("status", Json::Num(atol(row[9].c_str())));
+    o.set("category", Json::Str(row[14].empty() ? string("sports") : row[14]));
+    // 名额计数缓存(status<>2 的行数): 与报名条件 UPDATE 同源, 供并发/调试核对
+    o.set("taken", Json::Num(row[15].empty() ? 0 : atol(row[15].c_str())));
     arr.push(o);
   }
   dbRelease(c);
@@ -1680,6 +1711,8 @@ static string handleActivityList(const string& query, const string& role, const 
 // 活动表单(新增/编辑共用)
 struct ActivityForm {
   string title, content, location, startTime, endTime, publisher;
+  string category = "sports";   // 七大类之一, 非法值回落 sports
+  bool   hasCategory = false;   // 请求体是否显式带 category(编辑时缺省则保留原值)
   double    hours = 1.0;
   int       capacity = 0;
   long long sTs = 0, eTs = 0;
@@ -1715,6 +1748,10 @@ static bool parseActivityForm(const Json& body, ActivityForm& f, string& errMsg,
   if (f.hours <= 0 || f.hours > 999) { errMsg = "hours 应在 (0,999] 范围内"; return false; }
   if (f.capacity < 0 || f.capacity > 99999) { errMsg = "capacity 应在 [0,99999] 范围内"; return false; }
   f.publisher = body.strVal("publisher");
+  // 类别白名单: 未知值一律回落 sports(文体活动), 保证统计口径不会出现"第八类"
+  // 编辑接口允许不带 category(旧版 App 兼容): 缺省时保留库中原值, 避免一次编辑把类别刷回 sports
+  f.hasCategory = (body.get("category") != nullptr);
+  f.category  = normCategory(body.strVal("category"));
   // 长度截断, 防止超长内容破坏数据
   if (f.title.size() > 100)      f.title = f.title.substr(0, 100);
   if (f.content.size() > 2000)   f.content = f.content.substr(0, 2000);
@@ -1733,6 +1770,7 @@ static string activitySetSql(MYSQL* c, const ActivityForm& f) {
     << ",end_time=" << (f.endTime.empty() ? "NULL" : dbEscape(c, f.endTime))
     << ",hours=" << f.hours
     << ",capacity=" << f.capacity
+    << ",category=" << dbEscape(c, f.category)
     << ",publisher=" << dbEscape(c, f.publisher);
   return s.str();
 }
@@ -1772,10 +1810,12 @@ static string handleActivityUpdate(const Json& body) {
   if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
   string err;
   QueryResult r;
-  if (!dbQuery(c, "SELECT id FROM activity WHERE id=" + std::to_string(id), r, err)) {
+  if (!dbQuery(c, "SELECT id,category FROM activity WHERE id=" + std::to_string(id), r, err)) {
     dbRelease(c); return jsonErr(500, err);
   }
   if (r.rows.empty()) { dbRelease(c); return jsonErr(404, "活动不存在或已下线"); }
+  // 未显式传类别: 沿用库中原值(兼容旧版 App / 老脚本的编辑请求)
+  if (!f.hasCategory) f.category = normCategory(r.rows[0][1]);
   if (f.capacity > 0) {
     QueryResult rc;
     if (dbQuery(c, "SELECT COUNT(*) FROM signup WHERE activity_id=" + std::to_string(id) +
@@ -1796,109 +1836,182 @@ static string handleActivityUpdate(const Json& body) {
   return jsonOk(data);
 }
 
+// ---------------------------- 报名辅助 ----------------------------------------
+/** 活动类别白名单(七大类): 非法值一律回落 sports, 防止脏值进库影响规则匹配与统计 */
+static const char* kCategoryList[7] = {"thought","practice","volunteer","innovation","sports","social","skill"};
+static bool isCategory(const string& v) {
+  for (int i = 0; i < 7; i++) if (v == kCategoryList[i]) return true;
+  return false;
+}
+static string normCategory(const string& v) { return isCategory(v) ? v : string("sports"); }
+
+/** 读取数值型系统配置(缺省 0; 规则里 0 表示"不限") */
+static double cfgNum(MYSQL* c, const string& key) {
+  QueryResult r; string e;
+  if (!dbQuery(c, "SELECT cfg_value FROM sys_config WHERE cfg_key=" + dbEscape(c, key) + " LIMIT 1", r, e))
+    return 0;
+  if (r.rows.empty()) return 0;
+  return atof(r.rows[0][0].c_str());
+}
+
+/** 学时统一保留 1 位小数 */
+static double roundHours(double v) {
+  if (v <= 0) return 0;
+  return std::floor(v * 10.0 + 0.5) / 10.0;
+}
+
+/**
+ * 占名额: 一条条件 UPDATE 同时完成"判满 + 计数", 不再把 activity 行锁进整个事务。
+ * 依赖 InnoDB 行锁: 并发的两条 UPDATE 只有一条能让 taken<capacity 成立。
+ */
+static bool signupTakeSlot(MYSQL* c, int activityId, string& err) {
+  QueryResult r;
+  std::ostringstream s;
+  s << "UPDATE activity SET taken=taken+1 WHERE id=" << activityId
+    << " AND (capacity=0 OR taken<capacity)";
+  if (!dbQuery(c, s.str(), r, err)) return false;
+  return mysql_affected_rows(c) == 1;
+}
+
+/** 释放名额(幂等): 驳回/撤销/注销时调用, taken>0 才递减, 防止异常数据减成负数 */
+static void signupReleaseSlot(MYSQL* c, int activityId) {
+  QueryResult r; string e;
+  std::ostringstream s;
+  s << "UPDATE activity SET taken=taken-1 WHERE id=" << activityId << " AND taken>0";
+  dbQuery(c, s.str(), r, e);
+}
+
+/** 释放某学生占用的全部名额(注销级联删报名前调用) */
+static void signupReleaseSlotsOf(MYSQL* c, const string& stuNo) {
+  QueryResult r; string e;
+  std::ostringstream s;
+  s << "UPDATE activity a JOIN (SELECT activity_id, COUNT(*) n FROM signup WHERE stu_no="
+    << dbEscape(c, stuNo) << " AND status<>2 GROUP BY activity_id) t ON t.activity_id=a.id "
+    << "SET a.taken=GREATEST(0, a.taken - t.n)";
+  dbQuery(c, s.str(), r, e);
+}
+
 // 报名(幂等: client_id / (activity,stu) 冲突时视为已报名)
 // 报名(身份以登录 Token 为准, 忽略请求体中的学号/姓名防伪造)
+// v3.2: 锁序改为"先学生行、后活动行"(全站统一), 增加时间冲突校验, 名额改为条件 UPDATE 扣减
 static string handleSignupAdd(const Json& body, const string& loginStuNo, const string& loginName) {
   string clientId = body.strVal("client_id");
   int activityId = body.intVal("activity_id", -1);
   if (clientId.empty() || activityId <= 0)
     return jsonErr(400, "client_id/activity_id required");
-  string stuNo = loginStuNo;
-  string name = loginName;
+  if (clientId.size() > 64) clientId = clientId.substr(0, 64);   // 防超长主键撑爆索引
+  const string stuNo = loginStuNo;
+  const string name  = loginName;
 
   MYSQL* c = dbConnect();
   if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
   string err;
   QueryResult r;
 
-  // 校验活动
-  if (!dbQuery(c, "SELECT id,capacity,hours,status,DATE_FORMAT(end_time,'%Y-%m-%d %H:%i:%s') "
-                  "FROM activity WHERE id=" + std::to_string(activityId), r, err)) {
-    dbRelease(c); return jsonErr(500, err);
-  }
-  if (r.rows.empty()) { dbRelease(c); return jsonErr(404, "活动不存在或已下线"); }
-  int cap = atoi(r.rows[0][1].c_str());
-  int actStatus = atoi(r.rows[0][3].c_str());
-  if (actStatus != 1) { dbRelease(c); return jsonErr(400, "活动未开放报名"); }
-  // 已结束的活动不再接受报名(原先可对任意历史活动报名)
-  long long endTs = r.rows[0][4].empty() ? 0 : parseLocalTime(r.rows[0][4]);
-  if (endTs > 0 && endTs < nowMs()) { dbRelease(c); return jsonErr(400, "活动已结束, 无法报名"); }
-
-  // 事务化报名: 锁活动行 + 容量检查 + 插入 + 复检, 保证并发下不超员
   mysql_autocommit(c, 0);
-  // 先对活动行加排他锁, 串行化同一活动的并发报名;
-  // 否则在 REPEATABLE READ 下 COUNT 读不到其他事务未提交的插入, 并发报名可能超员
-  QueryResult rLock;
-  if (!dbQuery(c, "SELECT id FROM activity WHERE id=" + std::to_string(activityId) + " FOR UPDATE", rLock, err)) {
-    mysql_rollback(c); mysql_autocommit(c, 1); dbRelease(c); return jsonErr(500, err);
-  }
-  // 该学生是否已在名单内(有效报名, 含已通过):
-  // 已报名的人重复点击/网络重试时必须幂等成功, 不能被"活动已满"挡住
+  auto fail = [&](int code, const string& msg) -> string {
+    mysql_rollback(c);
+    mysql_autocommit(c, 1);
+    dbRelease(c);
+    return jsonErr(code, msg);
+  };
+
+  // 1) 先锁学生行: 同一学生的并发报名/撤销在此串行化, 时间冲突校验才成立;
+  //    全站统一"学生 -> 活动"的加锁顺序(与审核/注销一致), 避免 ABBA 死锁。
+  if (!dbQuery(c, "SELECT id FROM student WHERE stu_no=" + dbEscape(c, stuNo) + " FOR UPDATE", r, err))
+    return fail(500, err);
+  if (r.rows.empty()) return fail(404, "该学号不存在或已注销");
+
+  // 2) 活动信息(不加锁: 名额由条件 UPDATE 原子扣减, 无需长时间持锁)
+  if (!dbQuery(c, "SELECT capacity,status,DATE_FORMAT(start_time,'%Y-%m-%d %H:%i:%s'),"
+                  "DATE_FORMAT(end_time,'%Y-%m-%d %H:%i:%s'),category "
+                  "FROM activity WHERE id=" + std::to_string(activityId), r, err))
+    return fail(500, err);
+  if (r.rows.empty()) return fail(404, "活动不存在或已下线");
+  int cap = atoi(r.rows[0][0].c_str());
+  int actStatus = atoi(r.rows[0][1].c_str());
+  string startTime = r.rows[0][2];
+  string endTime   = r.rows[0][3];
+  string category  = normCategory(r.rows[0][4]);
+  if (actStatus != 1) return fail(400, "活动未开放报名");
+  long long endTs = endTime.empty() ? 0 : parseLocalTime(endTime);
+  if (endTs > 0 && endTs < nowMs()) return fail(400, "活动已结束, 无法报名");
+
+  // 3) 是否已在名单内(已驳回视为未报名, 重新报名需重新占名额)
   bool already = false;
-  {
-    QueryResult rExist;
-    if (!dbQuery(c, "SELECT id FROM signup WHERE activity_id=" + std::to_string(activityId) +
-                    " AND stu_no=" + dbEscape(c, stuNo) + " AND status<>2", rExist, err)) {
-      mysql_rollback(c); mysql_autocommit(c, 1); dbRelease(c); return jsonErr(500, err);
-    }
-    already = !rExist.rows.empty();
+  if (!dbQuery(c, "SELECT id,status FROM signup WHERE activity_id=" + std::to_string(activityId) +
+                  " AND stu_no=" + dbEscape(c, stuNo), r, err))
+    return fail(500, err);
+  if (!r.rows.empty() && atoi(r.rows[0][1].c_str()) != 2) already = true;
+
+  // 4) 时间冲突: 同一时段只能有一个有效报名, 否则两个活动都被审核通过会重复认定学时
+  if (!already && !startTime.empty() && !endTime.empty()) {
+    QueryResult rc;
+    string sql = "SELECT a.title FROM signup s JOIN activity a ON s.activity_id=a.id "
+                 "WHERE s.stu_no=" + dbEscape(c, stuNo) +
+                 " AND s.status<>2 AND s.activity_id<>" + std::to_string(activityId) +
+                 " AND a.start_time IS NOT NULL AND a.end_time IS NOT NULL"
+                 " AND a.start_time < " + dbEscape(c, endTime) +
+                 " AND a.end_time > " + dbEscape(c, startTime) + " LIMIT 1";
+    if (!dbQuery(c, sql, rc, err)) return fail(500, err);
+    if (!rc.rows.empty())
+      return fail(409, "与「" + rc.rows[0][0] + "」时间冲突, 请先撤销原报名");
   }
-  // 容量检查(事务内): 只统计有效报名, 已驳回不占名额; 已在名单内则跳过
-  if (cap > 0 && !already) {
-    QueryResult r2;
-    if (!dbQuery(c, "SELECT COUNT(*) FROM signup WHERE activity_id=" + std::to_string(activityId) +
-                    " AND status<>2", r2, err)) {
-      mysql_rollback(c); mysql_autocommit(c, 1); dbRelease(c); return jsonErr(500, err);
-    }
-    int cnt = atoi(r2.rows[0][0].c_str());
-    if (cnt >= cap) {
-      mysql_rollback(c); mysql_autocommit(c, 1); dbRelease(c);
-      return jsonErr(403, "名额已满, 无法报名");
+
+  // 5) 占名额(仅新建/驳回后重报): 已在名单内重复点击不重复占位
+  if (!already) {
+    string serr;
+    if (!signupTakeSlot(c, activityId, serr)) {
+      QueryResult chk;
+      string e2;
+      if (!dbQuery(c, "SELECT id FROM activity WHERE id=" + std::to_string(activityId), chk, e2))
+        return fail(500, e2);
+      if (chk.rows.empty()) return fail(404, "活动不存在或已下线");
+      return fail(403, "名额已满, 无法报名");
     }
   }
 
-  // 幂等插入: client_id 冲突时保留原记录(本地 SQLite 同步匹配), 仅取回 id;
-  // 同一学生重复报名(uk_act_stu 冲突)时: 已驳回记录重置为待审核(重新报名), 其余状态保持不变
+  // 6) 幂等插入(沿用旧语义, 另补类别快照):
+  //    client_id 冲突保留原记录; uk_act_stu 冲突时"已驳回"重置为待审核, 其余状态不变。
+  //    注意不要覆盖 client_id —— 换设备重报会带来新 UUID, 覆盖会让旧设备本地记录被同步清掉。
   std::ostringstream sql;
-  sql << "INSERT INTO signup (client_id,activity_id,stu_no,name,status) VALUES ("
+  sql << "INSERT INTO signup (client_id,activity_id,stu_no,name,status,category) VALUES ("
       << dbEscape(c, clientId) << ","
       << activityId << ","
       << dbEscape(c, stuNo) << ","
-      << dbEscape(c, name) << ",0) "
-      // 注意: 不要在这里覆盖 client_id —— 同一学生换设备/重装后重报会带来新的 UUID,
-      // 覆盖会让旧设备上"已同步"的本地记录在下次同步时被当成"服务器已删除"而清掉。
+      << dbEscape(c, name) << ",0,"
+      << dbEscape(c, category) << ") "
       << "ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id),"
-      // remark 要在 status 之前判断: 只有"驳回后重新报名"才清旧备注, 已通过记录重复报名保留审核意见
-      << "remark=IF(status=2,'',remark),status=IF(status=2,0,status),name=VALUES(name)";
-  if (!dbQuery(c, sql.str(), r, err)) {
-    mysql_rollback(c); mysql_autocommit(c, 1); dbRelease(c); return jsonErr(500, err);
-  }
+      << "remark=IF(status=2,'',remark),status=IF(status=2,0,status),name=VALUES(name),"
+      << "category=IF(category='',VALUES(category),category)";
+  if (!dbQuery(c, sql.str(), r, err)) return fail(500, err);
   long long id = (long long)mysql_insert_id(c);
 
-  // 插入后复检容量(并发窗口保护), 超员则回滚; 已在名单内的幂等重报不参与复检
+  // 7) 兜底复检: 条件 UPDATE 已保证不超员, 这里只防"历史数据 taken 与真实行数不一致"
   if (cap > 0 && !already) {
     QueryResult r3;
     if (!dbQuery(c, "SELECT COUNT(*) FROM signup WHERE activity_id=" + std::to_string(activityId) +
                     " AND status<>2", r3, err) ||
         atoi(r3.rows[0][0].c_str()) > cap) {
-      mysql_rollback(c); mysql_autocommit(c, 1); dbRelease(c);
-      return jsonErr(403, "名额已满, 无法报名");
+      return fail(403, "名额已满, 无法报名");
     }
   }
   mysql_commit(c);
   mysql_autocommit(c, 1);
 
-  // 返回该记录真实状态(重复报名时可能是已通过/已驳回, 不再恒写 0)
+  // 返回该记录真实状态(重复报名时可能是已通过/已驳回)
   int realStatus = 0, realCheckin = 0;
   double realHours = 0;
   string realClientId = clientId;   // 服务器上真实的 client_id(命中已有记录时可能与本次不同)
+  string realCategory = category;
   QueryResult r4;
-  if (dbQuery(c, "SELECT client_id,status,checkin,hours FROM signup WHERE id=" + std::to_string(id), r4, err)
+  if (dbQuery(c, "SELECT client_id,status,checkin,hours,category FROM signup WHERE id=" + std::to_string(id), r4, err)
       && !r4.rows.empty()) {
     realClientId = r4.rows[0][0];
     realStatus   = atoi(r4.rows[0][1].c_str());
     realCheckin  = atoi(r4.rows[0][2].c_str());
     realHours    = atof(r4.rows[0][3].c_str());
+    if (!r4.rows[0][4].empty()) realCategory = r4.rows[0][4];
   }
   dbRelease(c);
   Json data = Json::Object();
@@ -1907,6 +2020,7 @@ static string handleSignupAdd(const Json& body, const string& loginStuNo, const 
   data.set("status", Json::Num(realStatus));
   data.set("checkin", Json::Num(realCheckin));
   data.set("hours", Json::Num(realHours));
+  data.set("category", Json::Str(realCategory));
   return jsonOk(data);
 }
 
@@ -1955,7 +2069,9 @@ static string handleSignupList(const string& query, const string& forceStuNo) {
     "s.card_no,s.hours,s.remark,DATE_FORMAT(s.created_at,'%Y-%m-%d %H:%i:%s'),"
     "DATE_FORMAT(s.audited_at,'%Y-%m-%d %H:%i:%s'),a.title,"
     "COALESCE(a.hours,0) AS activity_hours,"
-    "DATE_FORMAT(s.checked_at,'%Y-%m-%d %H:%i:%s') "
+    "DATE_FORMAT(s.checked_at,'%Y-%m-%d %H:%i:%s'),"
+    "COALESCE(NULLIF(s.category,''),a.category,'sports') AS category,"
+    "DATE_FORMAT(s.signout_at,'%Y-%m-%d %H:%i:%s') "
     "FROM signup s LEFT JOIN activity a ON s.activity_id=a.id "
     "WHERE 1=1" + cond + " ORDER BY s.id DESC";
   if (size > 0) {
@@ -1984,6 +2100,8 @@ static string handleSignupList(const string& query, const string& forceStuNo) {
     o.set("activity_hours", Json::Num(atof(row[13].c_str())));
     // 刷卡签到时间(ESP32 上报时刻): 审核列表与成员端都可展示"几点刷的卡"
     o.set("checkin_at", Json::Str(row[14]));
+    o.set("category", Json::Str(row[15]));
+    o.set("signout_at", Json::Str(row[16]));   // 动态码签退时间(空 = 未签退)
     arr.push(o);
   }
   dbRelease(c);
@@ -2013,42 +2131,85 @@ static string handleSignupAudit(const Json& body) {
   string err;
   QueryResult r;
 
-  // 事务内读取并锁定报名行: 防止两个管理员(或重复点击)同时读到 status=0 各累计一次学时
+  // 先取学号/活动号(不加锁), 以便按"学生 -> 报名"的固定顺序加锁, 与报名路径保持一致
+  QueryResult pre;
+  if (!dbQuery(c, "SELECT stu_no,activity_id FROM signup WHERE id=" + std::to_string(signupId), pre, err)) {
+    dbRelease(c); return jsonErr(500, err);
+  }
+  if (pre.rows.empty()) { dbRelease(c); return jsonErr(404, "该报名已被学生撤销或不存在, 请刷新列表"); }
+  string preStuNo = pre.rows[0][0];
+
   mysql_autocommit(c, 0);
-  string sql = "SELECT s.stu_no,s.name,s.status,a.hours FROM signup s "
+  auto fail = [&](int code, const string& msg) -> string {
+    mysql_rollback(c); mysql_autocommit(c, 1); dbRelease(c);
+    return jsonErr(code, msg);
+  };
+
+  // 1) 锁学生行: 类别累计上限需要"同一学生的并发审核"串行化, 否则两条审核会读到相同的已用学时
+  QueryResult lk;
+  if (!dbQuery(c, "SELECT id FROM student WHERE stu_no=" + dbEscape(c, preStuNo) + " FOR UPDATE", lk, err))
+    return fail(500, err);
+
+  // 2) 锁报名行并读活动信息(防止两个管理员/重复点击同时读到 status=0 各累计一次学时)
+  string sql = "SELECT s.stu_no,s.name,s.status,a.hours,a.category,a.id FROM signup s "
                "LEFT JOIN activity a ON s.activity_id=a.id WHERE s.id=" + std::to_string(signupId) +
                " FOR UPDATE";
-  if (!dbQuery(c, sql, r, err)) {
-    mysql_rollback(c); mysql_autocommit(c, 1); dbRelease(c); return jsonErr(500, err);
-  }
-  if (r.rows.empty()) {
-    mysql_rollback(c); mysql_autocommit(c, 1); dbRelease(c); return jsonErr(404, "该报名已被学生撤销或不存在, 请刷新列表");
-  }
+  if (!dbQuery(c, sql, r, err)) return fail(500, err);
+  if (r.rows.empty()) return fail(404, "该报名已被学生撤销或不存在, 请刷新列表");
   string stuNo = r.rows[0][0], name = r.rows[0][1];
   int curStatus = atoi(r.rows[0][2].c_str());
   double actHours = atof(r.rows[0][3].c_str());
+  string category = r.rows[0][4].empty() ? string("sports") : r.rows[0][4];
+  int actId = atoi(r.rows[0][5].c_str());
 
   // 已审核记录禁止重复操作, 防止 hours_total 与 signup 状态不一致
-  if (curStatus != 0) {
-    mysql_rollback(c); mysql_autocommit(c, 1); dbRelease(c);
-    return jsonErr(400, "该记录已审核, 不能重复操作");
-  }
+  if (curStatus != 0) return fail(400, "该记录已审核, 不能重复操作");
 
   bool ok = true;
   string conflictMsg; // 并发冲突时的业务提示(区别于 SQL 错误)
+  double finalHours = 0;
+  bool capped = false;
+
   if (action == "pass") {
-    // 1) 更新报名状态+学时(条件 status=0, 影响行数必须为 1)
+    // 3) 按类别规则折算: 先"单活动上限", 再"类别累计上限"; 规则为 0 表示不限,
+    //    因此历史数据(未配置规则)审核结果与旧版完全一致, 不影响 20.5 学时基线。
+    finalHours = actHours;
+    double maxAct = cfgNum(c, "rule." + category + ".max_activity");
+    if (maxAct > 0 && finalHours > maxAct) { finalHours = maxAct; capped = true; }
+    double maxTotal = cfgNum(c, "rule." + category + ".max_total");
+    if (maxTotal > 0) {
+      QueryResult uq;
+      if (!dbQuery(c, "SELECT COALESCE(SUM(s.hours),0) FROM signup s JOIN activity a ON s.activity_id=a.id "
+                      "WHERE s.stu_no=" + dbEscape(c, stuNo) + " AND s.status=1 AND a.category=" +
+                      dbEscape(c, category), uq, err)) return fail(500, err);
+      double used = uq.rows.empty() ? 0 : atof(uq.rows[0][0].c_str());
+      double remain = maxTotal - used;
+      if (remain < 0) remain = 0;
+      if (finalHours > remain) { finalHours = remain; capped = true; }
+    }
+    finalHours = roundHours(finalHours);
+
+    string finalRemark = remark;
+    if (capped) {
+      std::ostringstream cs;
+      cs << (finalRemark.empty() ? "" : "; ") << "按类别上限折算为 " << finalHours << " 学时";
+      finalRemark += cs.str();
+      if (finalRemark.size() > 200) finalRemark = finalRemark.substr(0, 200);
+    }
+
+    // 4) 更新报名状态+学时(条件 status=0, 影响行数必须为 1), 同时补齐类别快照
     std::ostringstream s1;
-    s1 << "UPDATE signup SET status=1,hours=" << actHours
-       << ",audited_at=NOW(),remark=" << dbEscape(c, remark)
+    s1 << "UPDATE signup SET status=1,hours=" << finalHours
+       << ",audited_at=NOW(),remark=" << dbEscape(c, finalRemark)
+       << ",category=" << dbEscape(c, category)
        << " WHERE id=" << signupId << " AND status=0";
     if (!dbQuery(c, s1.str(), r, err)) ok = false;
     else if (mysql_affected_rows(c) != 1) { ok = false; conflictMsg = "该记录已被其他管理员处理, 请刷新"; }
-    // 2) 学时汇总自动累计
+    // 5) 学时汇总自动累计
     if (ok) {
       std::ostringstream s2;
       s2 << "INSERT INTO hours_total (stu_no,name,total_hours,sign_count) VALUES ("
-         << dbEscape(c, stuNo) << "," << dbEscape(c, name) << "," << actHours << ",1) "
+         << dbEscape(c, stuNo) << "," << dbEscape(c, name) << "," << finalHours << ",1) "
          << "ON DUPLICATE KEY UPDATE total_hours=total_hours+VALUES(total_hours),"
          << "sign_count=sign_count+1,name=VALUES(name)";
       if (!dbQuery(c, s2.str(), r, err)) ok = false;
@@ -2059,6 +2220,8 @@ static string handleSignupAudit(const Json& body) {
        << dbEscape(c, remark) << " WHERE id=" << signupId << " AND status=0";
     if (!dbQuery(c, s1.str(), r, err)) ok = false;
     else if (mysql_affected_rows(c) != 1) { ok = false; conflictMsg = "该记录已被其他管理员处理, 请刷新"; }
+    // 驳回 = 该报名不再占用名额
+    if (ok) signupReleaseSlot(c, actId);
   }
 
   if (ok) {
@@ -2072,7 +2235,9 @@ static string handleSignupAudit(const Json& body) {
   Json data = Json::Object();
   data.set("signup_id", Json::Num(signupId));
   data.set("action", Json::Str(action));
-  data.set("hours", Json::Num(action == "pass" ? actHours : 0));
+  data.set("hours", Json::Num(action == "pass" ? finalHours : 0));
+  data.set("category", Json::Str(category));
+  data.set("hours_capped", Json::Bool(capped));
   return jsonOk(data);
 }
 
@@ -2119,7 +2284,8 @@ static string handleHoursReport(const string& role, const string& stuNo) {
   string cond = " WHERE s.status=1";
   if (role == "student") cond += " AND s.stu_no=" + dbEscape(c, stuNo);
   QueryResult d;
-  string sql2 = "SELECT s.stu_no,s.name,a.title,s.hours,DATE_FORMAT(s.audited_at,'%Y-%m-%d %H:%i:%s') "
+  string sql2 = "SELECT s.stu_no,s.name,a.title,s.hours,DATE_FORMAT(s.audited_at,'%Y-%m-%d %H:%i:%s'),"
+                "COALESCE(NULLIF(s.category,''),a.category,'sports') "
                 "FROM signup s LEFT JOIN activity a ON s.activity_id=a.id" + cond +
                 " ORDER BY s.audited_at DESC";
   Json detail = Json::Array();
@@ -2131,13 +2297,31 @@ static string handleHoursReport(const string& role, const string& stuNo) {
       o.set("activity", Json::Str(row[2]));
       o.set("hours", Json::Num(atof(row[3].c_str())));
       o.set("audited_at", Json::Str(row[4]));
+      o.set("category", Json::Str(row[5].empty() ? string("sports") : row[5]));
       detail.push(o);
+    }
+  }
+  // 分类汇总(图表用): 与明细同一口径, 学生端仅统计本人
+  QueryResult cat;
+  Json byCat = Json::Array();
+  string sql3 = "SELECT COALESCE(NULLIF(s.category,''),a.category,'sports') AS cat,"
+                "SUM(s.hours) AS h, COUNT(*) AS n "
+                "FROM signup s LEFT JOIN activity a ON s.activity_id=a.id" + cond +
+                " GROUP BY cat ORDER BY h DESC";
+  if (dbQuery(c, sql3, cat, err)) {
+    for (auto& row : cat.rows) {
+      Json o = Json::Object();
+      o.set("category", Json::Str(row[0]));
+      o.set("hours", Json::Num(atof(row[1].c_str())));
+      o.set("count", Json::Num(atol(row[2].c_str())));
+      byCat.push(o);
     }
   }
   dbRelease(c);
   Json data = Json::Object();
   data.set("report", arr);
   data.set("detail", detail);
+  data.set("by_category", byCat);
   data.set("required_hours", Json::Num(requiredHours));
   data.set("total_hours", Json::Num(allHours));
   data.set("student_count", Json::Num(rank));
@@ -2254,18 +2438,20 @@ static string handleSignupCancel(const Json& body, const string& loginStuNo) {
   string err;
   QueryResult r;
   string sql = signupId > 0
-    ? "SELECT id,stu_no,status FROM signup WHERE id=" + std::to_string(signupId)
-    : "SELECT id,stu_no,status FROM signup WHERE activity_id=" + std::to_string(activityId) +
+    ? "SELECT id,stu_no,status,activity_id FROM signup WHERE id=" + std::to_string(signupId)
+    : "SELECT id,stu_no,status,activity_id FROM signup WHERE activity_id=" + std::to_string(activityId) +
       " AND stu_no=" + dbEscape(c, loginStuNo);
   if (!dbQuery(c, sql, r, err)) { dbRelease(c); return jsonErr(500, err); }
   if (r.rows.empty()) { dbRelease(c); return jsonErr(404, "报名记录不存在"); }
   signupId = atoi(r.rows[0][0].c_str());
   if (r.rows[0][1] != loginStuNo) { dbRelease(c); return jsonErr(403, "只能撤销本人的报名记录"); }
   if (atoi(r.rows[0][2].c_str()) != 0) { dbRelease(c); return jsonErr(400, "仅待审核的报名可以撤销"); }
+  int actId = atoi(r.rows[0][3].c_str());   // DELETE 会覆盖 r, 先存下来
   if (!dbQuery(c, "DELETE FROM signup WHERE id=" + std::to_string(signupId) + " AND status=0", r, err)) {
     dbRelease(c); return jsonErr(500, err);
   }
   if (mysql_affected_rows(c) != 1) { dbRelease(c); return jsonErr(409, "该报名已被审核, 无法撤销"); }
+  signupReleaseSlot(c, actId);   // 撤销后名额归还
   dbRelease(c);
   Json data = Json::Object();
   data.set("signup_id", Json::Num(signupId));
@@ -2298,13 +2484,14 @@ static string handleSignin(const Json& body) {
   string stuNo = r.rows[0][0], name = r.rows[0][1];
 
   // 2) 活动学时与状态(已下线/已结束活动不可刷卡认定学时)
-  if (!dbQuery(c, "SELECT hours,status,DATE_FORMAT(end_time,'%Y-%m-%d %H:%i:%s') FROM activity WHERE id=" +
-                  std::to_string(activityId), r, err)) {
+  if (!dbQuery(c, "SELECT hours,status,DATE_FORMAT(end_time,'%Y-%m-%d %H:%i:%s'),category "
+                  "FROM activity WHERE id=" + std::to_string(activityId), r, err)) {
     dbRelease(c); return jsonErr(500, err);
   }
   if (r.rows.empty()) { dbRelease(c); return jsonErr(404, "活动不存在或已下线"); }
   double actHours = atof(r.rows[0][0].c_str());
   int actStatus = atoi(r.rows[0][1].c_str());
+  string category = normCategory(r.rows[0][3]);   // 新建报名时写入类别快照
   if (actStatus != 1) { dbRelease(c); return jsonErr(400, "活动未开放报名"); }
   long long endTs = r.rows[0][2].empty() ? 0 : parseLocalTime(r.rows[0][2]);
   if (endTs > 0 && endTs < nowMs()) { dbRelease(c); return jsonErr(400, "活动已结束, 不能再刷卡认定学时"); }
@@ -2332,12 +2519,18 @@ static string handleSignin(const Json& body) {
   string conflictMsg;
   string clientId = "rfid-" + cardNo + "-" + std::to_string(activityId);
   if (signupId == 0) {
+    // 新建报名同样占名额(条件 UPDATE 原子扣减): 容量满了不能再"刷卡补录"绕过上限
+    string serr;
+    if (!signupTakeSlot(c, activityId, serr)) {
+      mysql_rollback(c); mysql_autocommit(c, 1); dbRelease(c);
+      return jsonErr(403, "名额已满, 无法刷卡认定学时");
+    }
     // 无报名: 创建并通过; 影响行数为 1 才说明本次真正新建(2=命中唯一键更新, 说明并发已建)
     std::ostringstream s;
-    s << "INSERT INTO signup (client_id,activity_id,stu_no,name,status,checkin,checked_at,card_no,hours,audited_at) VALUES ("
+    s << "INSERT INTO signup (client_id,activity_id,stu_no,name,status,checkin,checked_at,card_no,hours,audited_at,category) VALUES ("
       << dbEscape(c, clientId) << "," << activityId << ","
       << dbEscape(c, stuNo) << "," << dbEscape(c, name) << ",1,1,NOW(),"
-      << dbEscape(c, cardNo) << "," << actHours << ",NOW()) "
+      << dbEscape(c, cardNo) << "," << actHours << ",NOW()," << dbEscape(c, category) << ") "
       << "ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id),checkin=1,"
       << "checked_at=COALESCE(checked_at,NOW()),card_no=VALUES(card_no),hours=VALUES(hours)";
     if (!dbQuery(c, s.str(), r, err)) ok = false;
@@ -2384,6 +2577,273 @@ static string handleSignin(const Json& body) {
   data.set("activity_id", Json::Num(activityId));
   data.set("hours", Json::Num(actHours));
   data.set("checkin", Json::Num(1));
+  return jsonOk(data);
+}
+
+// ---------------------------- 动态签到码(v3.2) --------------------------------
+// 现场签到: 管理员端每 60 秒刷新一个 6 位码, 学生输入即完成签到。
+// 与 RFID 刷卡并存 —— 刷卡走 /api/signin(设备密钥), 输码走 /api/signin/code(本人 Token)。
+
+/** 第 window 个 60 秒窗口的 6 位签到码(由启动时随机 secret 派生, 重启即全量失效) */
+static string signinCodeFor(int activityId, long long window) {
+  string raw = g_signin_secret + "|" + std::to_string(activityId) + "|" + std::to_string(window);
+  string h = sha256Hex(raw);
+  unsigned long v = 0;
+  for (int i = 0; i < 8 && i < (int)h.size(); i++) {
+    char ch = h[i];
+    int d = (ch >= '0' && ch <= '9') ? (ch - '0')
+          : (ch >= 'a' && ch <= 'f') ? (ch - 'a' + 10)
+          : (ch >= 'A' && ch <= 'F') ? (ch - 'A' + 10) : 0;
+    v = v * 16 + (unsigned long)d;
+  }
+  char buf[8];
+  snprintf(buf, sizeof(buf), "%06lu", v % 1000000UL);
+  return string(buf);
+}
+
+/** GET /api/activity/signin_code?activity_id= (管理员): 当前签到码 + 剩余秒数 */
+static string handleSigninCode(const string& query) {
+  int activityId = atoi(qparam(query, "activity_id").c_str());
+  if (activityId <= 0) return jsonErr(400, "activity_id required");
+  MYSQL* c = dbConnect();
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
+  QueryResult r; string err;
+  if (!dbQuery(c, "SELECT title,status FROM activity WHERE id=" + std::to_string(activityId), r, err)) {
+    dbRelease(c); return jsonErr(500, err);
+  }
+  if (r.rows.empty()) { dbRelease(c); return jsonErr(404, "活动不存在或已下线"); }
+  string title = r.rows[0][0];
+  dbRelease(c);
+  long long w = nowMs() / 60000;
+  Json d = Json::Object();
+  d.set("activity_id", Json::Num(activityId));
+  d.set("activity_title", Json::Str(title));
+  d.set("code", Json::Str(signinCodeFor(activityId, w)));
+  d.set("window", Json::Num((double)w));
+  d.set("expire_in", Json::Num(60 - (int)((nowMs() / 1000) % 60)));   // 本窗口剩余秒数
+  return jsonOk(d);
+}
+
+/** POST /api/signin/code {activity_id, code} (学生): 校验签到码并签到 */
+static string handleSigninByCode(const Json& body, const TokenInfo& me) {
+  int activityId = body.intVal("activity_id", -1);
+  string code = body.strVal("code");
+  if (activityId <= 0 || code.empty()) return jsonErr(400, "activity_id & code required");
+  long long w = nowMs() / 60000;
+  // 允许当前与前一个窗口(最多 60 秒宽限): 学生点提交时正好跨窗口也不至于失败
+  if (code != signinCodeFor(activityId, w) && code != signinCodeFor(activityId, w - 1))
+    return jsonErr(403, "签到码错误或已过期, 请向管理员索取最新签到码");
+
+  const string stuNo = me.stu_no;
+  const string name  = me.name;
+  MYSQL* c = dbConnect();
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
+  string err; QueryResult r;
+  auto fail = [&](int code2, const string& msg) -> string {
+    mysql_rollback(c); mysql_autocommit(c, 1); dbRelease(c);
+    return jsonErr(code2, msg);
+  };
+
+  if (!dbQuery(c, "SELECT hours,status,DATE_FORMAT(end_time,'%Y-%m-%d %H:%i:%s'),category "
+                  "FROM activity WHERE id=" + std::to_string(activityId), r, err)) {
+    dbRelease(c); return jsonErr(500, err);
+  }
+  if (r.rows.empty()) { dbRelease(c); return jsonErr(404, "活动不存在或已下线"); }
+  double actHours = atof(r.rows[0][0].c_str());
+  int actStatus = atoi(r.rows[0][1].c_str());
+  string category = normCategory(r.rows[0][3]);
+  if (actStatus != 1) { dbRelease(c); return jsonErr(400, "活动未开放报名"); }
+  long long endTs = r.rows[0][2].empty() ? 0 : parseLocalTime(r.rows[0][2]);
+  if (endTs > 0 && endTs < nowMs()) { dbRelease(c); return jsonErr(400, "活动已结束, 不能再签到"); }
+
+  mysql_autocommit(c, 0);
+  // 锁学生行(与报名同序), 串行化同一学生的重复/并发签到
+  QueryResult lk;
+  if (!dbQuery(c, "SELECT id FROM student WHERE stu_no=" + dbEscape(c, stuNo) + " FOR UPDATE", lk, err))
+    return fail(500, err);
+  if (lk.rows.empty()) return fail(404, "该学号不存在或已注销");
+
+  QueryResult ex;
+  if (!dbQuery(c, "SELECT id,status FROM signup WHERE activity_id=" + std::to_string(activityId) +
+                  " AND stu_no=" + dbEscape(c, stuNo), ex, err))
+    return fail(500, err);
+  int signupId = 0, st = 0;
+  if (!ex.rows.empty()) { signupId = atoi(ex.rows[0][0].c_str()); st = atoi(ex.rows[0][1].c_str()); }
+  if (st == 2) return fail(403, "该报名已被管理员驳回, 请重新报名后再签到");
+
+  bool needAccumulate = false;
+  if (signupId == 0) {
+    string serr;
+    if (!signupTakeSlot(c, activityId, serr)) return fail(403, "名额已满, 无法签到");
+    std::ostringstream s;
+    s << "INSERT INTO signup (client_id,activity_id,stu_no,name,status,checkin,checked_at,hours,audited_at,category) VALUES ("
+      << dbEscape(c, "code-" + stuNo + "-" + std::to_string(activityId)) << "," << activityId << ","
+      << dbEscape(c, stuNo) << "," << dbEscape(c, name) << ",1,1,NOW(),"
+      << actHours << ",NOW()," << dbEscape(c, category) << ") "
+      << "ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id),checkin=1,"
+      << "checked_at=COALESCE(checked_at,NOW())";
+    if (!dbQuery(c, s.str(), r, err)) return fail(500, err);
+    needAccumulate = (mysql_affected_rows(c) == 1);
+  } else if (st == 0) {
+    std::ostringstream s;
+    s << "UPDATE signup SET status=1,checkin=1,checked_at=NOW(),hours=" << actHours
+      << ",audited_at=NOW(),category=" << dbEscape(c, category)
+      << " WHERE id=" << signupId << " AND status=0";
+    if (!dbQuery(c, s.str(), r, err)) return fail(500, err);
+    if (mysql_affected_rows(c) != 1) return fail(409, "该报名刚刚被审核, 请重新签到");
+    needAccumulate = true;
+  } else {
+    // 已通过: 只补签到时刻, 不重复累计学时
+    std::ostringstream s;
+    s << "UPDATE signup SET checkin=1,checked_at=COALESCE(checked_at,NOW()) WHERE id=" << signupId;
+    if (!dbQuery(c, s.str(), r, err)) return fail(500, err);
+  }
+
+  if (needAccumulate) {
+    std::ostringstream s;
+    s << "INSERT INTO hours_total (stu_no,name,total_hours,sign_count) VALUES ("
+      << dbEscape(c, stuNo) << "," << dbEscape(c, name) << "," << actHours << ",1) "
+      << "ON DUPLICATE KEY UPDATE total_hours=total_hours+VALUES(total_hours),"
+      << "sign_count=sign_count+1,name=VALUES(name)";
+    if (!dbQuery(c, s.str(), r, err)) return fail(500, err);
+  }
+  mysql_commit(c);
+  mysql_autocommit(c, 1);
+  dbRelease(c);
+
+  Json d = Json::Object();
+  d.set("activity_id", Json::Num(activityId));
+  d.set("hours", Json::Num(actHours));
+  d.set("checkin", Json::Num(1));
+  d.set("signin_at", Json::Str(nowStr()));
+  d.set("category", Json::Str(category));
+  return jsonOk(d);
+}
+
+/** POST /api/signin/out {activity_id} (学生): 记录签退, 按实际在场时长折算本次学时 */
+static string handleSigninOut(const Json& body, const TokenInfo& me) {
+  int activityId = body.intVal("activity_id", -1);
+  if (activityId <= 0) return jsonErr(400, "activity_id required");
+  const string stuNo = me.stu_no;
+  MYSQL* c = dbConnect();
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
+  string err; QueryResult r;
+  auto fail = [&](int code2, const string& msg) -> string {
+    mysql_rollback(c); mysql_autocommit(c, 1); dbRelease(c);
+    return jsonErr(code2, msg);
+  };
+
+  mysql_autocommit(c, 0);
+  string sql = "SELECT s.id,s.status,s.checkin,DATE_FORMAT(s.checked_at,'%Y-%m-%d %H:%i:%s'),s.hours,"
+               "DATE_FORMAT(s.signout_at,'%Y-%m-%d %H:%i:%s'),a.hours,"
+               "DATE_FORMAT(a.start_time,'%Y-%m-%d %H:%i:%s'),DATE_FORMAT(a.end_time,'%Y-%m-%d %H:%i:%s') "
+               "FROM signup s JOIN activity a ON s.activity_id=a.id WHERE s.stu_no=" + dbEscape(c, stuNo) +
+               " AND s.activity_id=" + std::to_string(activityId) + " FOR UPDATE";
+  if (!dbQuery(c, sql, r, err)) return fail(500, err);
+  if (r.rows.empty()) return fail(404, "没有该活动的报名记录");
+  int signupId = atoi(r.rows[0][0].c_str());
+  int st = atoi(r.rows[0][1].c_str());
+  int checkin = atoi(r.rows[0][2].c_str());
+  string checkedAt = r.rows[0][3];
+  double curHours = atof(r.rows[0][4].c_str());
+  string signoutAt = r.rows[0][5];
+  double actHours = atof(r.rows[0][6].c_str());
+  string aStart = r.rows[0][7], aEnd = r.rows[0][8];
+
+  if (!checkin) return fail(409, "尚未签到, 不能签退");
+  if (!signoutAt.empty()) return fail(409, "已签退, 请勿重复操作");
+
+  long long now = nowMs();
+  long long checkedTs = checkedAt.empty() ? 0 : parseLocalTime(checkedAt);
+  long long sTs = aStart.empty() ? 0 : parseLocalTime(aStart);
+  long long eTs = aEnd.empty() ? 0 : parseLocalTime(aEnd);
+
+  if (!dbQuery(c, "UPDATE signup SET signout_at=NOW() WHERE id=" + std::to_string(signupId), r, err))
+    return fail(500, err);
+
+  // 折算规则: 实际在场 / 计划时长, 上限 1.0, 下限 0.5 学时(到场即认定, 不允许 0)
+  double newHours = curHours;
+  double minutes = 0;
+  if (checkedTs > 0 && sTs > 0 && eTs > sTs) {
+    double planned = (double)(eTs - sTs) / 60000.0;
+    double actual  = (double)(now - checkedTs) / 60000.0;
+    if (actual < 0) actual = 0;
+    if (actual > planned) actual = planned;
+    minutes = actual;
+    newHours = actHours * (planned > 0 ? actual / planned : 1.0);
+    if (newHours > actHours) newHours = actHours;
+    newHours = roundHours(newHours);
+    if (newHours < 0.5) newHours = 0.5;
+  }
+
+  if (st == 1 && fabs(newHours - curHours) >= 0.05) {
+    double delta = newHours - curHours;
+    std::ostringstream s1;
+    s1 << "UPDATE signup SET hours=" << newHours << " WHERE id=" << signupId;
+    if (!dbQuery(c, s1.str(), r, err)) return fail(500, err);
+    std::ostringstream s2;
+    s2 << "UPDATE hours_total SET total_hours=GREATEST(0,total_hours+" << delta
+       << ") WHERE stu_no=" << dbEscape(c, stuNo);
+    if (!dbQuery(c, s2.str(), r, err)) return fail(500, err);
+  }
+
+  mysql_commit(c);
+  mysql_autocommit(c, 1);
+  dbRelease(c);
+
+  Json d = Json::Object();
+  d.set("activity_id", Json::Num(activityId));
+  d.set("hours", Json::Num(newHours));
+  d.set("minutes", Json::Num((double)(int)(minutes + 0.5)));
+  d.set("signout_at", Json::Str(nowStr()));
+  return jsonOk(d);
+}
+
+/** GET /api/report/warning (管理员): 未达标名单 + 缺口学时, 供导出/通知 */
+static string handleHoursWarning() {
+  MYSQL* c = dbConnect();
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
+  QueryResult r; string err;
+  double required = 0;
+  QueryResult cf;
+  if (dbQuery(c, "SELECT cfg_value FROM sys_config WHERE cfg_key='required_hours'", cf, err) && !cf.rows.empty())
+    required = atof(cf.rows[0][0].c_str());
+
+  Json arr = Json::Array();
+  int nWarn = 0;
+  if (required > 0) {
+    std::ostringstream req;
+    req << required;
+    string sql =
+      "SELECT st.stu_no,st.name,st.dept,COALESCE(ht.total_hours,0) AS th,"
+      "COALESCE(ht.sign_count,0) AS sc,"
+      "(SELECT DATE_FORMAT(MAX(s.audited_at),'%Y-%m-%d %H:%i:%s') FROM signup s "
+      " WHERE s.stu_no=st.stu_no AND s.status=1) AS last_at "
+      "FROM student st LEFT JOIN hours_total ht ON ht.stu_no=st.stu_no "
+      "WHERE st.status=1 AND COALESCE(ht.total_hours,0) < " + req.str() +
+      " ORDER BY th ASC, st.stu_no ASC";
+    if (!dbQuery(c, sql, r, err)) { dbRelease(c); return jsonErr(500, err); }
+    for (auto& row : r.rows) {
+      double th = atof(row[3].c_str());
+      double gap = required - th;
+      if (gap < 0) gap = 0;
+      Json o = Json::Object();
+      o.set("stu_no", Json::Str(row[0]));
+      o.set("name", Json::Str(row[1]));
+      o.set("dept", Json::Str(row[2]));
+      o.set("total_hours", Json::Num(th));
+      o.set("sign_count", Json::Num(atol(row[4].c_str())));
+      o.set("gap", Json::Num(roundHours(gap)));
+      o.set("last_activity_at", Json::Str(row[5]));
+      arr.push(o);
+      nWarn++;
+    }
+  }
+  dbRelease(c);
+  Json data = Json::Object();
+  data.set("required_hours", Json::Num(required));
+  data.set("list", arr);
+  data.set("count", Json::Num((double)nWarn));
   return jsonOk(data);
 }
 
@@ -2449,7 +2909,7 @@ static string route(const HttpRequest& req) {
   if (p == "/api/health") {
     Json d = Json::Object();
     d.set("server", Json::Str("club-system-server"));
-    d.set("version", Json::Str("3.1"));
+    d.set("version", Json::Str("3.2"));
     d.set("time", Json::Str(nowStr()));
     // 数据库连通性: 验收时可直接确认"服务器在线且 MySQL 可用", 前端仍按 code==0 判在线,
     // db=false 只作为附加信息(不改变健康检查的业务 code, 避免数据库抖动时健康检查整体变红)
@@ -2502,6 +2962,30 @@ static string route(const HttpRequest& req) {
     Json d = Json::Object();
     d.set("logout", Json::Bool(true));
     return jsonOk(d);
+  }
+
+  // 动态签到码: 管理员取当前码(60 秒刷新), 学生输码签到
+  if (req.method == "GET" && p == "/api/activity/signin_code") {
+    if (me.role != "admin") return needAdmin();
+    return handleSigninCode(req.query);
+  }
+  if (req.method == "POST" && p == "/api/signin/code") {
+    if (me.role != "student") return jsonErr(403, "仅普通成员可通过签到码签到");
+    Json body; JsonParser jp(req.body);
+    if (!jp.parse(body) || body.t != Json::OBJ) return jsonErr(400, "bad json");
+    return handleSigninByCode(body, me);
+  }
+  if (req.method == "POST" && p == "/api/signin/out") {
+    if (me.role != "student") return jsonErr(403, "仅普通成员可签退");
+    Json body; JsonParser jp(req.body);
+    if (!jp.parse(body) || body.t != Json::OBJ) return jsonErr(400, "bad json");
+    return handleSigninOut(body, me);
+  }
+
+  // 学分预警名单(未达标 + 缺口学时): 仅管理员
+  if (req.method == "GET" && p == "/api/report/warning") {
+    if (me.role != "admin") return needAdmin();
+    return handleHoursWarning();
   }
 
   // 注册申请列表 / 审核: 仅管理员
@@ -2889,6 +3373,50 @@ static void dbEnsureSchema() {
     string initHash = dbEscape(c, pwdHashStrong(string(DEFAULT_STUDENT_PWD)));
     dbQuery(c, "UPDATE student SET pwd_hash=" + initHash + " WHERE pwd_hash=''", ig, err);
   }
+
+  // ---- v3.2 增量: 活动类别 / 名额计数 / 报名类别快照 / 签退时间 ----
+  auto hasColOf = [&](const char* table, const char* name) -> bool {
+    QueryResult q; string e;
+    return dbQuery(c, string("SELECT 1 FROM information_schema.columns WHERE table_schema=DATABASE()"
+                             " AND table_name='") + table + "' AND column_name='" + name + "'", q, e)
+           && !q.rows.empty();
+  };
+  if (!hasColOf("activity", "category")) {
+    dbQuery(c, "ALTER TABLE activity ADD COLUMN category VARCHAR(20) NOT NULL DEFAULT 'sports'", ig, err);
+    if (!hasColOf("activity", "category"))
+      std::cerr << "[migrate] WARN activity.category 补列失败(分类统计与学时规则不可用): " << err << "\n";
+  }
+  if (!hasColOf("activity", "taken")) {
+    dbQuery(c, "ALTER TABLE activity ADD COLUMN taken INT NOT NULL DEFAULT 0", ig, err);
+    if (!hasColOf("activity", "taken"))
+      std::cerr << "[migrate] WARN activity.taken 补列失败(名额判定会退化为 COUNT 查询): " << err << "\n";
+  }
+  if (!hasColOf("signup", "category")) {
+    dbQuery(c, "ALTER TABLE signup ADD COLUMN category VARCHAR(20) NOT NULL DEFAULT ''", ig, err);
+    if (!hasColOf("signup", "category"))
+      std::cerr << "[migrate] WARN signup.category 补列失败(报表分类会退回 JOIN): " << err << "\n";
+  }
+  if (!hasColOf("signup", "signout_at")) {
+    dbQuery(c, "ALTER TABLE signup ADD COLUMN signout_at DATETIME NULL", ig, err);
+    if (!hasColOf("signup", "signout_at"))
+      std::cerr << "[migrate] WARN signup.signout_at 补列失败(签退功能不可用): " << err << "\n";
+  }
+  // 老数据补类别快照(只补空值, 不覆盖已有快照)
+  dbQuery(c, "UPDATE signup s JOIN activity a ON s.activity_id=a.id SET s.category=a.category WHERE s.category=''", ig, err);
+  // 名额计数对账: 启动时无并发流量, 以真实行数为准重算, 修正历史漂移/漏改点
+  QueryResult rec;
+  if (dbQuery(c, "UPDATE activity a SET a.taken=(SELECT COUNT(*) FROM signup s "
+                 "WHERE s.activity_id=a.id AND s.status<>2)", rec, err)) {
+    QueryResult bad;
+    if (dbQuery(c, "SELECT COUNT(*) FROM activity a WHERE a.taken<>(SELECT COUNT(*) FROM signup s "
+                   "WHERE s.activity_id=a.id AND s.status<>2)", bad, err)
+        && !bad.rows.empty() && atol(bad.rows[0][0].c_str()) > 0)
+      std::cerr << "[migrate] WARN 仍有 " << bad.rows[0][0] << " 个活动的 taken 与真实报名数不一致\n";
+  } else {
+    std::cerr << "[migrate] WARN taken 对账失败(名额可能不准): " << err << "\n";
+  }
+  // 时间冲突校验与"我的报名"都按 (stu_no,status) 过滤
+  dbQuery(c, "CREATE INDEX idx_signup_stu_status ON signup (stu_no, status)", ig, err);
   dbRelease(c);
 }
 
@@ -2956,6 +3484,8 @@ int main(int argc, char* argv[]) {
     const char* envKey = getenv("CLUB_DEVICE_KEY");
     if (envKey != nullptr) g_device_key = envKey;
   }
+  // 动态签到码密钥: 每次启动重新生成(64 位 hex), 重启后旧的签到码全部失效
+  g_signin_secret = genToken();
 
   WSADATA wsa;
   if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {

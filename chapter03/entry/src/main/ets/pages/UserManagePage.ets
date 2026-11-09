@@ -153,13 +153,13 @@ struct UserManagePage {
   }
 
   // 状态色: 已通过=绿 待审核=橙 已驳回=红
-  statusColor(status: number): string {
+  statusColor(status: number): ResourceColor {
     if (status === 1) return Theme.success;
     if (status === 2) return Theme.danger;
     return Theme.warning;
   }
 
-  statusBg(status: number): string {
+  statusBg(status: number): ResourceColor {
     if (status === 1) return Theme.successBg;
     if (status === 2) return Theme.dangerBg;
     return Theme.warningBg;

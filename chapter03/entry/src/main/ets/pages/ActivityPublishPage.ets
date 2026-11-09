@@ -8,7 +8,7 @@ import { common } from '@kit.AbilityKit';
 import { ApiClient } from '../common/ApiClient';
 import { DbHelper } from '../common/DbHelper';
 import { AppConfig } from '../common/AppConfig';
-import { LocalDraft, ActivityInfo, parseActivities, toDate } from '../common/Models';
+import { LocalDraft, ActivityInfo, parseActivities, toDate, CATEGORY_KEYS, CATEGORY_LABELS } from '../common/Models';
 import { AdminGuardView } from '../common/GuardViews';
 import { Theme } from '../common/Theme';
 
@@ -23,6 +23,7 @@ struct ActivityPublishPage {
   @State hours: string = '1.0';
   @State capacity: string = '0';
   @State publisher: string = '';
+  @State category: string = 'sports';    // 七大类之一, 决定学时规则口径
   @State drafts: LocalDraft[] = [];
   @State allActs: ActivityInfo[] = [];   // 已发布活动(含已下线), 供上下线管理
   @State editingDraftId: number = 0;     // >0 表示当前表单正在编辑该草稿(保存为更新, 不新增)
@@ -195,12 +196,12 @@ struct ActivityPublishPage {
       if (this.editingDraftId > 0) {
         await DbHelper.updateDraft(this.editingDraftId, this.title.trim(), this.content.trim(),
           this.location.trim(), this.fmtDate(this.startDate), this.fmtDate(this.endDate),
-          Number(this.hours), Number(this.capacity), this.publisher.trim());
+          Number(this.hours), Number(this.capacity), this.publisher.trim(), this.category);
         this.msg = '草稿 #' + this.editingDraftId + ' 已更新';
       } else {
         const id = await DbHelper.addDraft(this.title.trim(), this.content.trim(), this.location.trim(),
           this.fmtDate(this.startDate), this.fmtDate(this.endDate),
-          Number(this.hours), Number(this.capacity), this.publisher.trim());
+          Number(this.hours), Number(this.capacity), this.publisher.trim(), this.category);
         this.msg = id > 0 ? '草稿已保存到本地 SQLite' : '草稿保存失败';
         if (id > 0) this.editingDraftId = id;
       }
@@ -220,18 +221,18 @@ struct ActivityPublishPage {
       if (id > 0) {
         await DbHelper.updateDraft(id, this.title.trim(), this.content.trim(), this.location.trim(),
           this.fmtDate(this.startDate), this.fmtDate(this.endDate),
-          Number(this.hours), Number(this.capacity), this.publisher.trim());
+          Number(this.hours), Number(this.capacity), this.publisher.trim(), this.category);
       } else {
         id = await DbHelper.addDraft(this.title.trim(), this.content.trim(), this.location.trim(),
           this.fmtDate(this.startDate), this.fmtDate(this.endDate),
-          Number(this.hours), Number(this.capacity), this.publisher.trim());
+          Number(this.hours), Number(this.capacity), this.publisher.trim(), this.category);
       }
       if (id > 0) {
         this.editingDraftId = id;
         await this.loadDrafts();
         await this.publish(id, this.title.trim(), this.content.trim(), this.location.trim(),
           this.fmtDate(this.startDate), this.fmtDate(this.endDate),
-          Number(this.hours), Number(this.capacity), this.publisher.trim());
+          Number(this.hours), Number(this.capacity), this.publisher.trim(), this.category);
       } else {
         this.msg = '草稿保存失败, 无法发布';
       }
@@ -252,6 +253,7 @@ struct ActivityPublishPage {
     this.hours = d.hours.toString();
     this.capacity = d.capacity.toString();
     if (d.publisher !== '') this.publisher = d.publisher;
+    this.category = d.category === '' ? 'sports' : d.category;
     const s = toDate(d.start_time);
     const e = toDate(d.end_time);
     if (s !== null) this.startDate = s;
@@ -268,6 +270,7 @@ struct ActivityPublishPage {
     this.location = '';
     this.hours = '1.0';
     this.capacity = '0';
+    this.category = 'sports';
     this.msg = '';
     const base = new Date();
     base.setDate(base.getDate() + 1);
@@ -278,7 +281,7 @@ struct ActivityPublishPage {
   /** 发布草稿(以草稿自身字段为准) */
   async publish(draftId: number, draftTitle: string, draftContent: string, draftLocation: string,
     draftStart: string, draftEnd: string, draftHours: number, draftCapacity: number,
-    draftPublisher: string): Promise<void> {
+    draftPublisher: string, draftCategory: string): Promise<void> {
     if (this.busy) return;
     this.busy = true;
     this.msg = '';
@@ -295,7 +298,8 @@ struct ActivityPublishPage {
         'end_time': draftEnd,
         'hours': draftHours,
         'capacity': draftCapacity,
-        'publisher': draftPublisher
+        'publisher': draftPublisher,
+        'category': draftCategory
       };
       this.msg = '正在同步服务器(MySQL)...';
       const resp = await ApiClient.post('/api/activity/add', body);
@@ -355,7 +359,7 @@ struct ActivityPublishPage {
             .onClick(() => this.loadDraftToForm(d))
           Button('发布到服务器').fontSize(12).height(28).backgroundColor(Theme.primary)
             .onClick(() => this.publish(d.id, d.title, d.content, d.location, d.start_time,
-              d.end_time, d.hours, d.capacity, d.publisher))
+              d.end_time, d.hours, d.capacity, d.publisher, d.category))
         }
         Button('删除').fontSize(12).height(28).backgroundColor(Theme.danger)
           .onClick(() => this.confirmDeleteDraft(d.id, d.title))
@@ -391,6 +395,27 @@ struct ActivityPublishPage {
       }.width('100%').margin({ top: 6 })
     }
     .width('100%').padding(10).backgroundColor(Theme.primaryBg).borderRadius(10).margin({ bottom: 8 })
+  }
+
+  /** 类别选择(七大类单选): 与服务端白名单同口径, 决定审核通过时的学时上限规则 */
+  @Builder
+  categoryPicker() {
+    Column({ space: 6 }) {
+      Text('活动类别(决定单活动 / 类别累计学时上限)')
+        .fontSize(11).fontColor(Theme.textTertiary).width('100%')
+      Flex({ wrap: FlexWrap.Wrap }) {
+        ForEach(CATEGORY_KEYS, (k: string, i: number) => {
+          Text(CATEGORY_LABELS[i])
+            .fontSize(12)
+            .fontColor(this.category === k ? Theme.textOnPrimary : Theme.textSecondary)
+            .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+            .margin({ right: 6, bottom: 6 })
+            .backgroundColor(this.category === k ? Theme.primary : Theme.bgSubtle)
+            .borderRadius(Theme.radiusPill)
+            .onClick(() => this.category = k)
+        }, (k: string) => k)
+      }.width('100%')
+    }.width('100%').alignItems(HorizontalAlign.Start)
   }
 
   @Builder
@@ -439,6 +464,8 @@ struct ActivityPublishPage {
               TextInput({ text: this.location, placeholder: '活动地点(如: 教学楼 A-301)' })
                 .onChange((v: string) => this.location = v)
 
+              this.categoryPicker()
+
               // 时间滚轮选择(点击弹出 DatePicker + TimePicker)
               this.timeCell('开始时间', 'start')
               this.timeCell('结束时间', 'end')
@@ -474,7 +501,7 @@ struct ActivityPublishPage {
                 Text(this.msg).fontSize(12).fontColor(Theme.primary).textAlign(TextAlign.Center).width('100%')
               }
             }
-            .width('100%').padding(14).backgroundColor(Color.White).borderRadius(14)
+            .width('100%').padding(14).backgroundColor(Theme.bgCard).borderRadius(14)
 
             // 草稿箱
             Column() {
@@ -491,7 +518,7 @@ struct ActivityPublishPage {
                   '-' + d.hours.toString() + '-' + d.capacity.toString())
               }
             }
-            .width('100%').padding(14).backgroundColor(Color.White).borderRadius(14).margin({ top: 10 })
+            .width('100%').padding(14).backgroundColor(Theme.bgCard).borderRadius(14).margin({ top: 10 })
 
             // 已发布活动管理(含已下线): 下线后仍能在此恢复
             Column() {
@@ -509,7 +536,7 @@ struct ActivityPublishPage {
                   '-' + a.hours.toString() + '-' + a.valid_count.toString())
               }
             }
-            .width('100%').padding(14).backgroundColor(Color.White).borderRadius(14).margin({ top: 10 })
+            .width('100%').padding(14).backgroundColor(Theme.bgCard).borderRadius(14).margin({ top: 10 })
           }
           .padding(14)
         }

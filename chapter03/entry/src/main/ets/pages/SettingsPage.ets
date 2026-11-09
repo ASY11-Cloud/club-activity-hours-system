@@ -305,7 +305,7 @@ struct SettingsPage {
             Button('保存服务器地址').width('100%').height(38).fontSize(14).backgroundColor(Theme.primary)
               .onClick(() => this.save())
           }
-          .width('100%').padding(14).backgroundColor(Color.White).borderRadius(14)
+          .width('100%').padding(14).backgroundColor(Theme.bgCard).borderRadius(14)
 
           // 当前账号(只读)
           Column({ space: 8 }) {
@@ -316,7 +316,7 @@ struct SettingsPage {
                   Row({ space: 6 }) {
                     Text(this.name).fontSize(15).fontWeight(FontWeight.Bold)
                     Text(this.roleTxt)
-                      .fontSize(10).fontColor(Color.White)
+                      .fontSize(10).fontColor(Theme.textOnPrimary)
                       .padding({ left: 7, right: 7, top: 2, bottom: 2 })
                       .backgroundColor(this.isAdmin ? Theme.admin : Theme.success)
                       .borderRadius(8)
@@ -338,7 +338,7 @@ struct SettingsPage {
               }.width('100%')
             }
           }
-          .width('100%').padding(14).backgroundColor(Color.White).borderRadius(14).margin({ top: 10 })
+          .width('100%').padding(14).backgroundColor(Theme.bgCard).borderRadius(14).margin({ top: 10 })
 
           // ---- 注销账号(仅普通成员): 不可逆操作, 单独成区并如实列出后果 ----
           if (this.loggedIn && !this.isAdmin) {
@@ -403,7 +403,7 @@ struct SettingsPage {
               }
             }
             .width('100%').padding(14).margin({ top: 10 })
-            .backgroundColor(Color.White).borderRadius(14)
+            .backgroundColor(Theme.bgCard).borderRadius(14)
             .border({ width: 1, color: Theme.dangerBg })
           } else if (this.loggedIn && this.isAdmin) {
             Text('管理员账号不支持自助注销; 如需注销学生账号, 请到「管理 → 用户管理」操作')
@@ -435,7 +435,7 @@ struct SettingsPage {
                   .width('100%')
               }
             }
-            .width('100%').padding(14).backgroundColor(Color.White).borderRadius(14).margin({ top: 10 })
+            .width('100%').padding(14).backgroundColor(Theme.bgCard).borderRadius(14).margin({ top: 10 })
           }
 
           if (this.isAdmin) {
@@ -460,7 +460,7 @@ struct SettingsPage {
                   .width('100%')
               }
             }
-            .width('100%').padding(14).backgroundColor(Color.White).borderRadius(14).margin({ top: 10 })
+            .width('100%').padding(14).backgroundColor(Theme.bgCard).borderRadius(14).margin({ top: 10 })
 
             Column({ space: 10 }) {
               Row() {
@@ -494,7 +494,7 @@ struct SettingsPage {
               }
             }
             .width('100%').padding(14).margin({ top: 10 })
-            .backgroundColor(Color.White).borderRadius(14)
+            .backgroundColor(Theme.bgCard).borderRadius(14)
           }
 
           if (this.msg !== '') {
