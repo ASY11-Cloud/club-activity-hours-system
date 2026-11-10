@@ -1,8 +1,8 @@
 /**
- * 社团活动报名与学时认定系统 —— 审核中心(仅管理员)
- * 两个模式:
- *  - 报名审核: 服务端筛选(状态/活动/关键词) + 分页, 通过自动累计学时
- *  - 注册申请: 审批新成员注册申请(同意/拒绝)
+ * 社团活动报名与学时认定系统 —— 审核中心(管理员角色)
+ * 按账号类型分工, 一个页面两种职责:
+ *  - 社团账号: 活动报名审核(本社团活动) + 入团审核(入社/退社申请)
+ *  - 平台管理员: 注册申请(新成员注册) + 学时申诉, 不再审核活动报名(活动归社团)
  * 筛选与分页都在服务端执行, 避免把全量报名拉到本地再过滤。
  */
 import { router } from '@kit.ArkUI';
@@ -13,7 +13,8 @@ import { AdminGuardView } from '../common/GuardViews';
 import {
   SignupInfo, parseSignups, statusText, StudentRequest, parseStudentRequests,
   ActivityInfo, parseActivities, totalOf, hasMoreOf, categoryText,
-  AppealInfo, parseAppeals
+  AppealInfo, parseAppeals,
+  MemberRequest, parseMemberRequests, requestTypeText, requestStatusText
 } from '../common/Models';
 import { Theme } from '../common/Theme';
 import { TimeFmt } from '../common/TimeFmt';
@@ -21,7 +22,7 @@ import { TimeFmt } from '../common/TimeFmt';
 @Entry
 @Component
 struct AuditPage {
-  @State mode: number = 0;         // 0 报名审核 | 1 注册申请
+  @State mode: number = 0;         // 0 报名审核(社团) | 1 注册申请(管理员) | 2 学时申诉(管理员) | 3 入团审核(社团)
   @State rows: SignupInfo[] = [];  // 当前页报名记录(服务端过滤 + 分页)
   @State filter: number = -1;      // -1 全部 0 待审核 1 通过 2 驳回
   @State kw: string = '';          // 已生效的搜索词(服务端 LIKE 姓名/学号/活动名)
@@ -56,30 +57,46 @@ struct AuditPage {
   @State apPanelAction: string = '';    // pass | reject
   @State apReply: string = '';
   @State apHours: string = '';
+  // ---- 入团审核(社团账号): 入社/退社申请, 原在成员管理页内, 现统一收到审核中心 ----
+  @State memberReqs: MemberRequest[] = [];
+  @State reqAll: boolean = false;       // false=只看待审 true=全部记录
+  @State rejectReqId: number = -1;      // 正在填写驳回理由的申请 id
+  @State rejectReqInput: string = '';
+  @State reqBusy: boolean = false;
   private readonly PAGE_SIZE: number = 20;
 
   aboutToAppear(): void {
     const ctx = getContext(this) as common.UIAbilityContext;
     AppConfig.init(ctx).then(() => {
       if (!AppConfig.isAdmin) {
-        this.blocked = true; // 无权限: 仅管理员可审核
+        this.blocked = true; // 无权限: 仅管理员角色可审核
         return;
       }
-      this.loadActOptions();
-      this.load(true);
-      this.loadRegs();
-      this.loadPendingCount();
-      this.loadAppeals();
+      // 活动归社团: 社团账号审报名 + 入团; 平台管理员只审注册与申诉
+      if (AppConfig.isClubAccount) {
+        this.mode = 0;
+        this.loadActOptions();
+        this.load(true);
+        this.loadPendingCount();
+        this.loadMemberReqs();
+      } else {
+        this.mode = 1;
+        this.loadRegs();
+        this.loadAppeals();
+      }
     }).catch((e: Error) => {
       this.msg = '初始化失败: ' + e.message;
     });
   }
 
   onPageShow(): void {
-    if (!this.blocked) {
+    if (this.blocked) return;
+    if (AppConfig.isClubAccount) {
       this.load(true);
-      this.loadRegs();
       this.loadPendingCount();
+      this.loadMemberReqs();
+    } else {
+      this.loadRegs();
       this.loadAppeals();
     }
   }
@@ -231,6 +248,56 @@ struct AuditPage {
     if (!this.hasMore) return;
     this.page = this.page + 1;
     this.load(false);
+  }
+
+  // ==================== 入团审核(社团账号) ====================
+
+  async loadMemberReqs(): Promise<void> {
+    if (!AppConfig.isClubAccount) return;
+    const path = this.reqAll ? '/api/club/requests?status=&size=50' : '/api/club/requests?size=50';
+    const resp = await ApiClient.get(path);
+    if (resp['code'] === 0) {
+      this.memberReqs = parseMemberRequests(resp);
+    }
+  }
+
+  /** 当前列表里待处理的入社/退社申请数 */
+  pendingReqCount(): number {
+    let n = 0;
+    for (const r of this.memberReqs) if (r.status === 0) n += 1;
+    return n;
+  }
+
+  /** 审批: 同意直接提交; 驳回先展开理由输入, 二次点击才提交(理由必填, 学生会看到) */
+  async auditReq(r: MemberRequest, approve: boolean): Promise<void> {
+    if (!approve && this.rejectReqId !== r.id) {
+      this.rejectReqId = r.id;
+      this.rejectReqInput = '';
+      this.msg = '';
+      this.msgError = false;
+      return;
+    }
+    if (!approve && this.rejectReqInput.trim() === '') {
+      this.msg = '驳回必须填写理由';
+      this.msgError = true;
+      return;
+    }
+    if (this.reqBusy) return;
+    const body: Record<string, Object> = { 'request_id': r.id, 'approve': approve ? 1 : 0 };
+    if (!approve) body['reply'] = this.rejectReqInput.trim();
+    this.reqBusy = true;
+    const resp = await ApiClient.post('/api/club/request/audit', body, true);
+    this.reqBusy = false;
+    if (resp['code'] === 0) {
+      this.msg = (resp['msg'] as string) || '已处理';
+      this.msgError = false;
+      this.rejectReqId = -1;
+      this.rejectReqInput = '';
+      await this.loadMemberReqs();
+    } else {
+      this.msg = '审批失败: ' + (resp['msg'] as string);
+      this.msgError = true;
+    }
   }
 
   async loadRegs(): Promise<void> {
@@ -682,6 +749,10 @@ struct AuditPage {
         Text(this.regs.length + ' 条待审批').fontSize(9)
           .fontColor(this.mode === m ? 'rgba(255,255,255,0.85)' : Theme.admin)
       }
+      if (m === 3 && this.pendingReqCount() > 0) {
+        Text(this.pendingReqCount() + ' 条待审批').fontSize(9)
+          .fontColor(this.mode === m ? 'rgba(255,255,255,0.85)' : Theme.warning)
+      }
       if (m === 2 && this.appealPending > 0) {
         Text(this.appealPending + ' 条待处理').fontSize(9)
           .fontColor(this.mode === m ? 'rgba(255,255,255,0.85)' : Theme.warning)
@@ -695,6 +766,80 @@ struct AuditPage {
     .onClick(() => {
       this.mode = m;
     })
+  }
+
+  /** 入团申请卡(社团账号): 同意直接入册, 驳回必须写理由(成员端可见) */
+  @Builder
+  reqCard(r: MemberRequest) {
+    Column({ space: 8 }) {
+      Row({ space: 8 }) {
+        Text(requestTypeText(r.type))
+          .fontSize(10).fontColor(Theme.textOnPrimary)
+          .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+          .backgroundColor(r.type === 1 ? Theme.success : Theme.warning)
+          .borderRadius(6)
+        Text(r.name + ' (' + r.stu_no + ')')
+          .fontSize(13).fontWeight(FontWeight.Medium).fontColor(Theme.textBody)
+          .layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(requestStatusText(r.status))
+          .fontSize(11)
+          .fontColor(r.status === 0 ? Theme.warning : r.status === 1 ? Theme.success : Theme.danger)
+      }.width('100%')
+
+      if (r.reason !== '') {
+        Text('理由: ' + r.reason).fontSize(11).fontColor(Theme.textSecondary).width('100%')
+      }
+      // 审批参考: 申请人当前已加入的其他社团(判据在服务端, 一人一社)
+      if (r.other_clubs !== '') {
+        Text('已加入社团: ' + r.other_clubs).fontSize(11).fontColor(Theme.primary).width('100%')
+      } else if (r.type === 1 && r.status === 0) {
+        Text('已加入社团: 暂无(首次入社)').fontSize(11).fontColor(Theme.textTertiary).width('100%')
+      }
+      Text(r.created_at).fontSize(10).fontColor(Theme.textTertiary).width('100%')
+
+      if (r.status === 0) {
+        if (this.rejectReqId === r.id) {
+          Column({ space: 6 }) {
+            TextInput({ placeholder: '请填写驳回理由(必填)', text: this.rejectReqInput })
+              .fontSize(12).height(38).width('100%')
+              .backgroundColor(Theme.bgSubtle).borderRadius(Theme.radiusMd)
+              .onChange((v: string) => { this.rejectReqInput = v; })
+            Row({ space: 8 }) {
+              Button('取消').layoutWeight(1).height(32).fontSize(12)
+                .fontColor(Theme.textSecondary).backgroundColor(Theme.bgSubtle)
+                .onClick(() => { this.rejectReqId = -1; this.rejectReqInput = ''; })
+              Button(this.reqBusy ? '提交中...' : '确认驳回')
+                .layoutWeight(1).height(32).fontSize(12)
+                .backgroundColor(Theme.danger)
+                .enabled(!this.reqBusy)
+                .onClick(() => this.auditReq(r, false))
+            }.width('100%')
+          }.width('100%').padding(8)
+          .backgroundColor(Theme.bgSubtle).borderRadius(Theme.radiusMd)
+        } else {
+          Row({ space: 10 }) {
+            Button('同意').layoutWeight(1).height(32).fontSize(12)
+              .fontColor(Theme.textOnPrimary).backgroundColor(Theme.success)
+              .borderRadius(Theme.radiusPill)
+              .enabled(!this.reqBusy)
+              .onClick(() => this.auditReq(r, true))
+            Button('驳回').layoutWeight(1).height(32).fontSize(12)
+              .fontColor(Theme.onColorDanger).backgroundColor(Theme.dangerBg)
+              .borderRadius(Theme.radiusPill)
+              .enabled(!this.reqBusy)
+              .onClick(() => this.auditReq(r, false))
+          }.width('100%')
+        }
+      } else {
+        Text('审批人 ' + (r.handler === '' ? '-' : r.handler) +
+          (r.handled_at === '' ? '' : ' · ' + r.handled_at) +
+          (r.reply === '' ? '' : ' · 回复: ' + r.reply))
+          .fontSize(10).fontColor(Theme.textTertiary).width('100%')
+      }
+    }
+    .width('100%').padding(12)
+    .backgroundColor(Theme.bgCard).borderRadius(Theme.radiusMd)
+    .margin({ left: 14, right: 14, bottom: 8 })
   }
 
   @Builder
@@ -758,149 +903,203 @@ struct AuditPage {
           Text('审核中心').fontSize(18).fontWeight(FontWeight.Bold).layoutWeight(1)
           Button('刷新').fontSize(13).height(30).backgroundColor(Theme.primary)
             .onClick(() => {
-              this.load(true);
-              this.loadRegs();
-              this.loadAppeals();
+              if (AppConfig.isClubAccount) {
+                this.load(true);
+                this.loadPendingCount();
+                this.loadMemberReqs();
+              } else {
+                this.loadRegs();
+                this.loadAppeals();
+              }
             })
         }.width('100%').padding({ left: 14, right: 14, top: 12, bottom: 8 })
 
-        // 模式切换: 报名审核 / 注册申请
+        // 模式切换: 社团账号=活动报名 + 入团审核; 平台管理员=注册申请 + 学时申诉
         Row({ space: 10 }) {
-          this.modeBtn('报名审核', 0)
-          this.modeBtn('注册申请', 1)
-          this.modeBtn('学时申诉', 2)
+          if (AppConfig.isClubAccount) {
+            this.modeBtn('活动报名', 0)
+            this.modeBtn('入团审核', 3)
+          } else {
+            this.modeBtn('注册申请', 1)
+            this.modeBtn('学时申诉', 2)
+          }
         }.width('100%').padding({ left: 14, right: 14, bottom: 8 })
 
         if (this.mode === 0) {
-          // ---- 报名审核: 活动下拉 + 关键词搜索(均在服务端生效) ----
-          Row({ space: 8 }) {
-            TextInput({ text: this.kwInput, placeholder: '搜索姓名 / 学号 / 活动名' })
-              .layoutWeight(1).height(34).fontSize(13)
-              .onChange((v: string) => this.kwInput = v)
-              .onSubmit(() => {
-                this.kw = this.kwInput;
-                this.load(true);
-              })
-            Button('搜索').fontSize(12).height(34).backgroundColor(Theme.primary)
-              .onClick(() => {
-                this.kw = this.kwInput;
-                this.load(true);
-              })
-            if (this.kw !== '') {
-              Button('清除').fontSize(12).height(34).backgroundColor(Theme.textTertiary)
-                .onClick(() => {
-                  this.kwInput = '';
-                  this.kw = '';
-                  this.load(true);
-                })
-            }
-          }.width('100%').padding({ left: 14, right: 14, bottom: 6 })
-
-          Row({ space: 8 }) {
-            Text('活动:').fontSize(12).fontColor(Theme.textSecondary)
-            Select(this.actOptions)
-              .selected(this.actIndex)
-              .value(this.actIndex < this.actNames.length ? this.actNames[this.actIndex] : '全部活动')
-              .font({ size: 12 })
-              .layoutWeight(1)
-              .onSelect((index: number) => {
-                this.actIndex = index;
-                this.load(true);
-              })
-          }.width('100%').padding({ left: 14, right: 14, bottom: 6 })
-
-          Row({ space: 8 }) {
-            this.filterBtn('全部', -1)
-            this.filterBtn('待审核', 0)
-            this.filterBtn('已通过', 1)
-            this.filterBtn('已驳回', 2)
-          }.width('100%').padding({ left: 14, right: 14, bottom: 6 })
-
-          Row() {
-            Text(this.msg).fontSize(Theme.fsSmall)
-              .fontColor(this.msgError ? Theme.danger : Theme.textTertiary)
-              .fontWeight(this.msgError ? FontWeight.Medium : FontWeight.Normal)
-              .layoutWeight(1).maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
-            if (this.pendingCount > 0) {
-              Text(this.batchBusy ? '批量处理中...' : '全部通过(' + this.pendingCount + ')')
-                .fontSize(Theme.fsSmall).fontColor(Theme.success)
-                .padding({ left: 10, right: 10, top: 4, bottom: 4 })
-                .backgroundColor(Theme.successBg).borderRadius(Theme.radiusPill)
-                .margin({ left: 8 })
-                .onClick(() => {
-                  if (!this.batchBusy) this.confirmPassAll();
-                })
-            }
-          }.width('100%').padding({ left: 14, right: 14, bottom: 6 })
-
-          if (this.rows.length === 0) {
-            Column({ space: 6 }) {
-              Text(this.loading ? '加载中...' : '没有符合条件的记录').fontSize(14).fontColor(Theme.textTertiary)
-              if (!this.loading) {
-                Text('可切换状态/活动筛选, 或清除搜索关键词').fontSize(11).fontColor(Theme.textDisabled)
-              }
-            }.width('100%').margin({ top: 60 })
-          } else {
-            Scroll() {
-              Column() {
-                ForEach(this.rows, (s: SignupInfo) => {
-                  this.item(s)
-                }, (s: SignupInfo) => s.id.toString() + '-' + s.status.toString() + '-' + s.checkin.toString())
-              }.padding({ left: 14, right: 14 })
-            }
-            .layoutWeight(1).scrollBar(BarState.Off).align(Alignment.Top)
-          }
-
-          this.pager()
-        } else if (this.mode === 1) {
-          // ---- 注册申请 ----
-          Text(this.regs.length === 0 ? '暂无待审批的注册申请' : '共 ' + this.regs.length + ' 条注册申请待审批')
-            .fontSize(12).fontColor(Theme.textTertiary).width('100%').padding({ left: 14, bottom: 6 })
-
-          if (this.regs.length === 0) {
+          // 报名审核: 搜索 / 活动 / 状态筛选 / 统计 / 列表 / 分页 全部进滚动区,
+          // 顶部只留页头 + 模式切换; 之前四行筛选钉死, 小屏上列表被挤成一条缝
+          Scroll() {
             Column() {
-              Text('暂无记录').fontSize(14).fontColor(Theme.textTertiary)
-              Text('新成员在 App 提交注册后会出现在这里').fontSize(11).fontColor(Theme.textDisabled).margin({ top: 6 })
-            }.width('100%').margin({ top: 60 })
-          } else {
-            Scroll() {
-              Column() {
-                ForEach(this.regs, (r: StudentRequest) => {
-                  this.regItem(r)
-                }, (r: StudentRequest) => r.id.toString() + '-' + r.stu_no)
-              }.padding(14)
-            }
-            .layoutWeight(1).scrollBar(BarState.Off).align(Alignment.Top)
+              // ---- 活动下拉 + 关键词搜索(均在服务端生效) ----
+              Row({ space: 8 }) {
+                TextInput({ text: this.kwInput, placeholder: '搜索姓名 / 学号 / 活动名' })
+                  .layoutWeight(1).height(34).fontSize(13)
+                  .onChange((v: string) => this.kwInput = v)
+                  .onSubmit(() => {
+                    this.kw = this.kwInput;
+                    this.load(true);
+                  })
+                Button('搜索').fontSize(12).height(34).backgroundColor(Theme.primary)
+                  .onClick(() => {
+                    this.kw = this.kwInput;
+                    this.load(true);
+                  })
+                if (this.kw !== '') {
+                  Button('清除').fontSize(12).height(34).backgroundColor(Theme.textTertiary)
+                    .onClick(() => {
+                      this.kwInput = '';
+                      this.kw = '';
+                      this.load(true);
+                    })
+                }
+              }.width('100%').padding({ left: 14, right: 14, bottom: 6 })
+
+              Row({ space: 8 }) {
+                Text('活动:').fontSize(12).fontColor(Theme.textSecondary)
+                Select(this.actOptions)
+                  .selected(this.actIndex)
+                  .value(this.actIndex < this.actNames.length ? this.actNames[this.actIndex] : '全部活动')
+                  .font({ size: 12 })
+                  .layoutWeight(1)
+                  .onSelect((index: number) => {
+                    this.actIndex = index;
+                    this.load(true);
+                  })
+              }.width('100%').padding({ left: 14, right: 14, bottom: 6 })
+
+              Row({ space: 8 }) {
+                this.filterBtn('全部', -1)
+                this.filterBtn('待审核', 0)
+                this.filterBtn('已通过', 1)
+                this.filterBtn('已驳回', 2)
+              }.width('100%').padding({ left: 14, right: 14, bottom: 6 })
+
+              Row() {
+                Text(this.msg).fontSize(Theme.fsSmall)
+                  .fontColor(this.msgError ? Theme.danger : Theme.textTertiary)
+                  .fontWeight(this.msgError ? FontWeight.Medium : FontWeight.Normal)
+                  .layoutWeight(1).maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+                if (this.pendingCount > 0) {
+                  Text(this.batchBusy ? '批量处理中...' : '全部通过(' + this.pendingCount + ')')
+                    .fontSize(Theme.fsSmall).fontColor(Theme.success)
+                    .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+                    .backgroundColor(Theme.successBg).borderRadius(Theme.radiusPill)
+                    .margin({ left: 8 })
+                    .onClick(() => {
+                      if (!this.batchBusy) this.confirmPassAll();
+                    })
+                }
+              }.width('100%').padding({ left: 14, right: 14, bottom: 6 })
+
+              if (this.rows.length === 0) {
+                Column({ space: 6 }) {
+                  Text(this.loading ? '加载中...' : '没有符合条件的记录').fontSize(14).fontColor(Theme.textTertiary)
+                  if (!this.loading) {
+                    Text('可切换状态/活动筛选, 或清除搜索关键词').fontSize(11).fontColor(Theme.textDisabled)
+                  }
+                }.width('100%').margin({ top: 60 })
+              } else {
+                Column() {
+                  ForEach(this.rows, (s: SignupInfo) => {
+                    this.item(s)
+                  }, (s: SignupInfo) => s.id.toString() + '-' + s.status.toString() + '-' + s.checkin.toString())
+                }.width('100%').padding({ left: 14, right: 14 })
+              }
+
+              this.pager()
+            }.width('100%')
           }
+          .layoutWeight(1).scrollBar(BarState.Off).align(Alignment.Top)
+        } else if (this.mode === 1) {
+          // ---- 注册申请: 统计与列表一起滚 ----
+          Scroll() {
+            Column() {
+              Text(this.regs.length === 0 ? '暂无待审批的注册申请' : '共 ' + this.regs.length + ' 条注册申请待审批')
+                .fontSize(12).fontColor(Theme.textTertiary).width('100%').padding({ left: 14, bottom: 6 })
+
+              if (this.regs.length === 0) {
+                Column() {
+                  Text('暂无记录').fontSize(14).fontColor(Theme.textTertiary)
+                  Text('新成员在 App 提交注册后会出现在这里').fontSize(11).fontColor(Theme.textDisabled).margin({ top: 6 })
+                }.width('100%').margin({ top: 60 })
+              } else {
+                Column() {
+                  ForEach(this.regs, (r: StudentRequest) => {
+                    this.regItem(r)
+                  }, (r: StudentRequest) => r.id.toString() + '-' + r.stu_no)
+                }.width('100%').padding(14)
+              }
+            }.width('100%')
+          }
+          .layoutWeight(1).scrollBar(BarState.Off).align(Alignment.Top)
+        } else if (this.mode === 3) {
+          // ---- 入团审核(社团账号): 入社/退社申请, 通过即入册/退出本社团 ----
+          Scroll() {
+            Column() {
+              Row({ space: 8 }) {
+                Text(this.reqAll ? '当前: 全部记录' : '当前: 只看待审')
+                  .fontSize(12).fontColor(Theme.textTertiary).layoutWeight(1)
+                Text(this.reqAll ? '只看待审' : '查看全部')
+                  .fontSize(12).fontColor(Theme.primary)
+                  .onClick(() => {
+                    this.reqAll = !this.reqAll;
+                    this.rejectReqId = -1;
+                    this.loadMemberReqs();
+                  })
+              }.width('100%').padding({ left: 14, right: 14, bottom: 6 })
+
+              if (this.msg !== '') {
+                Text(this.msg).fontSize(12)
+                  .fontColor(this.msgError ? Theme.danger : Theme.textTertiary)
+                  .width('100%').padding({ left: 14, right: 14, bottom: 6 })
+              }
+
+              if (this.memberReqs.length === 0) {
+                Column({ space: 6 }) {
+                  Text(this.reqAll ? '暂无申请记录' : '暂无待审的入社/退社申请')
+                    .fontSize(14).fontColor(Theme.textTertiary)
+                  Text('成员在「社团广场」申请加入, 或在「我的」里申请退出后会出现在这里')
+                    .fontSize(11).fontColor(Theme.textDisabled).textAlign(TextAlign.Center)
+                }.width('100%').margin({ top: 50 }).padding({ left: 30, right: 30 })
+              } else {
+                ForEach(this.memberReqs, (r: MemberRequest) => {
+                  this.reqCard(r)
+                }, (r: MemberRequest) => r.id.toString() + '-' + r.status.toString())
+              }
+            }.width('100%')
+          }
+          .layoutWeight(1).scrollBar(BarState.Off).align(Alignment.Top)
         } else {
           // ---- 学时申诉(v4.0): 学生在"我的报名"发起, 管理员在这里复核 ----
-          Row({ space: 8 }) {
-            this.appealFilterBtn('待处理', 0)
-            this.appealFilterBtn('已通过', 1)
-            this.appealFilterBtn('已驳回', 2)
-            this.appealFilterBtn('全部', -1)
-          }.width('100%').padding({ left: 14, right: 14, bottom: 6 })
+          Scroll() {
+            Column() {
+              Row({ space: 8 }) {
+                this.appealFilterBtn('待处理', 0)
+                this.appealFilterBtn('已通过', 1)
+                this.appealFilterBtn('已驳回', 2)
+                this.appealFilterBtn('全部', -1)
+              }.width('100%').padding({ left: 14, right: 14, bottom: 6 })
 
-          Text('共 ' + this.appealTotal + ' 条申诉' +
-            (this.appealPending > 0 ? ' · 待处理 ' + this.appealPending + ' 条' : ''))
-            .fontSize(12).fontColor(Theme.textTertiary).width('100%').padding({ left: 14, bottom: 6 })
+              Text('共 ' + this.appealTotal + ' 条申诉' +
+                (this.appealPending > 0 ? ' · 待处理 ' + this.appealPending + ' 条' : ''))
+                .fontSize(12).fontColor(Theme.textTertiary).width('100%').padding({ left: 14, bottom: 6 })
 
-          if (this.appeals.length === 0) {
-            Column({ space: 6 }) {
-              Text('暂无符合条件的申诉').fontSize(14).fontColor(Theme.textTertiary)
-              Text('成员在「我的报名」对已通过记录点「学时申诉」后会出现在这里')
-                .fontSize(11).fontColor(Theme.textDisabled)
-            }.width('100%').margin({ top: 50 })
-          } else {
-            Scroll() {
-              Column() {
-                ForEach(this.appeals, (a: AppealInfo) => {
-                  this.appealItem(a)
-                }, (a: AppealInfo) => a.id.toString() + '-' + a.status.toString() + '-' + a.hours_after.toString())
-              }.padding({ left: 14, right: 14 })
-            }
-            .layoutWeight(1).scrollBar(BarState.Off).align(Alignment.Top)
+              if (this.appeals.length === 0) {
+                Column({ space: 6 }) {
+                  Text('暂无符合条件的申诉').fontSize(14).fontColor(Theme.textTertiary)
+                  Text('成员在「我的报名」对已通过记录点「学时申诉」后会出现在这里')
+                    .fontSize(11).fontColor(Theme.textDisabled)
+                }.width('100%').margin({ top: 50 })
+              } else {
+                Column() {
+                  ForEach(this.appeals, (a: AppealInfo) => {
+                    this.appealItem(a)
+                  }, (a: AppealInfo) => a.id.toString() + '-' + a.status.toString() + '-' + a.hours_after.toString())
+                }.width('100%').padding({ left: 14, right: 14 })
+              }
+            }.width('100%')
           }
+          .layoutWeight(1).scrollBar(BarState.Off).align(Alignment.Top)
         }
       }
     }

@@ -167,7 +167,7 @@ struct RegisterPage {
                 Text(this.msg).fontSize(12).fontColor(Theme.textSecondary).textAlign(TextAlign.Center)
                 Row({ space: 10 }) {
                   Button('去登录').layoutWeight(1).height(40).fontSize(14).backgroundColor(Theme.primary)
-                    .onClick(() => router.replaceUrl({ url: 'pages/LoginPage' }))
+                    .onClick(() => router.replaceUrl({ url: 'pages/LandingPage' }))
                   Button('再注册一个').layoutWeight(1).height(40).fontSize(14).backgroundColor(Theme.textSecondary)
                     .onClick(() => this.reset())
                 }.width('100%').margin({ top: 6 })

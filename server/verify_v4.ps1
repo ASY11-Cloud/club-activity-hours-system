@@ -8,6 +8,9 @@
 # 退出码 0 = 全绿；1 = 有失败
 # =====================================================================
 $ErrorActionPreference = 'Stop'
+
+# 本脚本断言依赖中文比对, 必须按 UTF-8 解码子进程输出(控制台默认 GBK 会把 mysql 的 utf8 输出读成乱码)
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $env:MYSQL_PWD = '123456'
 $MYSQL = 'C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe'
 $BASE = 'http://127.0.0.1:8000'
@@ -230,3 +233,4 @@ Write-Host ''
 Write-Host ("结果: " + $script:pass + " 通过, " + $script:fail + " 失败")
 if ($script:fail -gt 0) { exit 1 }
 exit 0
+

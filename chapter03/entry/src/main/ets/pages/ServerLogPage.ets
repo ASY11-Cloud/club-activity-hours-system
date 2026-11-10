@@ -29,8 +29,9 @@ struct ServerLogPage {
   aboutToAppear(): void {
     const ctx = getContext(this) as common.UIAbilityContext;
     AppConfig.init(ctx).then(() => {
-      if (!AppConfig.isAdmin) {
-        this.blocked = true; // 无权限: 仅管理员可查看服务器日志
+      if (!AppConfig.isAdmin || AppConfig.isClubAccount) {
+        // 无权限: 服务器日志是全平台请求日志, 仅平台管理员(club_id=0)可查看, 社团账号不可见
+        this.blocked = true;
         return;
       }
       this.load();
@@ -155,62 +156,75 @@ struct ServerLogPage {
             .onClick(() => this.load())
         }.width('100%').padding({ left: 14, right: 14, top: 12, bottom: 6 })
 
-        // 级别 + 方法筛选
-        Row({ space: 6 }) {
-          this.chip('全部', this.level === '', 'level', '')
-          this.chip('失败', this.level === 'err', 'level', 'err')
-          this.chip('慢请求', this.level === 'slow', 'level', 'slow')
-          Row().width(1).height(14).backgroundColor(Theme.divider).margin({ left: 2, right: 2 })
-          this.chip('ALL', this.method === '', 'method', '')
-          this.chip('GET', this.method === 'GET', 'method', 'GET')
-          this.chip('POST', this.method === 'POST', 'method', 'POST')
-        }.width('100%').padding({ left: 14, right: 14, bottom: 6 })
-
-        // 路径关键词
-        Row({ space: 8 }) {
-          TextInput({ text: this.kwInput, placeholder: '按路径关键词过滤(如 /api/signup)' })
-            .layoutWeight(1).height(32).fontSize(12)
-            .onChange((v: string) => this.kwInput = v)
-            .onSubmit(() => {
-              this.kw = this.kwInput;
-              this.applyFilter();
-            })
-          Button('过滤').fontSize(12).height(32).backgroundColor(Theme.primary)
-            .onClick(() => {
-              this.kw = this.kwInput;
-              this.applyFilter();
-            })
-          if (this.kw !== '') {
-            Button('清除').fontSize(12).height(32).backgroundColor(Theme.textTertiary)
-              .onClick(() => {
-                this.kwInput = '';
-                this.kw = '';
-                this.applyFilter();
-              })
+        // 筛选条也随页滚动: 之前两行筛选 + 提示钉死在顶部, 日志区只剩半屏
+        List({ space: 0 }) {
+          // 级别 + 方法筛选
+          ListItem() {
+            Row({ space: 6 }) {
+              this.chip('全部', this.level === '', 'level', '')
+              this.chip('失败', this.level === 'err', 'level', 'err')
+              this.chip('慢请求', this.level === 'slow', 'level', 'slow')
+              Row().width(1).height(14).backgroundColor(Theme.divider).margin({ left: 2, right: 2 })
+              this.chip('ALL', this.method === '', 'method', '')
+              this.chip('GET', this.method === 'GET', 'method', 'GET')
+              this.chip('POST', this.method === 'POST', 'method', 'POST')
+            }.width('100%').padding({ left: 14, right: 14, bottom: 6 })
           }
-        }.width('100%').padding({ left: 14, right: 14, bottom: 6 })
 
-        Text(this.msg).fontSize(12).fontColor(Theme.textTertiary).width('100%').padding({ left: 14, bottom: 6 })
+          // 路径关键词
+          ListItem() {
+            Row({ space: 8 }) {
+              TextInput({ text: this.kwInput, placeholder: '按路径关键词过滤(如 /api/signup)' })
+                .layoutWeight(1).height(32).fontSize(12)
+                .onChange((v: string) => this.kwInput = v)
+                .onSubmit(() => {
+                  this.kw = this.kwInput;
+                  this.applyFilter();
+                })
+              Button('过滤').fontSize(12).height(32).backgroundColor(Theme.primary)
+                .onClick(() => {
+                  this.kw = this.kwInput;
+                  this.applyFilter();
+                })
+              if (this.kw !== '') {
+                Button('清除').fontSize(12).height(32).backgroundColor(Theme.textTertiary)
+                  .onClick(() => {
+                    this.kwInput = '';
+                    this.kw = '';
+                    this.applyFilter();
+                  })
+              }
+            }.width('100%').padding({ left: 14, right: 14, bottom: 6 })
+          }
 
-        if (this.logs.length === 0) {
-          Column({ space: 10 }) {
-            Text(this.msg === '' ? '加载中...' : '没有符合条件的日志')
-              .fontSize(14).fontColor(Theme.textTertiary)
-            Text('每当 App 请求服务器, 这里会实时显示(同时写入 MySQL request_log)')
-              .fontSize(12).fontColor(Theme.textDisabled).textAlign(TextAlign.Center)
-          }.width('100%').margin({ top: 60 }).padding({ left: 30, right: 30 })
-        } else {
-          List({ space: 0 }) {
+          if (this.msg !== '') {
+            ListItem() {
+              Text(this.msg).fontSize(12).fontColor(Theme.textTertiary)
+                .width('100%').padding({ left: 14, right: 14, bottom: 6 })
+            }
+          }
+
+          if (this.logs.length === 0) {
+            ListItem() {
+              Column({ space: 10 }) {
+                Text(this.msg === '' ? '加载中...' : '没有符合条件的日志')
+                  .fontSize(14).fontColor(Theme.textTertiary)
+                Text('每当 App 请求服务器, 这里会实时显示(同时写入 MySQL request_log)')
+                  .fontSize(12).fontColor(Theme.textDisabled).textAlign(TextAlign.Center)
+              }.width('100%').margin({ top: 60 }).padding({ left: 30, right: 30 })
+            }
+          } else {
             ForEach(this.logs, (l: LogRow) => {
               ListItem() {
                 this.item(l)
-              }
+              }.padding({ left: 14, right: 14 })
             }, (l: LogRow) => l.time + l.method + l.path + l.ip + l.cost_ms)
           }
-          .layoutWeight(1)
-          .scrollBar(BarState.Off)
-          .padding({ left: 14, right: 14 })
         }
+        .layoutWeight(1)
+        .scrollBar(BarState.Off)
+        .edgeEffect(EdgeEffect.Spring)
+        .padding({ top: 2, bottom: 12 })
       }
     }
     .width('100%').height('100%').backgroundColor(Theme.bgPage)

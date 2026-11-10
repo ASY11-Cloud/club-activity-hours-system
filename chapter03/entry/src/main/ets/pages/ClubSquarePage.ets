@@ -202,32 +202,48 @@ struct ClubSquarePage {
   build() {
     Column() {
       this.header()
-      // 搜索框
-      Row({ space: 8 }) {
-        Text('🔍').fontSize(14)
-        TextInput({ placeholder: '搜索社团名称 / 简介 / 挂靠单位', text: this.kw })
-          .fontSize(Theme.fsSmall).layoutWeight(1)
-          .backgroundColor(Theme.bgSubtle).borderRadius(Theme.radiusPill)
-          .onChange((v: string) => { this.kw = v; })
-      }
-      .width('100%').padding({ left: Theme.pagePadding, right: Theme.pagePadding, bottom: 8 })
 
-      this.tabs()
+      // 搜索与分段一起随页滚动: 只留标题栏固定, 社团卡不再被压成半屏
+      List({ space: 10 }) {
+        // 搜索框
+        ListItem() {
+          Row({ space: 8 }) {
+            Text('搜').fontSize(Theme.fsSmall).fontColor(Theme.textTertiary)
+            TextInput({ placeholder: '搜索社团名称 / 简介 / 挂靠单位', text: this.kw })
+              .fontSize(Theme.fsSmall).layoutWeight(1)
+              .backgroundColor(Theme.bgSubtle).borderRadius(Theme.radiusPill)
+              .onChange((v: string) => { this.kw = v; })
+          }
+          .width('100%').padding({ left: Theme.pagePadding, right: Theme.pagePadding })
+        }
 
-      if (this.loading) {
-        StateView({ kind: 'loading', title: '正在加载社团' })
-      } else if (this.loadError !== '') {
-        StateView({ kind: 'error', title: '社团加载失败', desc: this.loadError,
-          onRetry: () => { this.load(); } })
-      } else if (this.visible().length === 0) {
-        StateView({ kind: 'empty', title: this.tab === 'mine' ? '还没有加入任何社团' : '暂无社团',
-          desc: this.tab === 'mine' ? '到「全部社团」里逛逛, 申请加入感兴趣的组织' : '' })
-      } else {
-        List({ space: 10 }) {
+        ListItem() {
+          this.tabs()
+        }
+
+        if (this.loading) {
+          ListItem() {
+            StateView({ kind: 'loading', title: '正在加载社团' })
+          }
+        } else if (this.loadError !== '') {
+          ListItem() {
+            StateView({
+              kind: 'error', title: '社团加载失败', desc: this.loadError,
+              onRetry: () => { this.load(); }
+            })
+          }
+        } else if (this.visible().length === 0) {
+          ListItem() {
+            StateView({
+              kind: 'empty', title: this.tab === 'mine' ? '还没有加入任何社团' : '暂无社团',
+              desc: this.tab === 'mine' ? '到「全部社团」里逛逛, 申请加入感兴趣的组织' : ''
+            })
+          }
+        } else {
           ForEach(this.visible(), (c: ClubSquareInfo) => {
             ListItem() {
               this.clubCard(c)
-            }
+            }.padding({ left: Theme.pagePadding, right: Theme.pagePadding })
           }, (c: ClubSquareInfo) => c.club_id.toString())
           ListItem() {
             Text('共 ' + this.visible().length + ' 个社团 · 状态以服务端为准')
@@ -235,11 +251,12 @@ struct ClubSquarePage {
               .width('100%').textAlign(TextAlign.Center).padding({ top: 4, bottom: 12 })
           }
         }
-        .layoutWeight(1)
-        .width('100%')
-        .padding({ left: Theme.pagePadding, right: Theme.pagePadding })
-        .scrollBar(BarState.Off)
       }
+      .layoutWeight(1)
+      .width('100%')
+      .scrollBar(BarState.Off)
+      .edgeEffect(EdgeEffect.Spring)
+      .padding({ bottom: 8 })
     }
     .width('100%').height('100%')
     .backgroundColor(Theme.bgPage)

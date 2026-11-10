@@ -371,153 +371,7 @@ struct HoursReportPage {
             .onClick(() => this.load())
         }.width('100%').padding({ left: 14, right: 14, top: 12, bottom: 6 })
 
-        // 管理员设置(达标线 + 重算), 收纳为一张卡片降低顶部信息密度
-        if (AppConfig.isAdmin) {
-          Column({ space: 8 }) {
-            Row({ space: 6 }) {
-              Text('学时达标线').fontSize(11).fontColor(Theme.textSecondary)
-              TextInput({ text: this.requiredInput, placeholder: '0 不设线' })
-                .type(InputType.NUMBER_DECIMAL).height(28).width(76).fontSize(12)
-                .onChange((v: string) => this.requiredInput = v)
-              Text('学时').fontSize(11).fontColor(Theme.textSecondary)
-              Button('保存').fontSize(11).height(26).backgroundColor(Theme.primary)
-                .onClick(() => this.saveRequired())
-              Text(this.requiredHours > 0 ? '已达标 ' + this.achievedCount + ' 人' : '未设线')
-                .fontSize(11).fontColor(Theme.textTertiary).layoutWeight(1).textAlign(TextAlign.End)
-            }.width('100%')
-
-            Row().width('100%').height(0.5).backgroundColor(Theme.divider)
-
-            Row({ space: 6 }) {
-              Text(AppConfig.isClubAccount
-                ? '学时归属「活动所属社团」: 公开活动带来的外社团参与也计入本社团'
-                : '汇总由服务端审核事务自动累计, 可一键重算修复历史漂移')
-                .fontSize(10).fontColor(Theme.textTertiary).layoutWeight(1)
-              Button('重算学时').fontSize(11).height(26).backgroundColor(Theme.admin)
-                .onClick(() => this.rebuild())
-            }.width('100%')
-          }
-          .width('100%').padding(12).margin({ left: 14, right: 14, bottom: 8 })
-          .backgroundColor(Theme.bgCard).borderRadius(12)
-        }
-
-        // CSV 导出: 导出当前标签页(排行 / 明细), 便于交作业或表格留档
-        Row({ space: 8 }) {
-          Text(this.requiredHours > 0 && !AppConfig.isAdmin
-            ? '达标线 ' + this.requiredHours + ' 学时 · 已达标 ' + this.achievedCount + ' 人'
-            : (this.tab === 0 ? '当前: 学时排行' : '当前: 认定明细'))
-            .fontSize(10).fontColor(Theme.textTertiary).layoutWeight(1)
-          Button(this.exporting ? '导出中...' : '导出CSV').fontSize(11).height(26).backgroundColor(Theme.report)
-            .enabled(!this.exporting).onClick(() => this.exportCsv())
-        }.width('100%').padding({ left: 14, right: 14, bottom: 6 })
-
-        // 本地 vs 服务器 双端对比卡
-        Row({ space: 10 }) {
-          Column({ space: 3 }) {
-            Text(AppConfig.isAdmin ? '本地 SQLite 全量' : '本地 SQLite 统计').fontSize(11).fontColor(Theme.textTertiary)
-            Text(this.localHours + '').fontSize(20).fontWeight(FontWeight.Bold).fontColor(Theme.primary)
-            Text('通过 ' + this.localCount + ' 条').fontSize(11).fontColor(Theme.textTertiary)
-          }.layoutWeight(1).padding(12).backgroundColor(Theme.primaryBg).borderRadius(12)
-
-          Column({ space: 3 }) {
-            Text(AppConfig.isAdmin ? '服务器全量学时' : '我的服务器学时').fontSize(11).fontColor(Theme.textTertiary)
-            Text((AppConfig.isAdmin ? this.serverTotal : this.serverHours()) + '')
-              .fontSize(20).fontWeight(FontWeight.Bold).fontColor(Theme.success)
-            Text(this.serverSubText()).fontSize(11).fontColor(Theme.textTertiary)
-          }.layoutWeight(1).padding(12).backgroundColor(Theme.successBg).borderRadius(12)
-        }.width('100%').padding({ left: 14, right: 14, bottom: 8 })
-
-        // v5.0 社团维度统计卡(仅社团账号): 参与范围分布 + 公开活动的外部参与
-        if (this.csLoaded) {
-          Column({ space: 8 }) {
-            Row({ space: 6 }) {
-              Text('社团维度统计').fontSize(13).fontWeight(FontWeight.Medium).fontColor(Theme.textPrimary)
-                .layoutWeight(1)
-              Text('按活动所属社团归集').fontSize(10).fontColor(Theme.textTertiary)
-            }.width('100%')
-
-            Row({ space: 10 }) {
-              Column({ space: 3 }) {
-                Text('仅本社团活动').fontSize(11).fontColor(Theme.textTertiary)
-                Text(this.csInternal.toString()).fontSize(18).fontWeight(FontWeight.Bold)
-                  .fontColor(Theme.primary)
-              }.layoutWeight(1).padding(10).backgroundColor(Theme.primaryBg).borderRadius(Theme.radiusSm)
-
-              Column({ space: 3 }) {
-                Text('全校开放活动').fontSize(11).fontColor(Theme.textTertiary)
-                Text(this.csPublic.toString()).fontSize(18).fontWeight(FontWeight.Bold)
-                  .fontColor(Theme.success)
-              }.layoutWeight(1).padding(10).backgroundColor(Theme.successBg).borderRadius(Theme.radiusSm)
-
-              Column({ space: 3 }) {
-                Text('通过率').fontSize(11).fontColor(Theme.textTertiary)
-                Text((Math.round(this.csPassRate * 10) / 10).toString() + '%')
-                  .fontSize(18).fontWeight(FontWeight.Bold).fontColor(Theme.report)
-              }.layoutWeight(1).padding(10).backgroundColor(Theme.reportBg).borderRadius(Theme.radiusSm)
-            }.width('100%')
-
-            Row({ space: 6 }) {
-              Text('外社团参与').fontSize(11).fontColor(Theme.textSecondary)
-              Text(this.csOutsider.toString() + ' 人 / ' + this.csOutsiderJoin.toString() + ' 次')
-                .fontSize(12).fontWeight(FontWeight.Medium).fontColor(Theme.warning)
-              Text('（仅全校开放活动可产生）').fontSize(10)
-                .fontColor(Theme.textTertiary).layoutWeight(1)
-            }.width('100%')
-          }
-          .width('100%').padding(12).margin({ left: 14, right: 14, bottom: 8 })
-          .backgroundColor(Theme.bgCard).borderRadius(Theme.radiusMd).alignItems(HorizontalAlign.Start)
-        }
-
-        // 双端一致判定: 本地缓存相对服务器可能滞后(审核结果在服务器), 一键校准后再比对
-        Row({ space: 8 }) {
-          Text(this.bothSame()
-            ? '双端一致: 学时与记录条数均与服务器相同'
-            : '两端不一致: 差 ' +
-              (Math.round(Math.abs(this.localHours - this.serverMine()) * 10) / 10) + ' 学时 / ' +
-              Math.abs(this.localCount - this.detail.length) + ' 条(服务器审核后本地未刷新)')
-            .fontSize(11)
-            .fontColor(this.bothSame() ? Theme.success : Theme.warning)
-            .layoutWeight(1)
-          Button(this.calibrating ? '校准中...' : '校准本地缓存')
-            .fontSize(11).height(26).backgroundColor(Theme.primary)
-            .enabled(!this.calibrating)
-            .onClick(() => this.calibrate())
-        }.width('100%').padding({ left: 14, right: 14, bottom: 8 })
-
-        // 可视化: 达标率环形图 + 分类学时条形图(纯布局实现, 不引第三方图表库)
-        if (this.report.length > 0) {
-          Column({ space: 10 }) {
-            Row({ space: 12 }) {
-              Stack() {
-                Progress({ value: this.achievePct(), total: 100, type: ProgressType.Ring })
-                  .width(64).height(64).color(Theme.success).backgroundColor(Theme.bgNeutral)
-                Column({ space: 0 }) {
-                  Text(this.achievePct().toString() + '%')
-                    .fontSize(14).fontWeight(FontWeight.Bold).fontColor(Theme.textPrimary)
-                  Text('达标率').fontSize(9).fontColor(Theme.textTertiary)
-                }
-              }
-
-              Column({ space: 4 }) {
-                Text('已达标 ' + this.achievedCount + ' / ' + this.report.length + ' 人')
-                  .fontSize(13).fontWeight(FontWeight.Medium).fontColor(Theme.textPrimary)
-                Text(this.requiredHours > 0 ? '达标线 ' + this.requiredHours + ' 学时' : '未设置达标线')
-                  .fontSize(11).fontColor(Theme.textTertiary)
-                Text('合计 ' + this.serverTotal + ' 学时 · 分类 ' + this.categoryStats.length + ' 类')
-                  .fontSize(11).fontColor(Theme.textTertiary)
-              }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-            }.width('100%')
-
-            if (this.categoryStats.length > 0) {
-              ForEach(this.categoryStats, (c: CategoryStat) => {
-                this.categoryBar(c)
-              }, (c: CategoryStat) => c.category + '-' + c.hours.toString())
-            }
-          }
-          .width('100%').padding(12).margin({ left: 14, right: 14, bottom: 8 })
-          .backgroundColor(Theme.bgCard).borderRadius(12)
-        }
-
+        // 页签固定在页头下方(仅一行): 排行/明细/预警/异常随时可切, 不用滚回顶部
         Row({ space: 8 }) {
           this.tabBtn('学时排行', 0)
           this.tabBtn('认定明细', 1)
@@ -527,10 +381,160 @@ struct HoursReportPage {
           }
         }.width('100%').padding({ left: 14, right: 14, bottom: 8 })
 
-        Text(this.msg).fontSize(12).fontColor(Theme.textTertiary).width('100%').padding({ left: 14, bottom: 6 })
-
+        // 概览与图表全部进滚动区: 之前七八块统计钉在顶部占掉 2/3 屏, 列表只剩一条缝
         Scroll() {
           Column() {
+            // 管理员设置(达标线 + 重算), 收纳为一张卡片降低顶部信息密度
+            if (AppConfig.isAdmin) {
+              Column({ space: 8 }) {
+                Row({ space: 6 }) {
+                  Text('学时达标线').fontSize(11).fontColor(Theme.textSecondary)
+                  TextInput({ text: this.requiredInput, placeholder: '0 不设线' })
+                    .type(InputType.NUMBER_DECIMAL).height(28).width(76).fontSize(12)
+                    .onChange((v: string) => this.requiredInput = v)
+                  Text('学时').fontSize(11).fontColor(Theme.textSecondary)
+                  Button('保存').fontSize(11).height(26).backgroundColor(Theme.primary)
+                    .onClick(() => this.saveRequired())
+                  Text(this.requiredHours > 0 ? '已达标 ' + this.achievedCount + ' 人' : '未设线')
+                    .fontSize(11).fontColor(Theme.textTertiary).layoutWeight(1).textAlign(TextAlign.End)
+                }.width('100%')
+
+                Row().width('100%').height(0.5).backgroundColor(Theme.divider)
+
+                Row({ space: 6 }) {
+                  Text(AppConfig.isClubAccount
+                    ? '学时归属「活动所属社团」: 公开活动带来的外社团参与也计入本社团'
+                    : '汇总由服务端审核事务自动累计, 可一键重算修复历史漂移')
+                    .fontSize(10).fontColor(Theme.textTertiary).layoutWeight(1)
+                  Button('重算学时').fontSize(11).height(26).backgroundColor(Theme.admin)
+                    .onClick(() => this.rebuild())
+                }.width('100%')
+              }
+              .width('100%').padding(12).margin({ bottom: 8 })
+              .backgroundColor(Theme.bgCard).borderRadius(12)
+            }
+
+            // CSV 导出: 导出当前标签页(排行 / 明细), 便于交作业或表格留档
+            Row({ space: 8 }) {
+              Text(this.requiredHours > 0 && !AppConfig.isAdmin
+                ? '达标线 ' + this.requiredHours + ' 学时 · 已达标 ' + this.achievedCount + ' 人'
+                : (this.tab === 0 ? '当前: 学时排行' : '当前: 认定明细'))
+                .fontSize(10).fontColor(Theme.textTertiary).layoutWeight(1)
+              Button(this.exporting ? '导出中...' : '导出CSV').fontSize(11).height(26).backgroundColor(Theme.report)
+                .enabled(!this.exporting).onClick(() => this.exportCsv())
+            }.width('100%').padding({ bottom: 6 })
+
+            // 本地 vs 服务器 双端对比卡
+            Row({ space: 10 }) {
+              Column({ space: 3 }) {
+                Text(AppConfig.isAdmin ? '本地 SQLite 全量' : '本地 SQLite 统计')
+                  .fontSize(11).fontColor(Theme.textTertiary)
+                Text(this.localHours + '').fontSize(20).fontWeight(FontWeight.Bold).fontColor(Theme.primary)
+                Text('通过 ' + this.localCount + ' 条').fontSize(11).fontColor(Theme.textTertiary)
+              }.layoutWeight(1).padding(12).backgroundColor(Theme.primaryBg).borderRadius(12)
+
+              Column({ space: 3 }) {
+                Text(AppConfig.isAdmin ? '服务器全量学时' : '我的服务器学时')
+                  .fontSize(11).fontColor(Theme.textTertiary)
+                Text((AppConfig.isAdmin ? this.serverTotal : this.serverHours()) + '')
+                  .fontSize(20).fontWeight(FontWeight.Bold).fontColor(Theme.success)
+                Text(this.serverSubText()).fontSize(11).fontColor(Theme.textTertiary)
+              }.layoutWeight(1).padding(12).backgroundColor(Theme.successBg).borderRadius(12)
+            }.width('100%').padding({ bottom: 8 })
+
+            // v5.0 社团维度统计卡(仅社团账号): 参与范围分布 + 公开活动的外部参与
+            if (this.csLoaded) {
+              Column({ space: 8 }) {
+                Row({ space: 6 }) {
+                  Text('社团维度统计').fontSize(13).fontWeight(FontWeight.Medium).fontColor(Theme.textPrimary)
+                    .layoutWeight(1)
+                  Text('按活动所属社团归集').fontSize(10).fontColor(Theme.textTertiary)
+                }.width('100%')
+
+                Row({ space: 10 }) {
+                  Column({ space: 3 }) {
+                    Text('仅本社团活动').fontSize(11).fontColor(Theme.textTertiary)
+                    Text(this.csInternal.toString()).fontSize(18).fontWeight(FontWeight.Bold)
+                      .fontColor(Theme.primary)
+                  }.layoutWeight(1).padding(10).backgroundColor(Theme.primaryBg).borderRadius(Theme.radiusSm)
+
+                  Column({ space: 3 }) {
+                    Text('全校开放活动').fontSize(11).fontColor(Theme.textTertiary)
+                    Text(this.csPublic.toString()).fontSize(18).fontWeight(FontWeight.Bold)
+                      .fontColor(Theme.success)
+                  }.layoutWeight(1).padding(10).backgroundColor(Theme.successBg).borderRadius(Theme.radiusSm)
+
+                  Column({ space: 3 }) {
+                    Text('通过率').fontSize(11).fontColor(Theme.textTertiary)
+                    Text((Math.round(this.csPassRate * 10) / 10).toString() + '%')
+                      .fontSize(18).fontWeight(FontWeight.Bold).fontColor(Theme.report)
+                  }.layoutWeight(1).padding(10).backgroundColor(Theme.reportBg).borderRadius(Theme.radiusSm)
+                }.width('100%')
+
+                Row({ space: 6 }) {
+                  Text('外社团参与').fontSize(11).fontColor(Theme.textSecondary)
+                  Text(this.csOutsider.toString() + ' 人 / ' + this.csOutsiderJoin.toString() + ' 次')
+                    .fontSize(12).fontWeight(FontWeight.Medium).fontColor(Theme.warning)
+                  Text('（仅全校开放活动可产生）').fontSize(10)
+                    .fontColor(Theme.textTertiary).layoutWeight(1)
+                }.width('100%')
+              }
+              .width('100%').padding(12).margin({ bottom: 8 })
+              .backgroundColor(Theme.bgCard).borderRadius(Theme.radiusMd).alignItems(HorizontalAlign.Start)
+            }
+
+            // 双端一致判定: 本地缓存相对服务器可能滞后(审核结果在服务器), 一键校准后再比对
+            Row({ space: 8 }) {
+              Text(this.bothSame()
+                ? '双端一致: 学时与记录条数均与服务器相同'
+                : '两端不一致: 差 ' +
+                  (Math.round(Math.abs(this.localHours - this.serverMine()) * 10) / 10) + ' 学时 / ' +
+                  Math.abs(this.localCount - this.detail.length) + ' 条(服务器审核后本地未刷新)')
+                .fontSize(11)
+                .fontColor(this.bothSame() ? Theme.success : Theme.warning)
+                .layoutWeight(1)
+              Button(this.calibrating ? '校准中...' : '校准本地缓存')
+                .fontSize(11).height(26).backgroundColor(Theme.primary)
+                .enabled(!this.calibrating)
+                .onClick(() => this.calibrate())
+            }.width('100%').padding({ bottom: 8 })
+
+            // 可视化: 达标率环形图 + 分类学时条形图(纯布局实现, 不引第三方图表库)
+            if (this.report.length > 0) {
+              Column({ space: 10 }) {
+                Row({ space: 12 }) {
+                  Stack() {
+                    Progress({ value: this.achievePct(), total: 100, type: ProgressType.Ring })
+                      .width(64).height(64).color(Theme.success).backgroundColor(Theme.bgNeutral)
+                    Column({ space: 0 }) {
+                      Text(this.achievePct().toString() + '%')
+                        .fontSize(14).fontWeight(FontWeight.Bold).fontColor(Theme.textPrimary)
+                      Text('达标率').fontSize(9).fontColor(Theme.textTertiary)
+                    }
+                  }
+
+                  Column({ space: 4 }) {
+                    Text('已达标 ' + this.achievedCount + ' / ' + this.report.length + ' 人')
+                      .fontSize(13).fontWeight(FontWeight.Medium).fontColor(Theme.textPrimary)
+                    Text(this.requiredHours > 0 ? '达标线 ' + this.requiredHours + ' 学时' : '未设置达标线')
+                      .fontSize(11).fontColor(Theme.textTertiary)
+                    Text('合计 ' + this.serverTotal + ' 学时 · 分类 ' + this.categoryStats.length + ' 类')
+                      .fontSize(11).fontColor(Theme.textTertiary)
+                  }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+                }.width('100%')
+
+                if (this.categoryStats.length > 0) {
+                  ForEach(this.categoryStats, (c: CategoryStat) => {
+                    this.categoryBar(c)
+                  }, (c: CategoryStat) => c.category + '-' + c.hours.toString())
+                }
+              }
+              .width('100%').padding(12).margin({ bottom: 8 })
+              .backgroundColor(Theme.bgCard).borderRadius(12)
+            }
+
+            Text(this.msg).fontSize(12).fontColor(Theme.textTertiary).width('100%').padding({ bottom: 6 })
+
             if (this.tab === 0) {
               if (this.report.length === 0) {
                 Text('暂无学时记录, 审核通过报名后自动累计').fontSize(13).fontColor(Theme.textDisabled).margin({ top: 40 })

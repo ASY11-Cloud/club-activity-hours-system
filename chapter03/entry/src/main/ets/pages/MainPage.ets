@@ -16,7 +16,7 @@ import { AppConfig } from '../common/AppConfig';
 import { ApiClient } from '../common/ApiClient';
 import {
   ActivityInfo, HoursRow, SignupInfo, parseActivities, parseHoursReport, parseSignups,
-  totalOf, hasMoreOf, CATEGORY_KEYS, categoryText
+  totalOf, hasMoreOf, categoryText
 } from '../common/Models';
 import { Nav } from '../common/Nav';
 import { Theme } from '../common/Theme';
@@ -33,6 +33,9 @@ struct MainPage {
   @State isAdmin: boolean = AppConfig.isAdmin;
   @State name: string = AppConfig.stuName;
   @State stuNo: string = AppConfig.stuNo;
+  // v5.0: 社团账号的「我的」页以社团为主体展示 —— 主标题是社团名, 社长名以小字展示
+  @State isClub: boolean = AppConfig.isClubAccount;
+  @State clubName: string = AppConfig.clubName;
 
   // ---- 活动列表 ----
   @State activities: ActivityInfo[] = [];
@@ -46,8 +49,8 @@ struct MainPage {
   @State loadFailed: boolean = false;
 
   // ---- 筛选 / 搜索(全部在服务端生效) ----
+  // v5.0: 顶部"活动类别"筛选条已按需求移除, 类别口径只在服务端与统计页保留
   @State scope: string = 'all';
-  @State category: string = '';   // '' = 全部类别, 否则为七大类 key
   @State kw: string = '';
   @State kwInput: string = '';
   @State searchOpen: boolean = false;
@@ -115,7 +118,6 @@ struct MainPage {
     let q = '/api/activity/list?page=' + page.toString() + '&size=' + PAGE_SIZE.toString();
     if (this.scope !== 'all') q += '&scope=' + this.scope;
     if (this.scope === 'mine' && this.stuNo !== '') q += '&stu_no=' + encodeURIComponent(this.stuNo);
-    if (this.category !== '') q += '&category=' + this.category;
     if (this.kw !== '') q += '&kw=' + encodeURIComponent(this.kw);
     return q;
   }
@@ -200,9 +202,14 @@ struct MainPage {
     this.mySignupActs = ids;
   }
 
-  /** 管理员待办: 待审报名 / 待批注册; 社团账号则统计待审入社退社申请 */
+  /** 管理员待办: 社团账号=本社团待审报名 + 待审入团申请; 平台管理员=待批注册 */
   async loadPending(): Promise<void> {
     if (AppConfig.isClubAccount) {
+      const p = await ApiClient.get('/api/stats/pending');
+      if (p['code'] === 0) {
+        const pd = p['data'] as Record<string, Object>;
+        this.pendingSignup = Number(pd['signup_pending']);
+      }
       const resp = await ApiClient.get('/api/club/requests?size=1');
       if (resp['code'] === 0) {
         const d = resp['data'] as Record<string, Object>;
@@ -298,7 +305,10 @@ struct MainPage {
 
   /** 角标数字: 同样在 builder 内部按 kind 读状态, 避免"按值传参不刷新" */
   badgeOf(kind: string): number {
-    if (kind === 'audit') return this.pendingSignup + this.pendingReg;
+    if (kind === 'audit') {
+      // 社团账号: 待审报名 + 待审入团申请; 平台管理员: 待审注册(活动报名归社团审核)
+      return AppConfig.isClubAccount ? this.pendingSignup + this.pendingClubReq : this.pendingReg;
+    }
     if (kind === 'clubs') return this.pendingClubs;
     if (kind === 'reqs') return this.pendingClubReq;
     return 0;
@@ -527,39 +537,6 @@ struct MainPage {
     .padding({ left: Theme.pagePadding, right: Theme.pagePadding, bottom: 8 })
   }
 
-  @Builder
-  categoryChip(label: string, key: string) {
-    Text(label)
-      .fontSize(Theme.fsCaption)
-      .fontColor(this.category === key ? Theme.textOnPrimary : Theme.textSecondary)
-      .padding({ left: 10, right: 10, top: 4, bottom: 4 })
-      .backgroundColor(this.category === key ? Theme.primary : Theme.bgSubtle)
-      .borderRadius(Theme.radiusPill)
-      .onClick(() => this.setCategory(key))
-  }
-
-  /** 类别筛选条: 七大类 + 全部(横向滚动, 不挤占纵向空间) */
-  @Builder
-  categoryBar() {
-    Scroll() {
-      Row({ space: 6 }) {
-        this.categoryChip('全部类别', '')
-        ForEach(CATEGORY_KEYS, (k: string) => {
-          this.categoryChip(categoryText(k), k)
-        }, (k: string) => k)
-      }.padding({ left: Theme.pagePadding, right: Theme.pagePadding })
-    }
-    .scrollable(ScrollDirection.Horizontal)
-    .scrollBar(BarState.Off)
-    .width('100%').padding({ bottom: 8 })
-  }
-
-  setCategory(key: string): void {
-    if (this.category === key) return;
-    this.category = key;
-    this.resetAndLoad();
-  }
-
   // ==================== 活动卡 ====================
 
   @Builder
@@ -586,6 +563,14 @@ struct MainPage {
           .fontSize(Theme.fsCaption).fontColor(Theme.report)
           .padding({ left: 6, right: 6, top: 1, bottom: 1 })
           .backgroundColor(Theme.reportBg).borderRadius(Theme.radiusSm)
+        // v5.0: 发布社团名(学生据此区分活动是哪个社团办的)
+        if (a.club_name !== '') {
+          Text(a.club_name)
+            .fontSize(Theme.fsCaption).fontColor(Theme.primary)
+            .padding({ left: 6, right: 6, top: 1, bottom: 1 })
+            .backgroundColor(Theme.primaryBg).borderRadius(Theme.radiusSm)
+            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
         // 只给内部活动打标: 公开活动不加标签, 避免满屏标签造成视觉噪音
         if (a.join_scope === 'club') {
           Text('仅本社团')
@@ -650,16 +635,8 @@ struct MainPage {
     Column() {
       this.header('活动广场', true)
 
-      Column({ space: 8 }) {
-        if (this.isAdmin) {
-          this.pendingCard()
-        } else {
-          this.progressCard()
-        }
-      }.width('100%').padding({ left: Theme.pagePadding, right: Theme.pagePadding, bottom: 10 })
-
+      // 只留标题栏 + 范围筛选两行, 统计卡已移入列表首项随页滚动
       this.scopeBar()
-      this.categoryBar()
 
       if (this.loadFailed) {
         StateView({
@@ -682,6 +659,17 @@ struct MainPage {
       } else {
         Refresh({ refreshing: this.refreshing }) {
           List({ space: 0 }) {
+            // 学时进度/待办卡随列表一起滚: 之前钉在顶部, 活动列表被压到只剩屏幕下半截
+            ListItem() {
+              Column({ space: 8 }) {
+                if (this.isAdmin) {
+                  this.pendingCard()
+                } else {
+                  this.progressCard()
+                }
+              }.width('100%').padding({ bottom: 10 })
+            }
+
             ForEach(this.activities, (a: ActivityInfo) => {
               ListItem() {
                 this.actItem(a)
@@ -734,23 +722,36 @@ struct MainPage {
         }
         this.bigCard('通知公告', '发布/置顶/撤回公告, 成员端显示未读',
           Theme.admin, 'pages/AnnouncementPage', '')
-        this.bigCard('审核中心', '报名审核 + 注册审批, 通过自动累计学时',
-          Theme.success, 'pages/AuditPage', 'audit')
-        this.bigCard('用户管理', '全量学生信息 + 分组查找(注册状态/学时达标)',
-          Theme.admin, 'pages/UserManagePage', '')
-        // v5.0(重构): 发布/编辑活动归属于社团 —— 社团账号保留发布入口并新增入社退社审批;
-        // 平台管理员不再发布活动, 改为社团注册审核。
+        // 审核中心按账号分工: 社团审报名 + 入团; 平台管理员审注册与申诉, 不再审活动报名
+        if (AppConfig.isClubAccount) {
+          this.bigCard('审核中心', '活动报名审核 + 入团审核, 通过自动累计学时',
+            Theme.success, 'pages/AuditPage', 'audit')
+        } else {
+          this.bigCard('审核中心', '注册审批 + 学时申诉(活动报名归社团审核)',
+            Theme.success, 'pages/AuditPage', 'audit')
+        }
+        // 同一页面两种称谓: 社团账号管的是本社团成员(成员管理), 平台管理员管的是全量学生(用户管理)
+        if (AppConfig.isClubAccount) {
+          this.bigCard('成员管理', '本社团成员 + 岗位分组 + 移除成员',
+            Theme.admin, 'pages/UserManagePage', '')
+        } else {
+          this.bigCard('用户管理', '全量学生信息 + 分组查找(注册状态/学时达标)',
+            Theme.admin, 'pages/UserManagePage', '')
+        }
+        // v5.0: 发布/编辑活动归属于社团, 平台管理员不再发布活动, 改为社团注册审核。
+        // 入社/退社审批已并入「成员管理」页的待办卡, 不再单列入口, 避免同一页面挂两个门。
         if (AppConfig.isClubAccount) {
           this.bigCard('发布活动', '表单 + 本地草稿箱, 同步发布到服务器',
             Theme.primary, 'pages/ActivityPublishPage', '')
-          this.bigCard('入社/退社审批', '成员加入与退出申请审批(附已加入社团参考)',
-            Theme.success, 'pages/UserManagePage', 'reqs')
         } else {
           this.bigCard('社团审核', '社团注册审批 + 停用/恢复, 待审角标',
             Theme.warning, 'pages/ClubAuditPage', 'clubs')
         }
-        this.bigCard('服务器日志', '实时请求日志(内存 + MySQL request_log)',
-          Theme.signin, 'pages/ServerLogPage', '')
+        // 服务器日志是全平台请求日志(含其它社团数据), 仅平台管理员可见
+        if (!AppConfig.isClubAccount) {
+          this.bigCard('服务器日志', '实时请求日志(内存 + MySQL request_log)',
+            Theme.signin, 'pages/ServerLogPage', '')
+        }
         this.bigCard('学时报表', '全量学时排行 + 明细(双端一致)',
           Theme.report, 'pages/HoursReportPage', '')
       }
@@ -798,21 +799,37 @@ struct MainPage {
         Row() {
           Text('我的').fontSize(Theme.fsHeading).fontWeight(FontWeight.Bold)
             .fontColor(Theme.textBody).layoutWeight(1)
-          Text(this.isAdmin ? '管理员' : '普通成员')
+          Text(this.isAdmin ? (this.isClub ? '社团账号' : '平台管理员') : '普通成员')
             .fontSize(Theme.fsCaption).fontColor(Theme.textTertiary)
         }
         .width('100%').padding({ left: Theme.pagePadding, right: Theme.pagePadding, top: 14, bottom: 4 })
 
         Column({ space: 8 }) {
-          Text(this.name === '' ? '访' : this.name.substring(0, 1))
-            .fontSize(28).fontWeight(FontWeight.Bold).fontColor(Theme.textOnPrimary)
-            .textAlign(TextAlign.Center)
-            .width(72).height(72)
-            .backgroundColor(this.isAdmin ? Theme.admin : Theme.success)
-            .borderRadius(36)
-          Text(this.name).fontSize(Theme.fsHeading).fontWeight(FontWeight.Bold).fontColor(Theme.textBody)
-          Text(this.isAdmin ? '管理员 · 可发布活动与审核' : '普通成员 · 学号 ' + this.stuNo)
-            .fontSize(Theme.fsSmall).fontColor(Theme.textTertiary)
+          // 社团账号以社团为主体: 头像取社团名首字, 主标题为社团名, 社长名以小字展示
+          if (this.isClub) {
+            Text(this.clubName === '' ? '社' : this.clubName.substring(0, 1))
+              .fontSize(28).fontWeight(FontWeight.Bold).fontColor(Theme.textOnPrimary)
+              .textAlign(TextAlign.Center)
+              .width(72).height(72)
+              .backgroundColor(Theme.primary)
+              .borderRadius(36)
+            Text(this.clubName === '' ? this.name : this.clubName)
+              .fontSize(Theme.fsHeading).fontWeight(FontWeight.Bold).fontColor(Theme.textBody)
+            Text('社长: ' + this.name)
+              .fontSize(Theme.fsSmall).fontColor(Theme.textTertiary)
+            Text('社团账号 · 管理本社团活动与成员')
+              .fontSize(Theme.fsCaption).fontColor(Theme.textTertiary)
+          } else {
+            Text(this.name === '' ? '访' : this.name.substring(0, 1))
+              .fontSize(28).fontWeight(FontWeight.Bold).fontColor(Theme.textOnPrimary)
+              .textAlign(TextAlign.Center)
+              .width(72).height(72)
+              .backgroundColor(this.isAdmin ? Theme.admin : Theme.success)
+              .borderRadius(36)
+            Text(this.name).fontSize(Theme.fsHeading).fontWeight(FontWeight.Bold).fontColor(Theme.textBody)
+            Text(this.isAdmin ? '平台管理员 · 审核社团注册与用户管理' : '普通成员 · 学号 ' + this.stuNo)
+              .fontSize(Theme.fsSmall).fontColor(Theme.textTertiary)
+          }
           // 学生再补一行学时进度: 「我的」也要能一眼看到认定情况
           if (!this.isAdmin && this.requiredHours > 0) {
             Text('本学期已认定 ' + this.myHours + ' / ' + this.requiredHours + ' 学时')
@@ -828,12 +845,12 @@ struct MainPage {
 
         Column({ space: 0 }) {
           if (!this.isAdmin) {
+            // 社团广场仅普通成员可见: 社团账号是组织方, 不存在"加入别的社团"
+            this.rowItem('社团广场', '浏览/搜索社团, 申请加入, 我的社团管理', 'pages/ClubSquarePage')
+            this.dividerLine()
             this.rowItem('我的报名', '本地记录 + 服务器状态同步', 'pages/MySignupPage')
           }
           this.rowItem('学时报表', '排行榜 + 个人明细', 'pages/HoursReportPage')
-          this.dividerLine()
-          // v5.0(重构): 社团广场 —— 浏览/搜索社团, 申请加入, 管理我的社团(含退出申请)
-          this.rowItem('社团广场', '浏览/搜索社团, 申请加入, 我的社团管理', 'pages/ClubSquarePage')
           this.dividerLine()
           this.rowItem('通知公告', '社团公告 + 未读标记', 'pages/AnnouncementPage')
           this.dividerLine()

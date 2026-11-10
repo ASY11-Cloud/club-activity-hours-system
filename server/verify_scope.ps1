@@ -15,6 +15,9 @@
 # 用法: powershell -ExecutionPolicy Bypass -File server\verify_scope.ps1
 # =====================================================================
 $ErrorActionPreference = 'Stop'
+
+# 本脚本断言依赖中文比对, 必须按 UTF-8 解码子进程输出(控制台默认 GBK 会把 mysql 的 utf8 输出读成乱码)
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $Base = 'http://127.0.0.1:8000'
 $Mysql = 'C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe'
 $script:pass = 0
@@ -215,3 +218,4 @@ if (Test-Path $Mysql) {
 Write-Host ""
 Write-Host ("结果: PASS=" + $script:pass + "  FAIL=" + $script:fail) -ForegroundColor Cyan
 if ($script:fail -gt 0) { exit 1 }
+

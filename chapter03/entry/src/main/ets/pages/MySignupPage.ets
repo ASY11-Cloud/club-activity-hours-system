@@ -427,61 +427,64 @@ struct MySignupPage {
             })
         }.width('100%').padding({ left: Theme.pagePadding, right: Theme.pagePadding, top: 12, bottom: 8 })
 
-        Column({ space: 8 }) {
-          this.overview()
-
-          // 未同步提醒 + 手动补传(离线报名/上次网络失败的恢复入口)
-          if (this.unsynced > 0) {
-            Row({ space: 8 }) {
-              Text('有 ' + this.unsynced + ' 条报名仅存本地, 未同步服务器')
-                .fontSize(Theme.fsCaption).fontColor(Theme.danger).layoutWeight(1)
-              Button(this.syncing ? '处理中...' : '立即补传')
-                .fontSize(Theme.fsCaption).height(28).backgroundColor(Theme.danger)
-                .enabled(!this.syncing)
-                .onClick(() => this.retryUnsynced(false))
-            }
-            .width('100%').padding(10)
-            .backgroundColor(Theme.dangerBg).borderRadius(Theme.radiusSm)
-          }
-
-          if (this.msg !== '' && this.signups.length > 0) {
-            Text(this.msg).fontSize(Theme.fsCaption).fontColor(Theme.textTertiary).width('100%')
-          }
-        }
-        .width('100%')
-        .padding({ left: Theme.pagePadding, right: Theme.pagePadding, bottom: 8 })
-
-        if (!this.loaded) {
-          StateView({ kind: 'loading', title: '正在读取本地报名...' })
-        } else if (this.signups.length === 0) {
+        // 概览卡与未同步提醒一起进滚动区: 固定区只留标题栏一行
+        Scroll() {
           Column() {
-            StateView({
-              kind: 'empty',
-              title: AppConfig.isAdmin ? '管理员账号无报名记录' : '还没有报名记录',
-              desc: AppConfig.isAdmin
-                ? '成员报名与审核请前往「审核中心」'
-                : '报名成功后记录会保存在本机 SQLite, 即使离线也能查看'
-            })
-            if (!AppConfig.isAdmin) {
-              Button('去活动广场看看')
-                .height(40).fontSize(Theme.fsBody)
-                .backgroundColor(Theme.primary)
-                .padding({ left: 24, right: 24 })
-                .onClick(() => router.back())
+            Column({ space: 8 }) {
+              this.overview()
+
+              // 未同步提醒 + 手动补传(离线报名/上次网络失败的恢复入口)
+              if (this.unsynced > 0) {
+                Row({ space: 8 }) {
+                  Text('有 ' + this.unsynced + ' 条报名仅存本地, 未同步服务器')
+                    .fontSize(Theme.fsCaption).fontColor(Theme.danger).layoutWeight(1)
+                  Button(this.syncing ? '处理中...' : '立即补传')
+                    .fontSize(Theme.fsCaption).height(28).backgroundColor(Theme.danger)
+                    .enabled(!this.syncing)
+                    .onClick(() => this.retryUnsynced(false))
+                }
+                .width('100%').padding(10)
+                .backgroundColor(Theme.dangerBg).borderRadius(Theme.radiusSm)
+              }
+
+              if (this.msg !== '' && this.signups.length > 0) {
+                Text(this.msg).fontSize(Theme.fsCaption).fontColor(Theme.textTertiary).width('100%')
+              }
+            }
+            .width('100%')
+            .padding({ left: Theme.pagePadding, right: Theme.pagePadding, bottom: 8 })
+
+            if (!this.loaded) {
+              StateView({ kind: 'loading', title: '正在读取本地报名...' })
+            } else if (this.signups.length === 0) {
+              Column() {
+                StateView({
+                  kind: 'empty',
+                  title: AppConfig.isAdmin ? '管理员账号无报名记录' : '还没有报名记录',
+                  desc: AppConfig.isAdmin
+                    ? '成员报名与审核请前往「审核中心」'
+                    : '报名成功后记录会保存在本机 SQLite, 即使离线也能查看'
+                })
+                if (!AppConfig.isAdmin) {
+                  Button('去活动广场看看')
+                    .height(40).fontSize(Theme.fsBody)
+                    .backgroundColor(Theme.primary)
+                    .padding({ left: 24, right: 24 })
+                    .onClick(() => router.back())
+                }
+              }.width('100%')
+            } else {
+              Column() {
+                ForEach(this.signups, (s: LocalSignup) => {
+                  this.item(s)
+                }, (s: LocalSignup) => s.client_id + '-' + s.status.toString() + '-' + s.checkin.toString() +
+                  '-' + s.hours.toString() + '-' + s.synced.toString() + '-' + s.remark + '-' + s.created_at +
+                  '-' + this.appealKey(s.activity_id))
+              }.padding({ left: Theme.pagePadding, right: Theme.pagePadding, bottom: 14 })
             }
           }.width('100%')
-        } else {
-          Scroll() {
-            Column() {
-              ForEach(this.signups, (s: LocalSignup) => {
-                this.item(s)
-              }, (s: LocalSignup) => s.client_id + '-' + s.status.toString() + '-' + s.checkin.toString() +
-                '-' + s.hours.toString() + '-' + s.synced.toString() + '-' + s.remark + '-' + s.created_at +
-                '-' + this.appealKey(s.activity_id))
-            }.padding({ left: Theme.pagePadding, right: Theme.pagePadding, bottom: 14 })
-          }
-          .layoutWeight(1).scrollBar(BarState.Off).align(Alignment.Top)
         }
+        .layoutWeight(1).scrollBar(BarState.Off).align(Alignment.Top)
       }
     }
     .width('100%').height('100%').backgroundColor(Theme.bgPage)

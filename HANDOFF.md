@@ -2,7 +2,7 @@
 
 > 给接手这个项目的 AI / 评审者看的。**这个文件替代了原先的《修改说明》文档**（md 与 docx 已删除）。
 > 只写"改了什么、为什么改、在哪、怎么验"，不重复《使用说明》。
-> 最后更新：2026-10-28，改动后代码为当前仓库唯一事实来源。
+> 最后更新：2026-11-10 15:37（此后每次修改都会更新本文件并标注具体时间），改动后代码为当前仓库唯一事实来源。
 
 ---
 
@@ -18,7 +18,7 @@
 
 数据流：App 报名先落本地 SQLite → 同步服务器（`client_id` 幂等）→ 管理员审核 → 通过时事务内累计学时 → 报表 / ESP32 刷卡签到。
 
-演示数据：8 个活动、19 条报名、5 人共 20.5 学时（榜首李铭 5.5），达标线 20。
+演示数据：8 个活动（计算机协会 4 个 / 篮球协会 4 个，发布人均为社长）、19 条报名、5 人共 20.5 学时（榜首李铭 5.5），达标线 20；演示公告 2 条。
 
 ---
 
@@ -32,6 +32,7 @@
 | 四 | 文档 | 曾产出修改说明（**已按需求删除**，内容归档进本文件） |
 | 五 | UI 交互完整性 | 12 处"界面有、点了没用"的断点（含 1 处致命：详情页永远打不开） |
 | 六 | 工程化 + 交互补全 | 口令摘要、连接池、分页、活动编辑、日志治理、达标线、keep-alive；草稿载入、编辑页、报表导出、日志筛选、引导页接入 |
+| 七 | v5.0 社团账号体系 + UI 精简 + 数据修正（2026-11-10，详见第 7 节） | 社团注册/审核/换届/审批、发布归属社团、登录三身份、注册入口随身份、顶部筛选条移除、「我的」页社团主体展示、演示活动重新归属、audit_v4 断言加固 |
 
 ---
 
@@ -1237,3 +1238,232 @@ powershell -ExecutionPolicy Bypass -File tools\md2docx.ps1 -Md docs\使用说明
 - 活动基线数字未重建（8/19/20.5），"清空重建"仅覆盖社团层与申请链路——如需连活动一起重建，需同步改 verify_v4/audit_v4/verify_test_data 三处硬编码断言，工作量与收益不成比例，刻意不做；
 - 加入/退出申请的理由为纯文本选填，无附件；审批驳回理由必填（服务端 400 校验 + App 展开输入框）；
 - 社团广场不做分页（当前社团量级小，接口 size 无上限约束在 100）。
+
+---
+
+## 34. 第七批：UI 精简与演示数据修正（2026-11-10 15:37）
+
+### 34.1 登录页注册入口随身份显示（`LoginPage.ets`）
+
+注册入口从底部固定两行移入登录卡内，跟随所选身份切换：普通成员 →「去注册」（成员注册页）；社团账号 →「注册社团(提交管理员审核)」（社团注册页）；**管理员不显示**（账号由服务端预置）。底部仅保留「服务器设置」。原因：三身份共用一套底部入口语义混乱，管理员不需要注册。
+
+### 34.2 顶部横向筛选条移除（`MainPage.ets` / `ClubAuditPage.ets`）
+
+- 活动广场「全部类别/七大类」横向滚动条移除（类别口径只在服务端与统计页保留；活动卡上的类别标签保留）。同时删除 `@State category`、查询参数与 builder，非隐藏；
+- 社团审核页「全部/待审核/正常/已驳回/已停用」胶囊条移除，改为一次拉全量（size=100），状态在卡片标签区分；`@State filter` 与 status 参数一并删除；
+- 保留：活动广场 scopeBar（全部/可报名/我报名的/已结束，核心浏览入口）、用户管理分组网格（注册审核核心功能，非同类样式）。
+
+### 34.3 「我的」页社团主体展示（`MainPage.ets` profileView）
+
+社团账号：头像取社团名首字、主标题 = 社团名、下一行小字「社长: xxx」（name 来自登录时 club.leader_name，换届后重新登录即更新）、角色行「社团账号 · 管理本社团活动与成员」；页头标签显示「社团账号」。平台管理员副行改为「平台管理员 · 审核社团注册与用户管理」（v5.0 后不再发布活动，原文案过时）。**社团广场入口仅普通成员可见**（社团账号是组织方，"加入别的社团"语义不成立，服务端 join/leave 本就 403）。
+
+### 34.4 活动数据修正 + 发布主体下发（server / seed / App）
+
+- 服务端 `handleActivityList` JOIN club 下发 `club_id/club_name/leader_name`（社团名与社长名取 club 表**实时值**，换届后列表自动显示新社长，不受发布时快照影响）；
+- App `ActivityInfo` 增加两字段并解析；详情页「发布人」行改为「发布社团 + 发布人(社长 xxx)」两行（club_name 为空时回退显示 publisher）；列表卡新增社团名蓝色标签；
+- 演示活动重新归属：活动 1-4 计算机协会(张三)，5-8 篮球协会(李铭) 且 5-8 主题改为篮球类（标题/内容/地点/类别同步改），publisher 全部由"管理员"改为社长姓名；**报名/学时基线 8/19/20.5 不变**；`signup.category` 快照同步回填（差值 0）；
+- 补 2 条演示公告（公告表原为空，无错误数据）；`seed_demo_data.sql` / `init_db.sql` 同步，重装环境数据一致；
+- 排查结论：`signup.club_id` 快照 0 条异常、学时汇总/孤儿记录全对账通过、社团层数据昨天已重造——无其它同类旧版错误数据。
+
+### 34.5 audit_v4 脆弱断言修复（`audit_v4.ps1`）
+
+「基线报名=19」原用 `signup.id<9000` 区分基线与自建数据，依赖自增计数器 >9000 的偶然状态；数据表重建后自增回落，自建行混进基线导致误报（本次实际触发一次 FAIL）。改为按学号命名空间排除 `stu_no NOT LIKE 'A90%'`（自建学生均为 A900x，Cleanup 同口径），活动断言保留 id<9000（自建活动显式 id 9201-9207，安全）。
+
+### 34.6 验证
+
+- `audit_v4.ps1` 105/105；`verify_membership.ps1` 56/56；`verify_test_data.ps1 -Stage baseline` 14/14；
+- 服务端重编译 -O2 -Wall 零警告，重启后 API 实测：活动列表正确返回 `club_name/leader_name`；
+- App `assembleHap` BUILD SUCCESSFUL、零诊断。
+
+### 34.7 流程约定
+
+此后**每轮修改完成后必须更新本文件**：新加小节或在对应批次补记，标注具体时间（精确到分钟，如 15:37）。
+---
+
+## 35. 文档同步（2026-11-10 15:44）
+
+本轮代码改动（登录入口随身份、筛选条移除、我的页社团主体、活动归属与发布主体下发）落地后，同步更新了全部受影响文档：
+
+| 文件 | 更新点 |
+|---|---|
+| `README.md` | 活动分类行改为「活动卡显示类别 + 发布社团 + 已报人数，App 广场不再设类别筛选条」；三类角色中平台管理员改为「社团注册审核…（v5.0 起不再发布活动）」 |
+| `docs/使用说明.md` | 1 节功能列表中「活动发布」主体改为社团账号；5.1 登录改为三身份 + 注册入口随身份切换说明；5.3 活动广场删除「全部 + 七类横向筛选标签」、改述类别徽标 + 发布社团名 + 详情页发布社团/社长两行；5.6 发布活动主体改为社团账号、表单字段补「参与范围」；5.23 社团注册入口改为「登录页 → 身份切到社团账号 → 登录卡内注册」 |
+| `使用说明文档.docx` | 与 md 同步共 7 处文本（活动发布主体、登录三身份 + 注册入口两段、社团注册入口、5.3 类别筛选标签替换为社团徽标说明、5.6 发布活动主体、表单字段补「参与范围」）。**打包踩坑**：Windows 下 `Compress-Archive` / `ZipFile.CreateFromDirectory` 会把条目名写成反斜杠（`word\\document.xml`），Word 打不开；必须用 `ZipArchive.CreateEntry` 手工写入并把 `\\` 换成 `/` |
+| `VERSION.md` | v5.0 行 commit 由「待提交」改为 `852451b`，追加「v5.0 修正（2026-11-10 15:37）」摘要 |
+| `chapter03/.../LandingPage.ets` | App 内引导页文案过时：已登录角色增加「社团账号 · 社团名」；注册提示补社团注册路径；功能一览由两行角色改为三行（普通成员 / 社团账号 / 平台管理员），平台管理员去掉「发布活动」 |
+
+检查后无需改动：`server/verify_demo_data.py`（断言 8 活动 / 19 报名 / 20.5 学时 / 类别合法 / taken 自洽，活动归属变化不影响）；`docs/V4-PLAN.md`、`docs/系统测试报告-v4.0.md`、`docs/数据一致性核验-v3.2.md` 为历史阶段归档，保持原样。
+
+验证：App `assembleHap` BUILD SUCCESSFUL；docx 重新打包后条目名均为正斜杠、正文含新文本且无旧文案残留。
+
+---
+
+## 36. 引导页移除注册入口（2026-11-10 15:45）
+
+用户要求把启动引导页（`LandingPage.ets`）上的「注册」入口删除。改动：
+
+- 三入口（登录 / 注册 / 设置）改为两入口（登录 / 设置），`entryCard` 宽度由 `31%` 改为 `48%` 保持两卡平衡；
+- 删除「未注册成员请先注册…」提示，改为「已注册成员可直接登录; 服务器地址可在设置页配置」；
+- 头部注释与 `onPageShow` 注释同步（登录 / 设置 两入口）。
+
+注意：`pages/RegisterPage` 页面本身保留（登录页身份切换后的注册路径仍在，§34.1 的「注册入口随身份显示」未受影响），本轮只删引导页上的入口卡。无 lint 诊断。
+
+---
+
+## 37. 启动页与登录页合并（2026-11-10 15:49）
+
+用户要求把引导页（LandingPage）与登录页（LoginPage）合并成一个页面。改动：
+
+- **`LandingPage.ets` 重写为「引导 + 登录合一」启动页**：渐变头部（社图标/标题/副标题/服务器状态胶囊，点击重试）保留；未登录时头部下方直接内联 LoginPage 的三身份登录卡（角色切换 + 账号/密码 + 登录按钮 + 按身份显示的注册入口，登录成功 `Nav.resetTo('pages/MainPage')`）；已登录时改为会话条卡（头像/姓名/角色 + 渐变「进入主界面」按钮 + 「切换账号请到设置→退出登录」小字）；底部将「演示账号」与「功能一览」合并为一张 `bgSubtle` 卡（Divider 分隔）；登录卡与会话条均以 `margin top:-20` 上叠压头部圆角，卡片负边距叠压是既有布局手法（§15.4）。
+- **删除 `pages/LoginPage.ets`**，并从 `main_pages.json` 移除路由；全部跳转点改为 `pages/LandingPage`：`SettingsPage`（未登录「去登录」）、`RegisterPage`（注册成功「去登录」，replaceUrl）。
+- `EntryAbility` 冷启动注释同步。未登录预填演示账号逻辑保留（仅 `AppConfig.role === ''` 时）；「我的 → 系统介绍」push 到本页时，已登录态展示会话条 + 演示账号/功能一览，语义仍成立。
+
+验证：全工程无 `pages/LoginPage` 残留引用；相关文件零 lint 诊断。
+
+---
+
+## 38. 三个 Markdown 文件默认打开方式改为 WPS（2026-11-10 15:52）
+
+用户要求把 `HANDOFF.md` / `README.md` / `VERSION.md` 的默认打开方式从 VS Code 改为 WPS。项目源码未改动，只动 Windows 文件关联。
+
+- 现状：`HKCU\...\FileExts\.md\UserChoice` = `VSCode.md`；WPS 安装后没有注册 `.md` 的 ProgID（只有 `WPS.Doc*` / `WPS.PIC.*` 等）。
+- 处理步骤：备份 `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.md` 到 `%TEMP%\.md-assoc-backup-20261110-154946.reg`；用 `OpenSubKey(...,"ReadWriteSubTree","TakeOwnership")` + `DeleteSubKey` 删掉受 ACL 保护的 `UserChoice`（`reg delete` 会 Access denied）与 `UserChoiceLatest`；新建 ProgID `HKCU\Software\Classes\WPS.Markdown`（`shell\open\command` = `"<wps.exe>" "%1"`，`DefaultIcon` = `wps.exe,0`）；把 `HKCU\Software\Classes\.md` 默认值设为 `WPS.Markdown` 并登记进 `OpenWithProgids`。
+- 坑位：`Applications\wps.exe` 不能作为 `.md` 的默认 ProgID（`AssocQueryString` 返回 `0x80070483 ERROR_NO_ASSOCIATION`），必须自建 ProgID；`reg add /d` 写含双引号的命令行会被剥引号报 Invalid syntax，改用 `Set-ItemProperty -Name "(default)"`。
+- 验证：双击 `HANDOFF.md` 由 `wps.exe` 打开（窗口标题 `HANDOFF.md - WPS Office`），三个文件同属 `.md` 一并生效；已执行 `ie4uinit.exe -show` 刷新图标缓存并关闭测试窗口。回滚方式：`reg import` 上述备份，再删除 `HKCU\Software\Classes\WPS.Markdown`。
+
+---
+
+## 39. 社团账号管理面板「用户管理」改为「成员管理」（2026-11-10 16:05）
+
+社团账号管的是本社团在册成员，叫「用户管理」名不符实；平台管理员跨社团管全量学生，称谓保持不变。
+
+- `MainPage.ets` `adminView()`：入口卡按 `AppConfig.isClubAccount` 分支——社团账号「成员管理 / 本社团成员名单 + 分组查找(注册状态/学时达标)」，平台管理员仍是「用户管理 / 全量学生信息 + …」，同跳 `pages/UserManagePage`。
+- `UserManagePage.ets` 页头标题同步：`AppConfig.isClubAccount ? '成员管理' : '用户管理'`（页面本身两边共用，社团账号进页后上方还有入社/退社审批与本社团成员两个 section，标题改后语义才一致）；文件头注释一并更新。
+- 未改动：服务端文案（`handleStudentCancel` 的「管理员请到「用户管理」页注销学生账号」只面向平台管理员调用路径）、`SettingsPage` 的引导文案、路由名与页面文件名（避免牵动 `main_pages.json` 与全部跳转点）。
+- 验证：两个文件零 lint 诊断；本地无 `hvigorw`，未跑 assembleHap，需在 DevEco 内构建确认。
+
+---
+
+## 40. 全站「上半截钉死、下半截一条缝」布局改造（2026-11-10 16:03）
+
+用户反馈成员管理页「上半部分固定、下半部分滑动」手感极差，要求重新设计并排查同类界面。根因不是滚动组件用错，而是**筛选/统计/搜索全部写在了滚动容器外面**：`Column` 里钉了页头 + 两张 section 卡 + 分组网格 + 搜索框，最后才 `List().layoutWeight(1)`，小屏上列表只剩 100px 左右。
+
+改造原则：**固定区只留一行页头**（返回/标题/刷新），必要时加一行主功能切换（页签/模式）；统计卡、筛选条、搜索框、分组网格全部进滚动容器，跟内容一起滚。
+
+| 页面 | 原结构（固定区） | 改后 |
+|---|---|---|
+| `UserManagePage` | 页头 + 入社退社审批卡 + 本社团成员卡 + 两行分组网格 + 搜索框（约半屏） | 页头固定；其余全部进 `List`（每个 builder 一个 `ListItem`，学生卡逐条 `ListItem` 带左右 padding）。审批卡与成员卡**默认折叠**：审批卡收起成一行（有申请显示「N 待审」红标），成员卡只露 3 条 + 「展开」看全部 30 条，截图里那种一屏两块名单的拥挤感消除 |
+| `HoursReportPage` | 页头 + 达标线设置卡 + 导出 + 双端对比 + 社团维度 + 校准 + 环形图 + 4 个页签（约占 2/3 屏） | 页头 + **页签行固定**（一行，切排行/明细/预警/异常不用滚回顶部），其余 7 块全部进 `Scroll`；概览块去掉 `margin left/right:14`，改由 `Column` 的 `padding(14)` 统一给边距 |
+| `AuditPage` | 页头 + 模式切换 + 搜索 + 活动 Select + 4 个状态筛选 + 统计/全部通过 + 分页器（约 40-50% 屏） | 页头 + 模式切换固定；三个模式的筛选、统计、列表、分页器各自包进一个 `Scroll`（原来的内层 `Scroll` 删除，`ForEach` 直接放滚动 `Column` 里） |
+| `MainPage`（活动广场） | 页头 + 学时/待办统计卡 + 范围胶囊 | 页头 + `scopeBar` 固定；统计卡移入 `List` 首项，随活动列表滚动 |
+| `ServerLogPage` | 页头 + 7 个筛选胶囊 + 路径搜索 + 提示 | 页头固定；筛选胶囊、搜索、提示改为一律做 `List` 的 `ListItem`，日志与筛选同滚 |
+| `ClubSquarePage` | 页头 + 搜索框 + 全部/我的社团胶囊 | 页头固定；搜索与分段进 `List` 头部，加载/空/错误态也统一成 `ListItem` |
+| `MySignupPage` | 页头 + 概览统计卡 + 未同步提醒 | 页头固定；概览卡与提醒进 `Scroll`，空态/列表同一滚动容器内 |
+
+未改动的页面（已确认合理）：`AnnouncementPage`、`ClubAuditPage`、`ClubProfilePage`（固定区仅一行页头）、`ActivityDetailPage`（导航栏 + 底部操作栏固定，正文整页滚，属正确结构）、`ActivityPublishPage`、`ActivityEditPage`、`SettingsPage`、`RegisterPage`、`ClubRegisterPage`、`LandingPage`（本身就是整页 `Scroll`）。
+
+坑位与约定：
+
+- `List` 的直接子级只能是 `ListItem` / `ForEach`，原来写在 `Column` 里的 `StateView` 必须包一层 `ListItem`；`ListItem` 上加 `.padding()` 是合法的，用它替代原来 `List` 的左右 padding，避免与 builder 自带的 padding 叠加成双重缩进。
+- 别在 `List` 里直接放 `Scroll`（嵌套滚动会抢手势），原来"局部 Scroll"的分支一律改成 `Column` + `ForEach`。
+- 折叠态默认值（`reqExpanded` / `memberExpanded`）都是 `false`：首屏优先露出检索入口与主列表，把长名单交给用户主动展开。
+
+验证：7 个文件零 lint 诊断；本机无 `hvigorw`，未跑 `assembleHap`，需在 DevEco 内构建并上模拟器实滑确认折叠态、`ListItem` 点击与下拉刷新无异常。
+
+---
+
+## 41. 成员管理与入社/退社审批融合为一套名单（2026-11-10 16:24）
+
+用户要求把「成员管理」和「入社/退社审批」合成一个页面、合理设计。之前的结构是"审批卡 + 本社团成员卡 + 全量检索列表"三块拼在一起，其中**成员卡与检索列表是同一批人**（`/api/student/list` 对社团账号本就 `INNER JOIN club_member status=1` 只返回在册成员），同屏两份名单既重复又拥挤。
+
+融合方案：岗位筛选与移除直接融进主列表，审批变成列表上方的待办卡，页面只剩一套名单。
+
+### 41.1 服务端 `server/server.cpp`（`handleStudentList`）
+
+- `SELECT` 增加 `COALESCE(cm.role,'member')`，列表项下发 `club_role`（平台管理员恒为 `""`）。
+- `group` 新增 `leader / minister / member` 岗位过滤（仅 `me.club_id>0` 生效；平台管理员传岗位分组一律当 `all`，避免引用不存在的 `cm` 别名导致 SQL 报错）。
+- `data` 新增 `role_counts`（club 账号专属）：`SELECT role, COUNT(*) FROM club_member WHERE club_id=? AND status=1 GROUP BY role`，不受 kw 影响。
+
+### 41.2 App
+
+- `Models.ets`：`StudentInfo` 增加 `club_role` 字段并在 `parseStudentList` 解析。
+- `UserManagePage.ets`：
+  - **删除整个「本社团成员」区**（`memberSection` / `memberChip` / `loadClubMembers` / `switchMemberRole` 及 7 个成员卡状态），不再调用 `/api/club/members`。
+  - `load()` 分组构建分支：社团账号分组 = 全部/社长/部长/成员（计数来自 `role_counts`，口径是"在册成员的岗位"；注册状态分组对在册成员没意义，待审注册本就在审核中心）；平台管理员保持原 6 组注册状态分组。
+  - `groupChips` 列数自适应：>4 组三列两行，4 组单行四列。
+  - `userCard`：姓名行追加岗位标签（社长/部长/成员，`memberRoleText`）；底部操作行在「注销」前加「移除」（仅社团账号且非社长；二次确认 + 服务端校验现任社长不可移除的逻辑复用）。
+  - `removeMember(stuNo)` 重构为通用提示（写 `this.toast`），成功后刷新主列表与待办卡；`auditRequest` 改为刷新 `loadRequests + load`（审批通过/移除后岗位计数与列表同步变化），提示统一走 `toast`。
+  - `build`：`List` 里只剩「审批待办卡 → 分组 → 搜索 → 成员卡列表」，一套名单一次滚动。
+
+### 41.3 验证
+
+- 服务端：g++ `-Wall` 编译 0 警告通过；重启 server.exe 后用 `club/club123` 实测——`role_counts = {leader:1, minister:0, member:3}`、`total=4`、列表项含 `club_role:"member"`、`group=leader` 精确返回张三 1 人。
+- 注意：编译时发现机器上同时挂着 3 个 server.exe 旧进程（占 8000 端口的只有一个），已全部停止后用新产物覆盖 `server.exe` 并重启，`/api/health` 正常（`db:true`）。
+- App：两个文件零 lint 诊断；需 DevEco 构建 + 模拟器实测（重点：岗位分组切换、移除后计数联动、审批待办卡展开/收起）。
+- 兼容性：接口是纯增量字段（`club_role` / `role_counts` / 新 group 值），旧 HAP 调旧参数不受影响；但岗位分组需要 **App 与服务端成对部署**。
+
+---
+
+## 42. 管理面板删掉重复的「入社/退社审批」入口（2026-11-10 16:40）
+
+第 41 节把审批并进成员管理页后，管理面板上「成员管理」和「入社/退社审批」两张卡都跳 `pages/UserManagePage`——第二张传的 `reqs` 参数在页面里**根本没有被读取**（`UserManagePage` 无 `reqs` 相关代码），属于纯重复入口，用户截图直接指出。
+
+- `MainPage.ets` `adminView()`：删除 `bigCard('入社/退社审批', …, 'pages/UserManagePage', 'reqs')`；社团账号分支只剩「发布活动」一张卡，平台管理员的「社团审核」分支不变。
+- 待审数字不丢：把原入口的 `kind='reqs'` 挪到「成员管理」卡上（`badgeOf('reqs')` → `pendingClubReq`，由 `loadPending()` 里 `/api/club/requests?size=1` 的 `total` 提供），卡片标题右侧照旧显示红色待审角标。
+- 卡片描述改为「本社团成员 + 岗位分组 + 入社/退社审批」，让用户在入口处就知道审批在这页；注释同步说明"审批已并入成员管理页的待办卡，不再单列入口"。
+- 页面内 `UserManagePage.requestSection()` 标题「入社/退社审批」保留——那是同一页里的待办区块，不构成第二个入口。
+- 验证：`MainPage.ets` 零 lint 诊断；无 `hvigorw` 未跑 assembleHap，需 DevEco 构建后确认管理面板 6 张卡（社团账号）与成员管理角标数字。
+
+---
+
+## 43. 审核中心按账号分工：社团审报名 + 入团，管理员不再审活动（2026-11-10 16:53）
+
+用户要求：社团账号的审核管「活动报名」，并把入团审核也收进审核中心；平台管理员不再审核活动报名。
+
+### 43.1 职责划分（`AuditPage.ets`）
+
+| 账号 | 审核中心页签 | 数据接口 |
+|---|---|---|
+| 社团账号 | 活动报名 / 入团审核 | `/api/signup/*`（本社团活动）、`/api/club/requests` + `/api/club/request/audit` |
+| 平台管理员 | 注册申请 / 学时申诉 | `/api/student/requests`、`/api/appeal/*`（活动报名不再展示） |
+
+- 内部 `mode` 保留四个语义值：0 报名(社团) / 1 注册(管理员) / 2 申诉(管理员) / 3 入团(社团)，进入页面按 `AppConfig.isClubAccount` 设初值并只加载对应数据（`loadActOptions/load/loadPendingCount/loadMemberReqs` 或 `loadRegs/loadAppeals`），刷新按钮与 `onPageShow` 同步分流。
+- 新增 `reqCard()` 申请卡与 `loadMemberReqs()` / `pendingReqCount()` / `auditReq()`：驳回必须填理由（二次点击提交），审批后重拉列表；页签上带「N 条待审批」小字。
+- `UserManagePage` 删除 `requestSection` 及整套审批状态/方法（`requests/showHandled/reqExpanded/replyFor/replyInput/loadRequests/auditRequest/pendingRequestCount`），页面只剩成员名单 + 岗位分组 + 移除，避免"同一功能两处入口"。
+
+### 43.2 服务端（`server/server.cpp`）
+
+- `/api/signup/audit`：原本 `me.role != "admin"` 直接 403，社团账号角色同为 admin 但从未被真正放过——改为把 `me` 传进 `handleSignupAudit`，社团账号（`club_id>0`）先查 `activity.club_id`，不属于本社团直接 `403 该报名不属于本社团活动, 无权审核`（不能只靠前端隐藏）。
+- **口径修正**：`/api/signup/list` 的社团过滤从 `s.club_id` 改为 `a.club_id`（按活动归属），`/api/stats/pending` 的待审报名 / 今日签到改用 `activity_id IN (SELECT id FROM activity WHERE club_id=?)`，与审核校验同口径。
+- 启动迁移补一条回填：`UPDATE signup s JOIN activity a ON s.activity_id=a.id SET s.club_id=a.club_id WHERE s.club_id<>a.club_id`。历史种子数据曾按"学生所在社团"填 `club_id`，实测报名 #37/#43 的活动属篮球协会却记在计算机协会名下，导致社团账号能看到别人的报名、点通过又被归属校验拦下。
+
+### 43.3 `MainPage.ets`
+
+- 「审核中心」卡片文案按账号区分：社团「活动报名审核 + 入团审核, 通过自动累计学时」，管理员「注册审批 + 学时申诉(活动报名归社团审核)」。
+- `badgeOf('audit')`：社团 = `pendingSignup + pendingClubReq`（`loadPending` 里补拉 `/api/stats/pending` 拿本社团待审报名），管理员 = `pendingReg`；「成员管理」卡不再挂 `reqs` 角标。
+
+### 43.4 验证
+
+- 服务端 `g++ -Wall` 零警告；重启后社团账号实测：待审报名由 **8 条（含篮球协会 2 条）收敛为 5 条全属本社团**，`/api/stats/pending` 与列表 total 一致；越权审核 #37 返回 `403 该报名不属于本社团活动`；任意 id 走通权限校验（404 而非 403 needAdmin）；`/api/club/requests` 待审 1 条正常。
+- App 三文件零 lint 诊断；需 DevEco 构建 + 模拟器实测（重点：两种账号的页签集合、入团审核同意/驳回、审核中心角标数字）。
+
+## 44. 独立复查（外部复核，2026-11-10 17:50）
+
+### 44.1 复查范围与结果
+CodeBuddy 完成 §34-43 后工作区有 25 个文件未提交。逐项复核：
+- 红线检查全过：server.cpp 无 thread_local（仅保留教训注释）、页面 17 个与 main_pages.json 一致、全 App 无 16 进制硬编码色值。
+- HAP 构建 BUILD SUCCESSFUL；服务端 v5.0（health db:true）。
+- 回归全绿：verify_membership 56/56、verify_club 60/60（节流用例 SKIP）、verify_scope 17/17、verify_v4 45/45。
+
+### 44.2 修复一：全部 ps1 验收脚本补 UTF-8 输出解码（环境相关 flaky）
+现象：verify_v4 出现"驳回记录保留原因"1 项 FAIL，服务端落库代码（UPDATE appeal SET reply=...）核对无误。
+根因：脚本用 mysql CLI 取 SQL 结果做中文断言（IndexOf('上限')），但 PowerShell 按 [Console]::OutputEncoding 解码子进程输出——控制台代码页 936(GBK) 下 utf8mb4 字节被读成乱码。同一脚本在 UTF-8 控制台跑是绿的，属**环境相关偶发**。
+修复：6 个 ps1 头部统一加 `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8`。复跑 verify_v4 45/45。
+教训（写入 CODEBUDDY.md 同款坑）：凡是"读 DB 中文做断言"的脚本必须显式设解码，别依赖控制台代码页。
+
+### 44.3 修复二：ClubSquarePage 搜索框 emoji 清理
+全 App emoji 复查发现 1 处真违规：ClubSquarePage.ets:211 `Text('🔍')`。已改为 `Text('搜')` + Theme 令牌配色。RegisterPage 的 ✓(U+2713) 与 MainPage 注释中的字符码为历史约定，保留。
+
+### 44.4 待办提醒
+- 根目录有个名为 `0` 的垃圾文件（构建日志重定向产物，内容为 GBK 乱码），未跟踪，建议删除。
+- §37 合并后的引导/登录页、§43 审核分工的**模拟器界面级验证**仍未做（HAP 已可安装）。

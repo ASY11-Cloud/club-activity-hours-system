@@ -18,7 +18,7 @@ export default class EntryAbility extends UIAbility {
     // Main window is created, set main page for this ability
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onWindowStageCreate');
 
-    // 冷启动进入引导页(登录/注册/设置), 登录后由 LoginPage 替换到 MainPage
+    // 冷启动进入启动页(引导+登录合一), 登录成功后 reset 到 MainPage
     windowStage.loadContent('pages/LandingPage', (err) => {
       if (err.code) {
         hilog.error(DOMAIN, 'testTag', 'Failed to load the content. Cause: %{public}s', JSON.stringify(err));

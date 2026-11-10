@@ -26,7 +26,7 @@ function blankAct(): ActivityInfo {
     id: 0, title: '', content: '', location: '', start_time: '', end_time: '',
     hours: 0, capacity: 0, publisher: '', signed_count: 0, passed_count: 0,
     valid_count: 0, remaining: 0, expired: false, status: 1,
-    category: 'sports', taken: 0, join_scope: 'all'
+    category: 'sports', taken: 0, join_scope: 'all', club_name: '', leader_name: ''
   };
 }
 
@@ -497,7 +497,14 @@ struct ActivityDetailPage {
           this.infoRow('开始', this.act.start_time === '' ? '待定' : TimeFmt.short(this.act.start_time))
           this.infoRow('结束', this.act.end_time === '' ? '待定' : TimeFmt.short(this.act.end_time))
           this.infoRow('地点', this.act.location === '' ? '待定' : this.act.location)
-          this.infoRow('发布人', this.act.publisher === '' ? '—' : this.act.publisher)
+          // v5.0: 发布主体 = 社团 + 现任负责人(社团名/负责人名由服务端实时下发, 换届后自动为新负责人)
+          // 发布人只写名字, 不加"社长"等头衔(头衔随换届与组织形态变化, 名字才是有用信息)
+          if (this.act.club_name !== '') {
+            this.infoRow('发布社团', this.act.club_name)
+            this.infoRow('发布人', this.act.leader_name === '' ? '—' : this.act.leader_name)
+          } else {
+            this.infoRow('发布人', this.act.publisher === '' ? '—' : this.act.publisher)
+          }
           this.infoRow('当前状态', this.act.expired ? '已结束' : TimeFmt.stage(this.act.start_time, this.act.end_time))
         }
         .width('100%').padding(16).backgroundColor(Theme.bgCard).borderRadius(Theme.radiusMd)

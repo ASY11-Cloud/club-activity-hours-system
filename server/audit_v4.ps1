@@ -8,6 +8,9 @@
 # 退出码 0 = 无失败；1 = 有失败
 # =====================================================================
 $ErrorActionPreference = 'Stop'
+
+# 本脚本断言依赖中文比对, 必须按 UTF-8 解码子进程输出(控制台默认 GBK 会把 mysql 的 utf8 输出读成乱码)
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Net.Http
 $env:MYSQL_PWD = '123456'
 $MYSQL = 'C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe'
@@ -421,7 +424,9 @@ try {
   # ============================================================
   Section 'E. 数据一致性'
   Check '基线活动=8' ((Num "SELECT COUNT(*) FROM activity WHERE id<9000") -eq 8)
-  Check '基线报名=19' ((Num "SELECT COUNT(*) FROM signup WHERE id<9000") -eq 19)
+  # 报名基线按学号命名空间排除(自建学生均为 A90 前缀): 不用 signup.id<9000 —— 它依赖
+  # 自增计数器的偶然状态, 数据表重建后自增回落会让自建行混进基线导致误报
+  Check '基线报名=19' ((Num "SELECT COUNT(*) FROM signup WHERE stu_no NOT LIKE 'A90%'") -eq 19)
   Check '基线学时=20.5' ([Math]::Abs((Num "SELECT SUM(total_hours) FROM hours_total WHERE stu_no NOT LIKE 'A900%'") - 20.5) -lt 0.001)
   Check 'taken 与有效报名数一致' ((Num "SELECT COUNT(*) FROM activity a WHERE a.taken<>(SELECT COUNT(*) FROM signup s WHERE s.activity_id=a.id AND s.status<>2)") -eq 0)
   Check '学时汇总与明细一致' ((Num "SELECT COUNT(*) FROM hours_total ht WHERE ABS(ht.total_hours-(SELECT COALESCE(SUM(s.hours),0) FROM signup s WHERE s.stu_no=ht.stu_no AND s.status=1))>0.001") -eq 0)
@@ -485,3 +490,4 @@ Write-Host ''
 Write-Host ('总计: ' + $script:pass + ' 通过, ' + $script:fail + ' 失败')
 if ($script:fail -gt 0) { exit 1 }
 exit 0
+

@@ -411,7 +411,7 @@ struct SettingsPage {
               Column({ space: 8 }) {
                 Text('当前未登录').fontSize(13).fontColor(Theme.textSecondary)
                 Button('去登录').width('100%').height(38).fontSize(14).backgroundColor(Theme.primary)
-                  .onClick(() => router.pushUrl({ url: 'pages/LoginPage' }))
+                  .onClick(() => router.pushUrl({ url: 'pages/LandingPage' }))
               }.width('100%')
             }
           }

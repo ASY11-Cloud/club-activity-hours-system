@@ -23,6 +23,8 @@ export interface ActivityInfo {
   category: string;       // 七大类 key: thought/practice/volunteer/innovation/sports/social/skill
   taken: number;          // 服务端名额计数缓存(status<>2), 与 valid_count 应一致
   join_scope: string;     // v5.0 参与范围: 'club'=仅本社团成员 / 'all'=全校开放
+  club_name: string;      // v5.0 发布主体: 活动归属社团名(服务端 JOIN club 实时下发)
+  leader_name: string;    // v5.0 发布主体: 该社团现任社长名(换届后自动为新社长)
 }
 
 // 报名记录
@@ -219,6 +221,7 @@ export interface StudentInfo {
   total_hours: number;  // 累计认定学时
   sign_count: number;   // 通过活动次数
   achieved: boolean;    // 是否达标(达到系统学时达标线)
+  club_role: string;    // 社团内岗位 leader/minister/member(社团账号专用, 平台管理员为空串)
 }
 
 // 用户管理分组计数
@@ -283,7 +286,9 @@ export function parseActivities(resp: Record<string, Object>): ActivityInfo[] {
       status: numOf(item, 'status', 1),
       category: strOf(item, 'category', 'sports'),
       taken: numOf(item, 'taken', numOf(item, 'valid_count')),
-      join_scope: strOf(item, 'join_scope', 'all')
+      join_scope: strOf(item, 'join_scope', 'all'),
+      club_name: strOf(item, 'club_name'),
+      leader_name: strOf(item, 'leader_name')
     });
   }
   return out;
@@ -559,7 +564,8 @@ export function parseStudentList(resp: Record<string, Object>): StudentInfo[] {
       created_at: strOf(item, 'created_at'),
       total_hours: numOf(item, 'total_hours'),
       sign_count: numOf(item, 'sign_count'),
-      achieved: boolOf(item, 'achieved')
+      achieved: boolOf(item, 'achieved'),
+      club_role: strOf(item, 'club_role')
     });
   }
   return out;

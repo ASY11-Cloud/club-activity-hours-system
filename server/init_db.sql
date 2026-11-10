@@ -307,9 +307,9 @@ INSERT INTO student (stu_no, name, dept, status) VALUES
   ('2023003', '王俊', '软工2203', 0);
 
 -- 两条已发布活动(类别: skill 技能特长 / practice 实践实习)
-INSERT INTO activity (title, content, location, start_time, end_time, hours, capacity, category, publisher, status) VALUES
-  ('ACM 算法训练营', '由 ACM 实验室组织的算法集训，涵盖图论与动态规划专题。', '教学楼 A-301', '2026-11-05 19:00:00', '2026-11-05 21:00:00', 2.0, 60, 'skill', '管理员', 1),
-  ('嵌入式开发分享会', 'STM32 与鸿蒙开发实战经验分享。', '实验楼 B-102', '2026-11-12 14:00:00', '2026-11-12 16:30:00', 2.5, 40, 'practice', '管理员', 1);
+INSERT INTO activity (club_id, title, content, location, start_time, end_time, hours, capacity, category, publisher, status) VALUES
+  (1, 'ACM 算法训练营', '由 ACM 实验室组织的算法集训，涵盖图论与动态规划专题。', '教学楼 A-301', '2026-11-05 19:00:00', '2026-11-05 21:00:00', 2.0, 60, 'skill', '张三', 1),
+  (1, '嵌入式开发分享会', 'STM32 与鸿蒙开发实战经验分享。', '实验楼 B-102', '2026-11-12 14:00:00', '2026-11-12 16:30:00', 2.5, 40, 'practice', '张三', 1);
 
 -- 一名学生已报名(待审核, 用于演示审核流程)
 INSERT INTO signup (client_id, activity_id, stu_no, name, status, category) VALUES

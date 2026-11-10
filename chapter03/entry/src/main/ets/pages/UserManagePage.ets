@@ -1,6 +1,7 @@
 /**
- * 社团活动报名与学时认定系统 —— 用户管理(仅管理员)
- * 查看全系统所有用户的注册状态 + 学时汇总 + 报名统计, 支持分组查找与关键字搜索。
+ * 社团活动报名与学时认定系统 —— 用户管理 / 成员管理(仅管理员)
+ * 平台管理员看到全量学生, 社团账号看到本社团成员, 标题按账号类型切换;
+ * 查看注册状态 + 学时汇总 + 报名统计, 支持分组查找与关键字搜索。
  * 分组: 全部 / 待审核 / 已通过 / 已驳回 / 已达标 / 未达标(全部服务端过滤, total 一致)。
  */
 import { router } from '@kit.ArkUI';
@@ -11,9 +12,7 @@ import { DbHelper } from '../common/DbHelper';
 import { AdminGuardView } from '../common/GuardViews';
 import {
   StudentInfo, StudentGroupCounts, CancelImpact, parseStudentList, parseStudentGroupCounts,
-  parseCancelImpact, dataOf, numOf, studentStatusText,
-  ClubMember, parseClubMembers, memberRoleText,
-  MemberRequest, parseMemberRequests, requestTypeText, requestStatusText
+  parseCancelImpact, dataOf, numOf, studentStatusText, memberRoleText
 } from '../common/Models';
 import { Theme } from '../common/Theme';
 import { StateView } from '../components/StateView';
@@ -38,20 +37,7 @@ struct UserManagePage {
   @State notAdmin: boolean = false;
   @State expandedSearch: boolean = false;
 
-  // ---- v5.0 本社团成员(社团账号可见): 岗位筛选 + 移除 ----
-  @State members: ClubMember[] = [];
-  @State memberRole: string = '';          // '' 全部 | leader | minister | member
-  @State memberLeaderCount: number = 0;
-  @State memberMinisterCount: number = 0;
-  @State memberPlainCount: number = 0;
-  @State memberActiveCount: number = 0;
-  @State memberMsg: string = '';
-
-  // ---- v5.0(重构) 入社/退社申请审批(社团账号可见) ----
-  @State requests: MemberRequest[] = [];
-  @State showHandled: boolean = false;     // false=只看待审 true=全部
-  @State replyFor: number = -1;            // 需要填写理由(驳回)的申请 id
-  @State replyInput: string = '';
+  // ---- v5.0 成员管理融合: 岗位筛选/移除直接融进主列表(服务端 /api/student/list 按在册成员过滤并下发 club_role) ----
 
   // ---- 注销学生(危险操作): 同一时刻只展开一个 ----
   @State cancelStuNo: string = '';        // 当前展开注销面板的学号
@@ -68,191 +54,36 @@ struct UserManagePage {
         this.notAdmin = true;
         return;
       }
+      // 入社/退社审批已统一收口到「审核中心 · 入团审核」, 本页只做成员名单与岗位管理
       this.load();
-      // 社团账号额外拉本社团成员(平台管理员没有 club_id, 只看全平台列表)
-      if (AppConfig.isClubAccount) {
-        this.loadClubMembers();
-        this.loadRequests();
-      }
     }).catch((e: Error) => {
       this.loadError = '初始化失败: ' + e.message;
       this.loading = false;
     });
   }
 
-  async loadClubMembers(): Promise<void> {
-    if (!AppConfig.isClubAccount) return;
-    const q = this.memberRole === '' ? '' : '&role=' + this.memberRole;
-    const resp = await ApiClient.get('/api/club/members?size=100' + q);
-    if (resp['code'] === 0) {
-      this.members = parseClubMembers(resp);
-      const d = dataOf(resp);
-      if (d !== null) {
-        this.memberLeaderCount = numOf(d, 'leader_count');
-        this.memberMinisterCount = numOf(d, 'minister_count');
-        this.memberPlainCount = numOf(d, 'member_count');
-        this.memberActiveCount = numOf(d, 'active_count');
-      }
-      this.memberMsg = '';
-    } else {
-      this.memberMsg = resp['msg'] as string;
-    }
-  }
-
-  switchMemberRole(r: string): void {
-    if (this.memberRole === r) return;
-    this.memberRole = r;
-    this.loadClubMembers();
-  }
-
   /** 移除成员: 二次确认 + 服务端二次校验(现任社长不可移除) */
-  confirmRemoveMember(m: ClubMember): void {
+  confirmRemoveMember(s: StudentInfo): void {
     AlertDialog.show({
       title: '移除该成员?',
-      message: '「' + m.name + ' (' + m.stu_no + ')」将退出本社团。\n其学生账号、历史报名与已认定学时全部保留。',
+      message: '「' + s.name + ' (' + s.stu_no + ')」将退出本社团。\n其学生账号、历史报名与已认定学时全部保留。',
       primaryButton: { value: '取消', action: () => {} },
       secondaryButton: {
         value: '移除',
         fontColor: Theme.danger,
         action: () => {
-          this.removeMember(m);
+          this.removeMember(s.stu_no);
         }
       }
     });
   }
 
-  // ==================== v5.0(重构) 入社/退社申请审批 ====================
-
-  async loadRequests(): Promise<void> {
-    if (!AppConfig.isClubAccount) return;
-    const path = this.showHandled ? '/api/club/requests?status=&size=50' : '/api/club/requests?size=50';
-    const resp = await ApiClient.get(path);
-    if (resp['code'] === 0) {
-      this.requests = parseMemberRequests(resp);
-    }
-  }
-
-  /** 审批: 同意直接提交; 驳回必须填理由(先展开输入框, 二次点击提交) */
-  async auditRequest(r: MemberRequest, approve: boolean): Promise<void> {
-    if (!approve && this.replyFor !== r.id) {
-      this.replyFor = r.id;
-      this.replyInput = '';
-      return;
-    }
-    const body: Record<string, Object> = { 'request_id': r.id, 'approve': approve ? 1 : 0 };
-    if (!approve) {
-      if (this.replyInput.trim() === '') {
-        this.memberMsg = '驳回必须填写理由';
-        return;
-      }
-      body['reply'] = this.replyInput.trim();
-    }
-    const resp = await ApiClient.post('/api/club/request/audit', body, true);
-    this.memberMsg = (resp['msg'] as string) || (resp['code'] === 0 ? '已审批' : '审批失败');
-    this.replyFor = -1;
-    this.replyInput = '';
-    await this.loadRequests();
-    await this.loadClubMembers();
-  }
-
-  @Builder
-  requestSection() {
-    Column({ space: 10 }) {
-      Row() {
-        Text('入社/退社审批').fontSize(Theme.fsTitle).fontWeight(FontWeight.Bold)
-          .fontColor(Theme.textBody).layoutWeight(1)
-        Text(this.showHandled ? '查看待审' : '查看全部')
-          .fontSize(Theme.fsCaption).fontColor(Theme.primary)
-          .onClick(() => {
-            this.showHandled = !this.showHandled;
-            this.loadRequests();
-          })
-      }.width('100%')
-
-      if (this.requests.length === 0) {
-        Text(this.showHandled ? '暂无申请记录' : '暂无待审申请')
-          .fontSize(Theme.fsCaption).fontColor(Theme.textTertiary).width('100%')
-      }
-
-      ForEach(this.requests, (r: MemberRequest) => {
-        Column({ space: 8 }) {
-          Row({ space: 8 }) {
-            Text(requestTypeText(r.type))
-              .fontSize(10)
-              .fontColor(Theme.textOnPrimary)
-              .padding({ left: 6, right: 6, top: 2, bottom: 2 })
-              .backgroundColor(r.type === 1 ? Theme.success : Theme.warning)
-              .borderRadius(6)
-            Text(r.name + ' (' + r.stu_no + ')')
-              .fontSize(Theme.fsSmall).fontWeight(FontWeight.Medium).fontColor(Theme.textBody)
-              .layoutWeight(1)
-            Text(requestStatusText(r.status))
-              .fontSize(Theme.fsCaption)
-              .fontColor(r.status === 0 ? Theme.warning : r.status === 1 ? Theme.success : Theme.danger)
-          }.width('100%')
-
-          if (r.reason !== '') {
-            Text('理由: ' + r.reason).fontSize(Theme.fsCaption).fontColor(Theme.textSecondary).width('100%')
-          }
-          // 审批参考信息: 申请人当前已加入的其他社团(判据在服务端)
-          if (r.other_clubs !== '') {
-            Text('已加入社团: ' + r.other_clubs)
-              .fontSize(Theme.fsCaption).fontColor(Theme.primary).width('100%')
-          } else if (r.type === 1 && r.status === 0) {
-            Text('已加入社团: 暂无(首次入社)')
-              .fontSize(Theme.fsCaption).fontColor(Theme.textTertiary).width('100%')
-          }
-          Text(r.created_at).fontSize(10).fontColor(Theme.textTertiary).width('100%')
-
-          if (r.status === 0) {
-            Row({ space: 10 }) {
-              Button('同意')
-                .layoutWeight(1).height(32).fontSize(Theme.fsSmall)
-                .fontColor(Theme.textOnPrimary).backgroundColor(Theme.success)
-                .borderRadius(Theme.radiusPill)
-                .onClick(() => this.auditRequest(r, true))
-              Button('驳回')
-                .layoutWeight(1).height(32).fontSize(Theme.fsSmall)
-                .fontColor(Theme.onColorDanger).backgroundColor(Theme.dangerBg)
-                .borderRadius(Theme.radiusPill)
-                .onClick(() => this.auditRequest(r, false))
-            }.width('100%')
-          } else {
-            Text('审批人 ' + (r.handler === '' ? '-' : r.handler) +
-              (r.handled_at === '' ? '' : ' · ' + r.handled_at) +
-              (r.reply === '' ? '' : ' · 回复: ' + r.reply))
-              .fontSize(10).fontColor(Theme.textTertiary).width('100%')
-          }
-
-          if (this.replyFor === r.id) {
-            Column({ space: 6 }) {
-              TextInput({ placeholder: '请填写驳回理由(必填)', text: this.replyInput })
-                .fontSize(Theme.fsSmall).height(40).width('100%')
-                .backgroundColor(Theme.bgSubtle).borderRadius(Theme.radiusMd)
-                .onChange((v: string) => { this.replyInput = v; })
-              Button('确认驳回')
-                .width('100%').height(32).fontSize(Theme.fsSmall)
-                .fontColor(Theme.textOnPrimary).backgroundColor(Theme.danger)
-                .borderRadius(Theme.radiusPill)
-                .enabled(this.replyInput.trim() !== '')
-                .onClick(() => this.auditRequest(r, false))
-            }
-            .width('100%').padding(8)
-            .backgroundColor(Theme.bgSubtle).borderRadius(Theme.radiusMd)
-          }
-        }
-        .width('100%').padding(12)
-        .backgroundColor(Theme.bgCard).borderRadius(Theme.radiusMd)
-      }, (r: MemberRequest) => r.id.toString())
-    }
-    .width('100%').padding(12)
-    .backgroundColor(Theme.bgSubtle).borderRadius(Theme.radiusLg)
-  }
-
-  async removeMember(m: ClubMember): Promise<void> {
-    const resp = await ApiClient.post('/api/club/member/remove', { 'stu_no': m.stu_no }, true);
-    this.memberMsg = resp['msg'] as string;
-    await this.loadClubMembers();
+  /** 移除成员出社团: 成功后刷新主列表(岗位计数/列表同步变化) */
+  async removeMember(stuNo: string): Promise<void> {
+    const resp = await ApiClient.post('/api/club/member/remove', { 'stu_no': stuNo }, true);
+    this.toast = (resp['msg'] as string) || (resp['code'] === 0 ? '已移除' : '移除失败');
+    await this.load();
+    setTimeout(() => { this.toast = ''; }, 2500);
   }
 
   async load(): Promise<void> {
@@ -269,14 +100,36 @@ struct UserManagePage {
         this.requiredHours = numOf(d, 'required_hours');
       }
       const gc: StudentGroupCounts = parseStudentGroupCounts(resp);
-      this.groups = [
-        { key: 'all', label: '全部', count: gc.all },
-        { key: 'pending', label: '待审核', count: gc.pending },
-        { key: 'approved', label: '已通过', count: gc.approved },
-        { key: 'rejected', label: '已驳回', count: gc.rejected },
-        { key: 'achieved', label: '已达标', count: gc.achieved },
-        { key: 'unachieved', label: '未达标', count: gc.unachieved }
-      ];
+      if (AppConfig.isClubAccount) {
+        // 社团账号: 在册成员按岗位分组(注册状态分组对在册成员没有意义, 待审注册在审核中心处理)
+        let rl = 0;
+        let rm = 0;
+        let rp = 0;
+        const d2 = dataOf(resp);
+        if (d2 !== null) {
+          const rc = d2['role_counts'] as Record<string, Object> | null;
+          if (rc && typeof rc === 'object') {
+            rl = numOf(rc, 'leader');
+            rm = numOf(rc, 'minister');
+            rp = numOf(rc, 'member');
+          }
+        }
+        this.groups = [
+          { key: 'all', label: '全部', count: gc.all },
+          { key: 'leader', label: '社长', count: rl },
+          { key: 'minister', label: '部长', count: rm },
+          { key: 'member', label: '成员', count: rp }
+        ];
+      } else {
+        this.groups = [
+          { key: 'all', label: '全部', count: gc.all },
+          { key: 'pending', label: '待审核', count: gc.pending },
+          { key: 'approved', label: '已通过', count: gc.approved },
+          { key: 'rejected', label: '已驳回', count: gc.rejected },
+          { key: 'achieved', label: '已达标', count: gc.achieved },
+          { key: 'unachieved', label: '未达标', count: gc.unachieved }
+        ];
+      }
       this.loadError = '';
     } else {
       this.loadError = resp['msg'] as string;
@@ -364,71 +217,10 @@ struct UserManagePage {
 
   // ==================== UI 构建 ====================
 
-  /** 岗位筛选胶囊(计数来自服务端聚合, 不是前端数出来的) */
-  @Builder
-  memberChip(label: string, key: string, count: number) {
-    Text(label + ' ' + count.toString())
-      .fontSize(Theme.fsCaption)
-      .fontColor(this.memberRole === key ? Theme.textOnPrimary : Theme.textSecondary)
-      .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-      .backgroundColor(this.memberRole === key ? Theme.primary : Theme.bgSubtle)
-      .borderRadius(Theme.radiusPill)
-      .onClick(() => this.switchMemberRole(key))
-  }
-
-  /** 本社团成员区(仅社团账号): 岗位筛选 + 移除(保留账号与历史学时) */
-  @Builder
-  memberSection() {
-    Column({ space: 8 }) {
-      Row() {
-        Text('本社团成员').fontSize(Theme.fsBody).fontWeight(FontWeight.Bold)
-          .fontColor(Theme.textBody).layoutWeight(1)
-        Text('在册 ' + this.memberActiveCount.toString())
-          .fontSize(Theme.fsCaption).fontColor(Theme.textTertiary)
-      }.width('100%')
-
-      Row({ space: 6 }) {
-        this.memberChip('全部', '', this.memberLeaderCount + this.memberMinisterCount + this.memberPlainCount)
-        this.memberChip('社长', 'leader', this.memberLeaderCount)
-        this.memberChip('部长', 'minister', this.memberMinisterCount)
-        this.memberChip('成员', 'member', this.memberPlainCount)
-      }.width('100%')
-
-      if (this.memberMsg !== '') {
-        Text(this.memberMsg).fontSize(Theme.fsCaption).fontColor(Theme.primary).width('100%')
-      }
-
-      if (this.members.length === 0) {
-        Text('暂无成员').fontSize(Theme.fsCaption).fontColor(Theme.textDisabled).width('100%')
-      } else {
-        ForEach(this.members.slice(0, 12), (m: ClubMember) => {
-          Row({ space: 8 }) {
-            Text(m.name).fontSize(Theme.fsSmall).fontColor(Theme.textBody).width(64)
-              .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-            Text(m.stu_no).fontSize(Theme.fsCaption).fontColor(Theme.textTertiary).layoutWeight(1)
-            Text(memberRoleText(m.role)).fontSize(10).fontColor(Theme.primary)
-              .padding({ left: 5, right: 5, top: 1, bottom: 1 })
-              .backgroundColor(Theme.primaryBg).borderRadius(4)
-            if (m.role !== 'leader') {
-              Text('移除').fontSize(Theme.fsCaption).fontColor(Theme.danger)
-                .padding({ left: 6, right: 4, top: 3, bottom: 3 })
-                .onClick(() => this.confirmRemoveMember(m))
-            }
-          }.width('100%').padding({ top: 4, bottom: 4 })
-        }, (m: ClubMember) => 'cm' + m.stu_no + '-' + m.role + '-' + this.memberRole)
-        if (this.members.length > 12) {
-          Text('仅显示前 12 条(共 ' + this.members.length.toString() + ' 条)')
-            .fontSize(10).fontColor(Theme.textDisabled).width('100%')
-        }
-      }
-    }
-    .width('100%').padding(12).backgroundColor(Theme.bgCard)
-    .borderRadius(Theme.radiusLg).alignItems(HorizontalAlign.Start)
-  }
-
   @Builder
   groupChips() {
-    // 两行三列网格: 6 个分组全部一眼可见, 无需横向滑动(避免末尾分组被右缘裁切)
+    // 两行三列网格: 分组全部一眼可见, 无需横向滑动(避免末尾分组被右缘裁切)
+    // 社团账号 4 组(岗位口径, 2 行), 平台管理员 6 组(注册状态口径, 2 行)
     Grid() {
       ForEach(this.groups, (g: GroupDef) => {
         GridItem() {
@@ -448,9 +240,9 @@ struct UserManagePage {
         }
       }, (g: GroupDef) => g.key)
     }
-    .columnsTemplate('1fr 1fr 1fr')
+    .columnsTemplate(this.groups.length > 4 ? '1fr 1fr 1fr' : '1fr 1fr 1fr 1fr')
     .columnsGap(8).rowsGap(8)
-    .height(76)
+    .height(this.groups.length > 4 ? 76 : 34)
     .width('100%')
     .padding({ left: Theme.pagePadding, right: Theme.pagePadding, top: 4 })
   }
@@ -487,6 +279,13 @@ struct UserManagePage {
               .padding({ left: 6, right: 6, top: 1, bottom: 1 })
               .backgroundColor(this.statusBg(s.status))
               .borderRadius(6)
+            // 社团账号: 显示社团内岗位(社长/部长/成员)
+            if (AppConfig.isClubAccount && s.club_role !== '') {
+              Text(memberRoleText(s.club_role))
+                .fontSize(10).fontColor(Theme.primary)
+                .padding({ left: 5, right: 5, top: 1, bottom: 1 })
+                .backgroundColor(Theme.primaryBg).borderRadius(6)
+            }
           }.alignItems(VerticalAlign.Center)
           Text(s.stu_no + (s.dept !== '' ? ' · ' + s.dept : ''))
             .fontSize(Theme.fsCaption).fontColor(Theme.textTertiary)
@@ -527,13 +326,21 @@ struct UserManagePage {
         }.width('100%')
       }
 
-      // 附加信息: RFID 卡号 / 注册日期(仅到日, 避免长串溢出) / 注销入口
+      // 附加信息: RFID 卡号 / 注册日期(仅到日) / 移除出社团(社团账号) / 注销入口
       Row() {
         Text(s.card_no !== '' ? '卡号 ' + s.card_no : '未绑卡')
           .fontSize(10).fontColor(Theme.textTertiary)
         Blank()
         Text('注册 ' + s.created_at.substring(0, 10))
           .fontSize(10).fontColor(Theme.textDisabled)
+        if (AppConfig.isClubAccount && s.club_role !== '' && s.club_role !== 'leader') {
+          Text('移除')
+            .fontSize(10).fontColor(Theme.warning)
+            .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+            .backgroundColor(Theme.warningBg).borderRadius(6)
+            .margin({ left: 8 })
+            .onClick(() => this.confirmRemoveMember(s))
+        }
         Text(this.cancelStuNo === s.stu_no ? '收起' : '注销')
           .fontSize(10).fontColor(Theme.danger)
           .padding({ left: 8, right: 8, top: 3, bottom: 3 })
@@ -597,68 +404,71 @@ struct UserManagePage {
           Text('‹ 返回').fontSize(14).fontColor(Theme.primary)
             .padding({ right: 10, top: 2, bottom: 2 })
             .onClick(() => router.back())
-          Text('用户管理').fontSize(Theme.fsHeading).fontWeight(FontWeight.Bold).layoutWeight(1)
+          Text(AppConfig.isClubAccount ? '成员管理' : '用户管理')
+            .fontSize(Theme.fsHeading).fontWeight(FontWeight.Bold).layoutWeight(1)
           Text('共 ' + this.total + ' 人').fontSize(Theme.fsCaption).fontColor(Theme.textTertiary)
           Button('刷新').fontSize(13).height(30).backgroundColor(Theme.primary)
             .onClick(() => this.load())
         }.width('100%').padding({ left: 14, right: 14, top: 12, bottom: 6 })
 
-        // 入社/退社申请审批(社团账号专属, v5.0 重构)
-        if (AppConfig.isClubAccount) {
-          Column() {
-            this.requestSection()
+        // 整页只有一个滚动容器: 审批 / 成员 / 分组 / 搜索 / 学生卡全部进 List。
+        // 之前这些块钉在 List 外面, 小屏上固定区吃掉半屏, 列表只剩一条缝, 用手滑不动的感觉极差。
+        List({ space: 10 }) {
+          // 分组查找 + 关键字搜索(社团账号=岗位分组, 平台管理员=注册状态分组)
+          ListItem() {
+            this.groupChips()
           }
-          .width('100%')
-          .padding({ left: Theme.pagePadding, right: Theme.pagePadding, top: 8 })
-        }
-
-        // 本社团成员(社团账号专属)
-        if (AppConfig.isClubAccount) {
-          Column() {
-            this.memberSection()
+          ListItem() {
+            this.searchBar()
           }
-          .width('100%')
-          .padding({ left: Theme.pagePadding, right: Theme.pagePadding, top: 8 })
-        }
 
-        // 分组查找
-        this.groupChips()
-        this.searchBar()
+          // 达标线提示
+          if (this.requiredHours > 0) {
+            ListItem() {
+              Text('学时达标线 ' + this.requiredHours + ' 学时')
+                .fontSize(10).fontColor(Theme.textTertiary)
+                .width('100%')
+                .padding({ left: Theme.pagePadding, right: Theme.pagePadding })
+            }
+          }
 
-        // 达标线提示
-        if (this.requiredHours > 0) {
-          Text('学时达标线 ' + this.requiredHours + ' 学时')
-            .fontSize(10).fontColor(Theme.textTertiary)
-            .width('100%')
-            .padding({ left: Theme.pagePadding, top: 8 })
-        }
+          // 操作结果提示(注销成功等)
+          if (this.toast !== '') {
+            ListItem() {
+              Text(this.toast)
+                .fontSize(11).fontColor(Theme.success)
+                .width('100%').padding({ left: Theme.pagePadding, right: Theme.pagePadding })
+            }
+          }
 
-        // 操作结果提示(注销成功等)
-        if (this.toast !== '') {
-          Text(this.toast)
-            .fontSize(11).fontColor(Theme.success)
-            .width('100%').padding({ left: Theme.pagePadding, right: Theme.pagePadding, top: 8 })
-        }
-
-        // 列表 / 状态视图
-        if (this.loading) {
-          StateView({ kind: 'loading', title: '加载用户中', desc: '正在从服务器拉取全量学生信息' })
-        } else if (this.loadError !== '') {
-          StateView({ kind: 'error', title: '加载失败', desc: this.loadError, retryText: '重试', onRetry: () => this.load() })
-        } else if (this.students.length === 0) {
-          StateView({ kind: 'empty', title: '没有匹配的用户', desc: '换个分组或关键字试试' })
-        } else {
-          List({ space: 10 }) {
+          // 列表 / 状态视图
+          if (this.loading) {
+            ListItem() {
+              StateView({ kind: 'loading', title: '加载用户中', desc: '正在从服务器拉取学生信息' })
+            }
+          } else if (this.loadError !== '') {
+            ListItem() {
+              StateView({
+                kind: 'error', title: '加载失败', desc: this.loadError,
+                retryText: '重试', onRetry: () => this.load()
+              })
+            }
+          } else if (this.students.length === 0) {
+            ListItem() {
+              StateView({ kind: 'empty', title: '没有匹配的用户', desc: '换个分组或关键字试试' })
+            }
+          } else {
             ForEach(this.students, (s: StudentInfo) => {
               ListItem() {
                 this.userCard(s)
-              }
+              }.padding({ left: Theme.pagePadding, right: Theme.pagePadding })
             }, (s: StudentInfo) => s.stu_no + '_' + s.id.toString())
           }
-          .layoutWeight(1).width('100%')
-          .scrollBar(BarState.Off)
-          .padding({ left: Theme.pagePadding, right: Theme.pagePadding, bottom: 16 })
         }
+        .layoutWeight(1).width('100%')
+        .scrollBar(BarState.Off)
+        .edgeEffect(EdgeEffect.Spring)
+        .padding({ top: 4, bottom: 16 })
       }
     }
     .width('100%').height('100%').backgroundColor(Theme.bgPage)

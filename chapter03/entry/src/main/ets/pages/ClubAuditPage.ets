@@ -21,7 +21,7 @@ struct ClubAuditPage {
   @State list: AdminClubInfo[] = [];
   @State loading: boolean = true;
   @State loadError: string = '';
-  @State filter: string = 'all';      // all / 0待审 / 1正常 / 2驳回 / 3停用
+  // v5.0: 顶部状态筛选胶囊条已按需求移除, 一次拉全量列表, 状态在卡片标签上区分
   @State busyId: number = -1;
   @State editingId: number = -1;      // 驳回/停用时需要填理由的社团 id
   @State reason: string = '';
@@ -38,9 +38,7 @@ struct ClubAuditPage {
   async load(): Promise<void> {
     this.loading = true;
     this.loadError = '';
-    let path = '/api/admin/clubs?size=100';
-    if (this.filter !== 'all') path += '&status=' + this.filter;
-    const resp = await ApiClient.get(path);
+    const resp = await ApiClient.get('/api/admin/clubs?size=100');
     if (resp['code'] !== 0) {
       this.loadError = (resp['msg'] as string) || '加载失败';
       this.loading = false;
@@ -79,34 +77,6 @@ struct ClubAuditPage {
       Text('').fontSize(Theme.fsBody).width(52)
     }
     .width('100%').padding({ left: 14, right: 14, top: 12, bottom: 10 })
-  }
-
-  @Builder
-  chips() {
-    Scroll() {
-      Row({ space: 8 }) {
-        this.chip('全部', 'all')
-        this.chip('待审核', '0')
-        this.chip('正常', '1')
-        this.chip('已驳回', '2')
-        this.chip('已停用', '3')
-      }
-    }
-    .scrollable(ScrollDirection.Horizontal)
-    .width('100%').padding({ left: Theme.pagePadding, right: Theme.pagePadding, bottom: 8 })
-    .scrollBar(BarState.Off)
-  }
-
-  @Builder
-  chip(label: string, key: string) {
-    Text(label)
-      .fontSize(Theme.fsSmall)
-      .fontColor(this.filter === key ? Theme.textOnPrimary : Theme.textSecondary)
-      .fontWeight(this.filter === key ? FontWeight.Medium : FontWeight.Normal)
-      .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-      .backgroundColor(this.filter === key ? Theme.primary : Theme.bgSubtle)
-      .borderRadius(Theme.radiusPill)
-      .onClick(() => { this.filter = key; this.load(); })
   }
 
   @Builder
@@ -220,7 +190,6 @@ struct ClubAuditPage {
       if (this.notAdmin) {
         AdminGuardView({ tip: '社团审核仅平台管理员可用(社团账号请到「社团主页」)' })
       } else {
-        this.chips()
         if (this.loading) {
           StateView({ kind: 'loading', title: '正在加载社团' })
         } else if (this.loadError !== '') {
