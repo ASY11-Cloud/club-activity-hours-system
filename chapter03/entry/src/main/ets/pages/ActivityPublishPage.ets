@@ -37,8 +37,9 @@ struct ActivityPublishPage {
   aboutToAppear(): void {
     const ctx = getContext(this) as common.UIAbilityContext;
     AppConfig.init(ctx).then(() => DbHelper.init(ctx)).then(() => {
-      if (!AppConfig.isAdmin) {
-        this.blocked = true; // 无权限: 仅管理员可发布活动
+      // v5.0(重构): 活动发布归属于社团 —— 仅社团账号可发布(平台管理员在服务端同样被 403)
+      if (!AppConfig.isClubAccount) {
+        this.blocked = true;
         return;
       }
       this.publisher = AppConfig.stuName;
@@ -469,7 +470,7 @@ struct ActivityPublishPage {
 
   @Builder
   deniedView() {
-    AdminGuardView({ tip: '活动发布仅限管理员, 请以管理员身份登录后访问' })
+    AdminGuardView({ tip: '活动发布归属于社团, 请以社团账号登录后访问' })
   }
 
   build() {

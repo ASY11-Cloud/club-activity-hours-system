@@ -1191,3 +1191,49 @@ powershell -ExecutionPolicy Bypass -File tools\md2docx.ps1 -Md docs\使用说明
 - 学生可属于多个社团（`club_member` 允许），但 App 不提供加入/退出入口，目前由管理页维护；
 - 注册流程不强制加入社团（强制会让既有注册脚本与演示流程全废）；
 - 没有单活动查询接口：详情页仍依赖列表数据，鉴权靠"列表过滤 + 写接口校验"双保险，不依赖 UI 隐藏。
+## 33. v5.0（重构）：社团注册制与成员流动（2026-11-10）
+
+初版 v5.0（§32，预置单社团 + 管理页维护归属）被判失败设计，整体留档于分支/标签 `v5.0-old`（commit `cf84be9`，连同 v4.0 分支/标签已推送 GitHub）。版本号**保持 5.0**，本轮在 main 上就地重构。
+
+### 33.1 数据层
+
+- `club.status` 三态：0=待审核 / 1=正常 / 2=已驳回 / 3=已停用（旧 0=停用从未被写入，无数据搬移；`dbEnsureSchema` 对老库 `hasColOf` 补 `reject_reason` / `audited_at`，失败 stderr 告警）；新增表 `club_member_request`（type 1 加入 / 2 退出；status 0/1/2；无 student 外键，注销流程 2.6 显式清理）；
+- `init_db.sql` / `seed_demo_data.sql` 重写：新基线 = 计算机协会(club) + 篮球协会(ball) 已审核 + 茶艺社(tea) 待审；成员归属全部经「已同意的申请」产生（3 条同意 + 1 条待审 2023006→club1）；活动/报名/学时基线 8/19/20.5 延续不变（这是刻意取舍：保住 verify_v4/audit_v4 的硬编码断言，"清空重建"体现在社团层与申请链路，活动基线数字不动）。
+
+### 33.2 服务端新接口（8 个）
+
+- 公开：`POST /api/club/register`（账号/社团名唯一含待审占用；密码 6~64；注册人=首任社长，change_type=3 历任记录即时落库）；
+- 登录：`/api/login`(type=club) 三态文案（待审/驳回/停用）+ `pending_request_count` 角标；
+- 学生：`GET /api/club/square`（my_status 0~5，**退出审核中=5 优先于在册=1**——这是修过的一次状态机优先级缺陷）、`POST /api/club/join`（锁学生行→判重 409）、`POST /api/club/leave`（社长 400；加入审核中不能退出）；
+- 社团账号：`GET /api/club/requests`（默认待审，每条附 `other_clubs` 申请人已加入社团）、`POST /api/club/request/audit`（`WHERE status=0` 并发恰一次；同意加入 ON DUPLICATE 复入保岗；同意退出置离册；退出审批双保险再查岗位）；
+- 平台管理员：`GET /api/admin/clubs`（筛选 + pending_count）、`POST /api/admin/club/audit`（approve/reject/disable/enable 状态机，驳回/停用必填理由，重复 409）。
+
+### 33.3 权限收紧
+
+- `/api/activity/add|update|status` 路由层改 `me.club_id <= 0 -> 403`（平台管理员不再发布活动）；`handleActivityStatus` 增加社团边界校验（只能上下线本社团活动）；
+- App 管理面板：社团账号 = 发布活动 + 入社/退社审批卡；平台管理员 = 社团审核卡（发布卡移除）；发布/编辑页 `isClubAccount` 守卫。
+
+### 33.4 验收（2026-11-10）
+
+| 脚本 | 项数 | 结果 |
+|---|---:|---|
+| `verify_membership.ps1`（新） | 56 | 全绿（注册三态/审核状态机/**并发审批恰一次**/other_clubs/可见性联动/复入/边界） |
+| `verify_club.ps1` | 60 | 全绿（换届/成员/公告/统计回归） |
+| `verify_scope.ps1` | 17 | 全绿（参与范围回归，脚本无需改动——发布用社团令牌） |
+| `verify_v4.ps1` | 45 | 全绿（纯 SQL 造数，无需改动） |
+| `audit_v4.ps1` | **105** | 全绿（103 + 新增 2 条「平台管理员发布/上下线 403」；6 处 activity/add|update 用例改用社团账号） |
+| `verify_test_data.ps1` | 11+10+48+14 | 四阶段全绿（基线 8/19/20.5 不变） |
+
+- 服务端 `-O2 -Wall` 零警告；App `assembleHap` BUILD SUCCESSFUL；health.version=5.0。
+
+### 33.5 本轮修过的三处自身缺陷（供后人避坑）
+
+1. `handleClubSquare` 的 my_status 判定最初把"在册"放在最高优先级，导致退出审核中显示为已加入——**待审退出必须优先于在册**（状态机语义：5 是 1 的细化态）；
+2. `verify_membership.ps1` 首版把并发审批对象写成了学生乙的申请，学生甲的申请从未审批，F/G 节连锁失败——**测试流程要与业务状态机严格对齐**；
+3. `seed_demo_data.sql` 面向全新库设计，对已有库直接跑会在活动段冲突——重灌数据请走 `init_db.sql -> seed_demo_data.sql` 全新链路，或只执行第 6 节社团层语句。
+
+### 33.6 已知取舍
+
+- 活动基线数字未重建（8/19/20.5），"清空重建"仅覆盖社团层与申请链路——如需连活动一起重建，需同步改 verify_v4/audit_v4/verify_test_data 三处硬编码断言，工作量与收益不成比例，刻意不做；
+- 加入/退出申请的理由为纯文本选填，无附件；审批驳回理由必填（服务端 400 校验 + App 展开输入框）；
+- 社团广场不做分页（当前社团量级小，接口 size 无上限约束在 100）。

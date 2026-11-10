@@ -927,6 +927,7 @@ static string handleLogin(const Json& body, const string& ip) {
   string err;
   QueryResult r;
   TokenInfo ti;
+  long long pendingReq = 0;   // 社团账号登录时下发: 本社团待审的入社/退社申请数(审批角标)
   if (type == "admin") {
     // 口令不再参与 SQL 比较(明文入库+拼串既不可审计也可被注入), 取出后由程序校验摘要
     if (!dbQuery(c, "SELECT username,name,password FROM admin_user WHERE username=" +
@@ -962,6 +963,14 @@ static string handleLogin(const Json& body, const string& ip) {
       loginFailAdd(ipKey, LOGIN_FAIL_IP_MAX);
       return jsonErr(401, "社团账号或密码错误");
     }
+    if (atoi(r.rows[0][4].c_str()) == 0) {
+      dbRelease(c);
+      return jsonErr(403, "社团注册申请待管理员审核, 审核通过后才能登录");
+    }
+    if (atoi(r.rows[0][4].c_str()) == 2) {
+      dbRelease(c);
+      return jsonErr(403, "社团注册申请已被驳回, 请联系平台管理员");
+    }
     if (atoi(r.rows[0][4].c_str()) != 1) {
       dbRelease(c);
       return jsonErr(403, "该社团账号已停用, 请联系平台管理员");
@@ -977,6 +986,11 @@ static string handleLogin(const Json& body, const string& ip) {
     ti.club_name = r.rows[0][1];
     ti.name = r.rows[0][2].empty() ? r.rows[0][1] : r.rows[0][2];  // 社长未录入时退回社团名
     ti.stu_no = account;
+    // 待审的入社/退社申请数, 供 App 审批角标(只统计本社团)
+    QueryResult rq;
+    if (dbQuery(c, "SELECT COUNT(*) FROM club_member_request WHERE club_id=" +
+                   std::to_string(ti.club_id) + " AND status=0", rq, err) && !rq.rows.empty())
+      pendingReq = atoll(rq.rows[0][0].c_str());
   } else {
     if (!dbQuery(c, "SELECT stu_no,name,status,pwd_hash FROM student WHERE stu_no=" + dbEscape(c, account), r, err)) {
       dbRelease(c); return jsonErr(500, err);
@@ -1026,6 +1040,7 @@ static string handleLogin(const Json& body, const string& ip) {
   data.set("club_id", Json::Num(ti.club_id));
   data.set("club_name", Json::Str(ti.club_name));
   data.set("account_type", Json::Str(type));
+  if (type == "club") data.set("pending_request_count", Json::Num((double)pendingReq));
   return jsonOk(data);
 }
 
@@ -1178,6 +1193,70 @@ static string handleRegister(const Json& body) {
   Json data = Json::Object();
   data.set("stu_no", Json::Str(stuNo));
   return jsonOk(data);
+}
+
+/**
+ * 社团注册申请(公开): {account, club_name, pwd, dept?, intro?, leader_name?, leader_stu_no?}
+ * 注册即进入 status=0 待审核; 平台管理员审核通过(status=1)后获得独立编号(club.id)并可登录。
+ * 注册人视为首任社长: leader 信息入 club 行并追加一条 change_type=3 的历任记录(只追加不覆盖)。
+ */
+static string trimStr(const string& s);   // 前向声明: 定义在下方公共工具区
+static string handleClubRegister(const Json& body) {
+  string account = trimStr(body.strVal("account"));
+  string clubName = trimStr(body.strVal("club_name"));
+  string pwd = body.strVal("pwd");
+  string dept = trimStr(body.strVal("dept"));
+  string intro = trimStr(body.strVal("intro"));
+  string leaderName = trimStr(body.strVal("leader_name"));
+  string leaderStu = trimStr(body.strVal("leader_stu_no"));
+  if (account.empty() || clubName.empty())
+    return jsonErr(400, "登录账号与社团名称必填");
+  if (account.size() > 50 || clubName.size() > 100 || dept.size() > 100 ||
+      intro.size() > 500 || leaderName.size() > 50 || leaderStu.size() > 20)
+    return jsonErr(400, "字段过长");
+  if (pwd.size() < 6 || pwd.size() > 64)
+    return jsonErr(400, "密码长度需 6~64 位");
+  MYSQL* c = dbConnect();
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
+  string err;
+  QueryResult r;
+  // 账号唯一(不论状态): 待审/驳回中的注册同样占用账号名, 避免审核通过后撞名
+  if (!dbQuery(c, "SELECT id,status FROM club WHERE account=" + dbEscape(c, account), r, err)) {
+    dbRelease(c); return jsonErr(500, err);
+  }
+  if (!r.rows.empty()) {
+    int st = atoi(r.rows[0][1].c_str());
+    dbRelease(c);
+    if (st == 0) return jsonErr(409, "该账号的社团注册申请待管理员审核, 请勿重复提交");
+    if (st == 2) return jsonErr(409, "该账号的注册曾被驳回, 请换一个账号或联系管理员");
+    return jsonErr(409, "该登录账号已被其他社团使用");
+  }
+  // 社团名唯一: 防止同一社团重复注册(不论状态, 名称也占用)
+  if (!dbQuery(c, "SELECT id FROM club WHERE club_name=" + dbEscape(c, clubName), r, err)) {
+    dbRelease(c); return jsonErr(500, err);
+  }
+  if (!r.rows.empty()) { dbRelease(c); return jsonErr(409, "该社团名称已被使用"); }
+  std::ostringstream s;
+  s << "INSERT INTO club (account,pwd_hash,club_name,intro,dept,leader_name,leader_stu_no,"
+      "leader_since,status) VALUES ("
+    << dbEscape(c, account) << "," << dbEscape(c, pwdHashStrong(pwd)) << "," << dbEscape(c, clubName) << ","
+    << dbEscape(c, intro) << "," << dbEscape(c, dept) << "," << dbEscape(c, leaderName) << ","
+    << dbEscape(c, leaderStu) << "," << (leaderName.empty() ? string("NULL") : string("NOW()")) << ",0)";
+  if (!dbQuery(c, s.str(), r, err)) { dbRelease(c); return jsonErr(500, err); }
+  long long clubId = mysql_insert_id(c);
+  // 首任社长入历任记录(change_type=3 初始化): 审核只翻转状态, 历史在注册时就已留痕
+  if (!leaderName.empty()) {
+    std::ostringstream h;
+    h << "INSERT INTO club_leader_history (club_id,leader_name,leader_stu_no,start_at,end_at,"
+         "change_type,operator,reason) VALUES ("
+      << clubId << "," << dbEscape(c, leaderName) << "," << dbEscape(c, leaderStu)
+      << ",NOW(),NULL,3," << dbEscape(c, account) << ",'社团注册初始化')";
+    dbQuery(c, h.str(), r, err);
+  }
+  dbRelease(c);
+  Json data = Json::Object();
+  data.set("club_id", Json::Num((double)clubId));
+  return jsonOkMsg("注册申请已提交, 请等待平台管理员审核", data);
 }
 
 // 注册申请列表(仅管理员): 全部待审核注册申请
@@ -1689,6 +1768,458 @@ static string handleClubMemberRemove(const Json& body, const TokenInfo& me) {
                    "AUDIT 移除成员 club=" + std::to_string(me.club_id) + " stu=" + hdrSafe(stuNo));
 }
 
+/**
+ * GET /api/club/square — 社团广场(登录): 全部正常社团 + 我的申请状态
+ * my_status 口径: 0=未加入 1=在册 2=加入申请审核中 3=最近一条加入申请被驳回
+ *                 4=曾退出/被移除(可重新申请) 5=退出申请审核中(期间仍是成员)
+ * 仅学生返回个人状态; 社团/平台管理员浏览时不带 my_status。
+ */
+static string handleClubSquare(const TokenInfo& me) {
+  MYSQL* c = dbConnect();
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
+  string err;
+  QueryResult r;
+  if (!dbQuery(c,
+      "SELECT c.id,c.club_name,c.intro,c.dept,c.leader_name,"
+      "(SELECT COUNT(*) FROM club_member m WHERE m.club_id=c.id AND m.status=1) AS member_count,"
+      "(SELECT COUNT(*) FROM activity a WHERE a.club_id=c.id AND a.status=1) AS activity_count "
+      "FROM club c WHERE c.status=1 ORDER BY c.id", r, err)) {
+    dbRelease(c); return jsonErr(500, err);
+  }
+  // 该学生的成员行与全部申请(按 id 取最新一条): 数据量小, 一次拉回内存里算状态
+  std::map<long long, int> memMap;                  // club_id -> club_member.status
+  std::map<std::pair<long long,int>, int> reqMap;   // (club_id,type) -> 最新申请 status
+  if (me.role == "student") {
+    QueryResult mm;
+    if (!dbQuery(c, "SELECT club_id,status FROM club_member WHERE stu_no=" + dbEscape(c, me.stu_no), mm, err)) {
+      dbRelease(c); return jsonErr(500, err);
+    }
+    for (auto& row : mm.rows) memMap[atoll(row[0].c_str())] = atoi(row[1].c_str());
+    QueryResult mq;
+    if (!dbQuery(c, "SELECT club_id,type,status FROM club_member_request WHERE stu_no=" +
+                    dbEscape(c, me.stu_no) + " ORDER BY id", mq, err)) {
+      dbRelease(c); return jsonErr(500, err);
+    }
+    for (auto& row : mq.rows)
+      reqMap[std::make_pair(atoll(row[0].c_str()), atoi(row[1].c_str()))] = atoi(row[2].c_str());
+  }
+  dbRelease(c);
+  Json arr = Json::Array();
+  long long nClubs = (long long)r.rows.size();
+  for (auto& row : r.rows) {
+    long long cid = atoll(row[0].c_str());
+    Json o = Json::Object();
+    o.set("club_id", Json::Num((double)cid));
+    o.set("club_name", Json::Str(row[1]));
+    o.set("intro", Json::Str(row[2]));
+    o.set("dept", Json::Str(row[3]));
+    o.set("leader_name", Json::Str(row[4]));
+    o.set("member_count", Json::Num((double)atoll(row[5].c_str())));
+    o.set("activity_count", Json::Num((double)atoll(row[6].c_str())));
+    if (me.role == "student") {
+      int my = 0;
+      auto mit = memMap.find(cid);
+      auto pj = reqMap.find(std::make_pair(cid, 1));
+      auto pl = reqMap.find(std::make_pair(cid, 2));
+      if (pl != reqMap.end() && pl->second == 0)
+        my = 5;                                        // 退出审核中(仍是成员, 优先于"在册")
+      else if (mit != memMap.end() && mit->second == 1)
+        my = 1;                                        // 在册
+      else if (pj != reqMap.end() && pj->second == 0)
+        my = 2;                                        // 加入审核中
+      else if (pj != reqMap.end() && pj->second == 2)
+        my = 3;                                        // 加入被驳回
+      else if (mit != memMap.end())
+        my = 4;                                        // 已退出/被移除
+      o.set("my_status", Json::Num(my));
+    }
+    arr.push(o);
+  }
+  Json data = Json::Object();
+  data.set("list", arr);
+  data.set("total", Json::Num((double)nClubs));
+  return jsonOk(data);
+}
+
+/**
+ * POST /api/club/join — 学生申请加入社团 {club_id, reason?}
+ * 判重遵循全站"先锁学生行"锁序: 同社团同类型待审只允许一条(409)。
+ */
+static string handleClubJoin(const Json& body, const TokenInfo& me) {
+  if (me.role != "student") return needStudent();
+  long long clubId = body.intVal("club_id", 0);
+  string reason = utf8Truncate(trimStr(body.strVal("reason")), 200);
+  if (clubId <= 0) return jsonErr(400, "club_id required");
+  MYSQL* c = dbConnect();
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
+  string err;
+  QueryResult r;
+  auto fail = [&](int code, const string& msg) -> string {
+    mysql_rollback(c); mysql_autocommit(c, 1); dbRelease(c);
+    return jsonErr(code, msg);
+  };
+  mysql_autocommit(c, 0);
+  QueryResult lk;
+  if (!dbQuery(c, "SELECT id FROM student WHERE stu_no=" + dbEscape(c, me.stu_no) + " FOR UPDATE", lk, err))
+    return fail(500, err);
+  if (lk.rows.empty()) return fail(404, "账号不存在或已注销");
+  QueryResult rc;
+  if (!dbQuery(c, "SELECT status FROM club WHERE id=" + std::to_string(clubId) + " FOR UPDATE", rc, err))
+    return fail(500, err);
+  if (rc.rows.empty()) return fail(404, "社团不存在");
+  if (atoi(rc.rows[0][0].c_str()) != 1) return fail(403, "该社团当前不可加入(未开放或已停用)");
+  QueryResult rm;
+  if (!dbQuery(c, "SELECT status FROM club_member WHERE club_id=" + std::to_string(clubId) +
+                  " AND stu_no=" + dbEscape(c, me.stu_no) + " FOR UPDATE", rm, err))
+    return fail(500, err);
+  if (!rm.rows.empty() && atoi(rm.rows[0][0].c_str()) == 1)
+    return fail(409, "你已是该社团成员, 无需重复申请");
+  QueryResult rq;
+  if (!dbQuery(c, "SELECT id FROM club_member_request WHERE club_id=" + std::to_string(clubId) +
+                  " AND stu_no=" + dbEscape(c, me.stu_no) + " AND type=1 AND status=0", rq, err))
+    return fail(500, err);
+  if (!rq.rows.empty()) return fail(409, "已有待审的加入申请, 请等待社团审批");
+  QueryResult w;
+  std::ostringstream s;
+  s << "INSERT INTO club_member_request (club_id,stu_no,type,reason,status) VALUES ("
+    << clubId << "," << dbEscape(c, me.stu_no) << ",1," << dbEscape(c, reason) << ",0)";
+  if (!dbQuery(c, s.str(), w, err)) return fail(500, err);
+  long long reqId = mysql_insert_id(c);
+  if (mysql_commit(c) != 0) return fail(500, "提交失败, 请重试");
+  mysql_autocommit(c, 1);
+  dbRelease(c);
+  Json data = Json::Object();
+  data.set("request_id", Json::Num((double)reqId));
+  return withAudit(jsonOkMsg("加入申请已提交, 等待社团审批", data),
+                   "AUDIT 申请加入社团 club=" + std::to_string(clubId) + " stu=" + hdrSafe(me.stu_no));
+}
+
+/**
+ * POST /api/club/leave — 学生申请退出社团 {club_id, reason?}
+ * 在册成员才可申请; 社长不能退出(先换届); 加入申请尚在审核中时不能申请退出。
+ */
+static string handleClubLeave(const Json& body, const TokenInfo& me) {
+  if (me.role != "student") return needStudent();
+  long long clubId = body.intVal("club_id", 0);
+  string reason = utf8Truncate(trimStr(body.strVal("reason")), 200);
+  if (clubId <= 0) return jsonErr(400, "club_id required");
+  MYSQL* c = dbConnect();
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
+  string err;
+  QueryResult r;
+  auto fail = [&](int code, const string& msg) -> string {
+    mysql_rollback(c); mysql_autocommit(c, 1); dbRelease(c);
+    return jsonErr(code, msg);
+  };
+  mysql_autocommit(c, 0);
+  QueryResult lk;
+  if (!dbQuery(c, "SELECT id FROM student WHERE stu_no=" + dbEscape(c, me.stu_no) + " FOR UPDATE", lk, err))
+    return fail(500, err);
+  if (lk.rows.empty()) return fail(404, "账号不存在或已注销");
+  QueryResult rm;
+  if (!dbQuery(c, "SELECT role,status FROM club_member WHERE club_id=" + std::to_string(clubId) +
+                  " AND stu_no=" + dbEscape(c, me.stu_no) + " FOR UPDATE", rm, err))
+    return fail(500, err);
+  if (rm.rows.empty() || atoi(rm.rows[0][1].c_str()) != 1)
+    return fail(400, "你不在该社团在册名单中");
+  if (rm.rows[0][0] == "leader")
+    return fail(400, "社长不能退出本社团, 请先在「社团主页」完成换届");
+  QueryResult rq;
+  if (!dbQuery(c, "SELECT id FROM club_member_request WHERE club_id=" + std::to_string(clubId) +
+                  " AND stu_no=" + dbEscape(c, me.stu_no) + " AND type=2 AND status=0", rq, err))
+    return fail(500, err);
+  if (!rq.rows.empty()) return fail(409, "已有待审的退出申请, 请等待社团审批");
+  QueryResult rj;
+  if (!dbQuery(c, "SELECT id FROM club_member_request WHERE club_id=" + std::to_string(clubId) +
+                  " AND stu_no=" + dbEscape(c, me.stu_no) + " AND type=1 AND status=0", rj, err))
+    return fail(500, err);
+  if (!rj.rows.empty()) return fail(400, "你的加入申请尚在审核中, 请等待审批结果后再操作");
+  QueryResult w;
+  std::ostringstream s;
+  s << "INSERT INTO club_member_request (club_id,stu_no,type,reason,status) VALUES ("
+    << clubId << "," << dbEscape(c, me.stu_no) << ",2," << dbEscape(c, reason) << ",0)";
+  if (!dbQuery(c, s.str(), w, err)) return fail(500, err);
+  long long reqId = mysql_insert_id(c);
+  if (mysql_commit(c) != 0) return fail(500, "提交失败, 请重试");
+  mysql_autocommit(c, 1);
+  dbRelease(c);
+  Json data = Json::Object();
+  data.set("request_id", Json::Num((double)reqId));
+  return withAudit(jsonOkMsg("退出申请已提交, 审批通过前你仍是该社团成员", data),
+                   "AUDIT 申请退出社团 club=" + std::to_string(clubId) + " stu=" + hdrSafe(me.stu_no));
+}
+
+/**
+ * GET /api/club/requests — 社团账号审批列表(默认待审)
+ * 每条附 other_clubs: 申请人当前在其他社团的在册名单(审批参考信息)。
+ */
+static string handleClubRequests(const string& query, const TokenInfo& me) {
+  if (!isClubAccount(me)) return jsonErr(403, "仅社团账号可审批入社/退社申请");
+  int page = atoi(qparam(query, "page").c_str());
+  int size = atoi(qparam(query, "size").c_str());
+  if (page < 1) page = 1;
+  if (size <= 0) size = 20;
+  if (size > 100) size = 100;
+  MYSQL* c = dbConnect();
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
+  string err;
+  string cond = "r.club_id=" + std::to_string(me.club_id);
+  string type = trimStr(qparam(query, "type"));
+  if (type == "1" || type == "2") cond += " AND r.type=" + type;
+  string status = trimStr(qparam(query, "status"));
+  if (status == "0" || status == "1" || status == "2") cond += " AND r.status=" + status;
+  else cond += " AND r.status=0";   // 默认只看待审
+  QueryResult cnt;
+  long long total = 0;
+  if (dbQuery(c, "SELECT COUNT(*) FROM club_member_request r WHERE " + cond, cnt, err) && !cnt.rows.empty())
+    total = atol(cnt.rows[0][0].c_str());
+  std::ostringstream sql;
+  sql << "SELECT r.id,r.type,r.status,r.stu_no,IFNULL(s.name,''),r.reason,"
+         "DATE_FORMAT(r.created_at,'%Y-%m-%d %H:%i:%s'),r.reply,r.handler,"
+         "DATE_FORMAT(r.handled_at,'%Y-%m-%d %H:%i:%s'),"
+         "(SELECT GROUP_CONCAT(cl.club_name ORDER BY cl.id) FROM club_member m2 "
+         "  JOIN club cl ON cl.id=m2.club_id "
+         "  WHERE m2.stu_no=r.stu_no AND m2.status=1 AND m2.club_id<>r.club_id) AS other_clubs "
+         "FROM club_member_request r LEFT JOIN student s ON r.stu_no=s.stu_no "
+         "WHERE " << cond << " ORDER BY r.id LIMIT " << size
+      << " OFFSET " << (long long)(page - 1) * size;
+  QueryResult r;
+  if (!dbQuery(c, sql.str(), r, err)) { dbRelease(c); return jsonErr(500, err); }
+  dbRelease(c);
+  Json arr = Json::Array();
+  for (auto& row : r.rows) {
+    Json o = Json::Object();
+    o.set("id", Json::Num(atol(row[0].c_str())));
+    o.set("type", Json::Num(atol(row[1].c_str())));
+    o.set("status", Json::Num(atol(row[2].c_str())));
+    o.set("stu_no", Json::Str(row[3]));
+    o.set("name", Json::Str(row[4]));
+    o.set("reason", Json::Str(row[5]));
+    o.set("created_at", Json::Str(row[6]));
+    o.set("reply", Json::Str(row[7]));
+    o.set("handler", Json::Str(row[8]));
+    o.set("handled_at", Json::Str(row[9]));
+    o.set("other_clubs", Json::Str(row[10]));   // 申请人已加入的其他社团(逗号分隔, 可为空)
+    arr.push(o);
+  }
+  Json data = Json::Object();
+  data.set("list", arr);
+  data.set("total", Json::Num((double)total));
+  data.set("page", Json::Num(page));
+  data.set("size", Json::Num(size));
+  data.set("has_more", Json::Bool((long long)page * size < total));
+  return jsonOk(data);
+}
+
+/**
+ * POST /api/club/request/audit — 社团账号审批 {request_id, approve 1|0, reply?}
+ * 审批用 WHERE status=0 条件更新实现"并发恰一次"(与申诉 audit 同款);
+ * 同意加入 = INSERT ... ON DUPLICATE KEY UPDATE status=1(退社后可复入, 原岗位保留);
+ * 同意退出 = 置 status=0 + quit_at, 学生账号与历史学时全部保留。
+ */
+static string handleClubRequestAudit(const Json& body, const TokenInfo& me) {
+  if (!isClubAccount(me)) return jsonErr(403, "仅社团账号可审批");
+  long long reqId = body.intVal("request_id", 0);
+  int approve = body.intVal("approve", -1);
+  string reply = utf8Truncate(trimStr(body.strVal("reply")), 200);
+  if (reqId <= 0) return jsonErr(400, "request_id required");
+  if (approve != 0 && approve != 1) return jsonErr(400, "approve 必须为 1(同意) 或 0(驳回)");
+  if (approve == 0 && reply.empty()) return jsonErr(400, "驳回必须填写理由");
+  MYSQL* c = dbConnect();
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
+  string err;
+  QueryResult r;
+  auto fail = [&](int code, const string& msg) -> string {
+    mysql_rollback(c); mysql_autocommit(c, 1); dbRelease(c);
+    return jsonErr(code, msg);
+  };
+  mysql_autocommit(c, 0);
+  QueryResult lr;
+  if (!dbQuery(c, "SELECT type,status,club_id,stu_no FROM club_member_request WHERE id=" +
+                  std::to_string(reqId) + " FOR UPDATE", lr, err))
+    return fail(500, err);
+  if (lr.rows.empty()) return fail(404, "申请不存在");
+  if (atoll(lr.rows[0][2].c_str()) != (long long)me.club_id)
+    return fail(403, "该申请不属于本社团");
+  int type = atoi(lr.rows[0][0].c_str());
+  if (atoi(lr.rows[0][1].c_str()) != 0) return fail(409, "该申请已被处理, 请刷新列表");
+  string stuNo = lr.rows[0][3];
+  // 学生必须仍存在(注销是物理删除)
+  QueryResult rs;
+  if (!dbQuery(c, "SELECT id FROM student WHERE stu_no=" + dbEscape(c, stuNo) + " FOR UPDATE", rs, err))
+    return fail(500, err);
+  if (rs.rows.empty()) return fail(400, "该学生账号已注销, 请驳回该申请");
+  if (type == 1) {
+    // 加入: 同意即入册(复社保留原岗位); 驳回无数据变更
+    if (approve == 1) {
+      QueryResult w;
+      if (!dbQuery(c, "INSERT INTO club_member (club_id,stu_no,role,status) VALUES (" +
+                      std::to_string(me.club_id) + "," + dbEscape(c, stuNo) + ",'member',1) "
+                      "ON DUPLICATE KEY UPDATE status=1, quit_at=NULL", w, err))
+        return fail(500, err);
+    }
+  } else {
+    // 退出: 双保险再查一次岗位 —— 申请创建时已挡社长, 这里防"审批期间完成换届又退"的时序
+    QueryResult rm;
+    if (!dbQuery(c, "SELECT role,status FROM club_member WHERE club_id=" + std::to_string(me.club_id) +
+                    " AND stu_no=" + dbEscape(c, stuNo) + " FOR UPDATE", rm, err))
+      return fail(500, err);
+    if (approve == 1) {
+      if (rm.rows.empty() || atoi(rm.rows[0][1].c_str()) != 1)
+        return fail(400, "该成员已不在册, 请驳回该申请");
+      if (rm.rows[0][0] == "leader")
+        return fail(400, "现任社长不能退出本社团, 请驳回并引导其先完成换届");
+      QueryResult w;
+      if (!dbQuery(c, "UPDATE club_member SET status=0,quit_at=NOW() WHERE club_id=" +
+                      std::to_string(me.club_id) + " AND stu_no=" + dbEscape(c, stuNo), w, err))
+        return fail(500, err);
+    }
+  }
+  QueryResult w2;
+  if (!dbQuery(c, "UPDATE club_member_request SET status=" + std::string(approve ? "1" : "2") +
+                  ",reply=" + dbEscape(c, reply) + ",handler=" + dbEscape(c, me.name) +
+                  ",handled_at=NOW() WHERE id=" + std::to_string(reqId) + " AND status=0", w2, err))
+    return fail(500, err);
+  if (mysql_affected_rows(c) != 1) return fail(409, "该申请已被其他管理员处理, 请刷新列表");
+  if (mysql_commit(c) != 0) return fail(500, "审批失败, 请重试");
+  mysql_autocommit(c, 1);
+  dbRelease(c);
+  string what = (type == 1 ? "加入" : "退出");
+  string verdict = (approve == 1 ? "同意" : "驳回");
+  Json data = Json::Object();
+  data.set("request_id", Json::Num((double)reqId));
+  data.set("approve", Json::Num(approve));
+  return withAudit(jsonOkMsg("已" + verdict + "该学生的" + what + "申请", data),
+                   "AUDIT 入社退社审批 club=" + std::to_string(me.club_id) +
+                   " req=" + std::to_string(reqId) + " 结果=" + verdict);
+}
+
+/** GET /api/admin/clubs — 平台管理员: 全量社团列表(待审/正常/驳回/停用筛选) */
+static string handleAdminClubs(const string& query) {
+  int page = atoi(qparam(query, "page").c_str());
+  int size = atoi(qparam(query, "size").c_str());
+  if (page < 1) page = 1;
+  if (size <= 0) size = 20;
+  if (size > 100) size = 100;
+  MYSQL* c = dbConnect();
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
+  string err;
+  string cond = "1=1";
+  string st = trimStr(qparam(query, "status"));
+  if (st == "0" || st == "1" || st == "2" || st == "3") cond += " AND c.status=" + st;
+  string kw = trimStr(qparam(query, "kw"));
+  if (!kw.empty()) {
+    string like = dbEscape(c, "%" + kw + "%");
+    cond += " AND (c.club_name LIKE " + like + " OR c.account LIKE " + like + ")";
+  }
+  QueryResult cnt;
+  long long total = 0;
+  if (dbQuery(c, "SELECT COUNT(*) FROM club c WHERE " + cond, cnt, err) && !cnt.rows.empty())
+    total = atol(cnt.rows[0][0].c_str());
+  std::ostringstream sql;
+  sql << "SELECT c.id,c.account,c.club_name,c.intro,c.dept,c.leader_name,c.status,c.reject_reason,"
+         "DATE_FORMAT(c.created_at,'%Y-%m-%d %H:%i:%s'),"
+         "DATE_FORMAT(c.audited_at,'%Y-%m-%d %H:%i:%s'),"
+         "(SELECT COUNT(*) FROM club_member m WHERE m.club_id=c.id AND m.status=1),"
+         "(SELECT COUNT(*) FROM activity a WHERE a.club_id=c.id AND a.status=1) "
+         "FROM club c WHERE " << cond <<
+         " ORDER BY FIELD(c.status,0,1,2,3), c.id LIMIT " << size
+      << " OFFSET " << (long long)(page - 1) * size;
+  QueryResult r;
+  if (!dbQuery(c, sql.str(), r, err)) { dbRelease(c); return jsonErr(500, err); }
+  QueryResult pc;
+  long long pending = 0;
+  if (dbQuery(c, "SELECT COUNT(*) FROM club WHERE status=0", pc, err) && !pc.rows.empty())
+    pending = atol(pc.rows[0][0].c_str());
+  dbRelease(c);
+  Json arr = Json::Array();
+  for (auto& row : r.rows) {
+    Json o = Json::Object();
+    o.set("club_id", Json::Num(atol(row[0].c_str())));
+    o.set("account", Json::Str(row[1]));
+    o.set("club_name", Json::Str(row[2]));
+    o.set("intro", Json::Str(row[3]));
+    o.set("dept", Json::Str(row[4]));
+    o.set("leader_name", Json::Str(row[5]));
+    o.set("status", Json::Num(atol(row[6].c_str())));
+    o.set("reject_reason", Json::Str(row[7]));
+    o.set("created_at", Json::Str(row[8]));
+    o.set("audited_at", Json::Str(row[9]));
+    o.set("member_count", Json::Num((double)atoll(row[10].c_str())));
+    o.set("activity_count", Json::Num((double)atoll(row[11].c_str())));
+    arr.push(o);
+  }
+  Json data = Json::Object();
+  data.set("list", arr);
+  data.set("total", Json::Num((double)total));
+  data.set("pending_count", Json::Num((double)pending));
+  data.set("page", Json::Num(page));
+  data.set("size", Json::Num(size));
+  data.set("has_more", Json::Bool((long long)page * size < total));
+  return jsonOk(data);
+}
+
+/**
+ * POST /api/admin/club/audit — 平台管理员审核社团 {club_id, action, reason?}
+ * action: approve=通过(0→1, 分配独立编号即 club.id) / reject=驳回(0→2, 必填理由) /
+ *         disable=停用(1→3, 必填理由) / enable=恢复(3→1)
+ * 全部用 WHERE status=? 条件更新: 并发只生效一次, 重复操作 409。
+ */
+static string handleAdminClubAudit(const Json& body, const TokenInfo& me) {
+  if (me.role != "admin" || me.club_id != 0) return needAdmin();
+  long long clubId = body.intVal("club_id", 0);
+  string action = trimStr(body.strVal("action"));
+  string reason = utf8Truncate(trimStr(body.strVal("reason")), 200);
+  if (clubId <= 0) return jsonErr(400, "club_id required");
+  int expectStatus, newStatus;
+  bool needReason = false;
+  if (action == "approve")      { expectStatus = 0; newStatus = 1; }
+  else if (action == "reject")  { expectStatus = 0; newStatus = 2; needReason = true; }
+  else if (action == "disable") { expectStatus = 1; newStatus = 3; needReason = true; }
+  else if (action == "enable")  { expectStatus = 3; newStatus = 1; }
+  else return jsonErr(400, "action must be approve|reject|disable|enable");
+  if (needReason && reason.empty())
+    return jsonErr(400, action == "reject" ? "驳回必须填写理由" : "停用必须填写理由");
+  MYSQL* c = dbConnect();
+  if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
+  string err;
+  QueryResult r;
+  auto fail = [&](int code, const string& msg) -> string {
+    mysql_rollback(c); mysql_autocommit(c, 1); dbRelease(c);
+    return jsonErr(code, msg);
+  };
+  mysql_autocommit(c, 0);
+  QueryResult lr;
+  if (!dbQuery(c, "SELECT status,account,club_name FROM club WHERE id=" + std::to_string(clubId) +
+                  " FOR UPDATE", lr, err))
+    return fail(500, err);
+  if (lr.rows.empty()) return fail(404, "社团不存在");
+  int cur = atoi(lr.rows[0][0].c_str());
+  if (cur != expectStatus) {
+    const char* names[4] = { "待审核", "正常", "已驳回", "已停用" };
+    return fail(409, string("该社团当前状态为「") + names[cur] + "」, 不能执行该操作");
+  }
+  std::ostringstream s;
+  s << "UPDATE club SET status=" << newStatus;
+  if (action == "reject" || action == "disable") s << ",reject_reason=" << dbEscape(c, reason);
+  if (action == "approve" || action == "reject") s << ",audited_at=NOW()";
+  s << " WHERE id=" << clubId << " AND status=" << expectStatus;
+  QueryResult w;
+  if (!dbQuery(c, s.str(), w, err)) return fail(500, err);
+  if (mysql_affected_rows(c) != 1) return fail(409, "社团状态已被其他管理员变更, 请刷新列表");
+  if (mysql_commit(c) != 0) return fail(500, "审核失败, 请重试");
+  mysql_autocommit(c, 1);
+  dbRelease(c);
+  Json data = Json::Object();
+  data.set("club_id", Json::Num((double)clubId));
+  data.set("status", Json::Num(newStatus));
+  return withAudit(jsonOkMsg("已" + (action == "approve" ? string("通过社团注册") :
+                            action == "reject" ? string("驳回社团注册") :
+                            action == "disable" ? string("停用社团") : string("恢复社团")) +
+                            "(" + string(lr.rows[0][2]) + ")", data),
+                   "AUDIT 社团审核 club=" + std::to_string(clubId) + " 动作=" + action);
+}
+
 /** GET /api/announcement/list — 公告列表(学生只看本社团已发布, 管理员看本社团全部) */
 static string handleAnnouncementList(const string& query, const TokenInfo& me) {
   int page = atoi(qparam(query, "page").c_str());
@@ -2188,6 +2719,10 @@ static bool dbDeleteStudent(MYSQL* c, const string& stuNo,
   }
   // 2.5) 社团成员身份(v5.0): 无外键约束, 必须显式清理, 否则会留下指向已注销学号的孤儿行
   if (!dbQuery(c, "DELETE FROM club_member WHERE stu_no=" + dbEscape(c, stuNo), r, err)) {
+    mysql_rollback(c); mysql_autocommit(c, 1); return false;
+  }
+  // 2.6) 入社/退社申请(v5.0 重构): 同样无外键, 显式清理(含待审/已审全部历史)
+  if (!dbQuery(c, "DELETE FROM club_member_request WHERE stu_no=" + dbEscape(c, stuNo), r, err)) {
     mysql_rollback(c); mysql_autocommit(c, 1); return false;
   }
   // 3) 学生主表; 影响行数必须为 1, 否则说明已被并发删除
@@ -3279,7 +3814,7 @@ static string handleHoursRebuild() {
 
 // 活动上下线(仅管理员): {activity_id, status: 1=上线 0=下线}
 // 下线后不出现在活动列表, 但历史报名与学时记录保留(不做物理删除)
-static string handleActivityStatus(const Json& body) {
+static string handleActivityStatus(const Json& body, const TokenInfo& me) {
   int actId = body.intVal("activity_id", -1);
   int status = body.intVal("status", -1);
   if (actId <= 0 || (status != 0 && status != 1))
@@ -3288,6 +3823,16 @@ static string handleActivityStatus(const Json& body) {
   if (!c) return jsonErr(500, "数据库连接失败, 请检查 MySQL 服务");
   string err;
   QueryResult r;
+  // 社团边界: 只能上下线本社团的活动(路由层已保证调用者是社团账号)
+  QueryResult own;
+  if (!dbQuery(c, "SELECT club_id FROM activity WHERE id=" + std::to_string(actId), own, err)) {
+    dbRelease(c); return jsonErr(500, err);
+  }
+  if (own.rows.empty()) { dbRelease(c); return jsonErr(404, "活动不存在或已下线"); }
+  if (atoi(own.rows[0][0].c_str()) != me.club_id) {
+    dbRelease(c);
+    return jsonErr(403, "无权限: 该活动不属于本社团");
+  }
   if (!dbQuery(c, "UPDATE activity SET status=" + std::to_string(status) +
                   " WHERE id=" + std::to_string(actId), r, err)) {
     dbRelease(c); return jsonErr(500, err);
@@ -4190,6 +4735,13 @@ static string route(const HttpRequest& req) {
     return handleRegister(body);
   }
 
+  // 社团注册申请(公开): 审核通过前不能登录, 通过后获得独立编号
+  if (req.method == "POST" && p == "/api/club/register") {
+    Json body; JsonParser jp(req.body);
+    if (!jp.parse(body) || body.t != Json::OBJ) return jsonErr(400, "bad json");
+    return handleClubRegister(body);
+  }
+
   // ---- 以下接口全部需要登录 ----
   TokenInfo me;
   if (!authToken(req, me)) return needLogin();
@@ -4228,6 +4780,34 @@ static string route(const HttpRequest& req) {
     Json body; JsonParser jp(req.body);
     if (!jp.parse(body) || body.t != Json::OBJ) return jsonErr(400, "bad json");
     return handleClubMemberRemove(body, me);
+  }
+  // ---- 社团广场与入社/退社申请审批 ----
+  if (req.method == "GET" && p == "/api/club/square")
+    return handleClubSquare(me);
+  if (req.method == "POST" && p == "/api/club/join") {
+    Json body; JsonParser jp(req.body);
+    if (!jp.parse(body) || body.t != Json::OBJ) return jsonErr(400, "bad json");
+    return handleClubJoin(body, me);
+  }
+  if (req.method == "POST" && p == "/api/club/leave") {
+    Json body; JsonParser jp(req.body);
+    if (!jp.parse(body) || body.t != Json::OBJ) return jsonErr(400, "bad json");
+    return handleClubLeave(body, me);
+  }
+  if (req.method == "GET" && p == "/api/club/requests")
+    return handleClubRequests(req.query, me);
+  if (req.method == "POST" && p == "/api/club/request/audit") {
+    Json body; JsonParser jp(req.body);
+    if (!jp.parse(body) || body.t != Json::OBJ) return jsonErr(400, "bad json");
+    return handleClubRequestAudit(body, me);
+  }
+  // ---- 平台管理员: 社团注册审核与社团管理 ----
+  if (req.method == "GET" && p == "/api/admin/clubs")
+    return handleAdminClubs(req.query);
+  if (req.method == "POST" && p == "/api/admin/club/audit") {
+    Json body; JsonParser jp(req.body);
+    if (!jp.parse(body) || body.t != Json::OBJ) return jsonErr(400, "bad json");
+    return handleAdminClubAudit(body, me);
   }
   // ---- 通知公告 ----
   if (req.method == "GET" && p == "/api/announcement/list")
@@ -4331,17 +4911,19 @@ static string route(const HttpRequest& req) {
     return handleStudentAudit(body);
   }
 
-  // 发布活动: 仅管理员
+  // 发布活动: 仅社团账号(v5.0 重构: 活动发布归属于社团, 平台管理员不再发布活动)
   if (req.method == "POST" && p == "/api/activity/add") {
-    if (me.role != "admin") return needAdmin();
+    if (me.club_id <= 0)
+      return jsonErr(403, "活动发布归属于社团, 仅社团账号可发布");
     Json body; JsonParser jp(req.body);
     if (!jp.parse(body) || body.t != Json::OBJ) return jsonErr(400, "bad json");
     return handleActivityAdd(body, me);
   }
 
-  // 编辑活动: 仅管理员(原地更新, 已报名记录与学时不受影响)
+  // 编辑活动: 仅社团账号(且只能编辑本社团的活动; 原地更新, 已报名记录与学时不受影响)
   if (req.method == "POST" && p == "/api/activity/update") {
-    if (me.role != "admin") return needAdmin();
+    if (me.club_id <= 0)
+      return jsonErr(403, "活动编辑归属于社团, 仅社团账号可编辑本社团活动");
     Json body; JsonParser jp(req.body);
     if (!jp.parse(body) || body.t != Json::OBJ) return jsonErr(400, "bad json");
     return handleActivityUpdate(body, me);
@@ -4383,12 +4965,13 @@ static string route(const HttpRequest& req) {
     return handleConfigSet(body);
   }
 
-  // 活动上下线: 仅管理员(下线后不再出现在活动列表, 历史数据保留)
+  // 活动上下线: 仅社团账号, 且只能上下线本社团的活动(下线后不再出现在活动列表, 历史数据保留)
   if (req.method == "POST" && p == "/api/activity/status") {
-    if (me.role != "admin") return needAdmin();
+    if (me.club_id <= 0)
+      return jsonErr(403, "活动上下线归属于社团, 仅社团账号可操作本社团活动");
     Json body; JsonParser jp(req.body);
     if (!jp.parse(body) || body.t != Json::OBJ) return jsonErr(400, "bad json");
-    return handleActivityStatus(body);
+    return handleActivityStatus(body, me);
   }
 
   // 报名: 仅普通成员, 身份强制为登录者
@@ -4755,7 +5338,11 @@ static void dbEnsureSchema() {
              "leader_name VARCHAR(50) NOT NULL DEFAULT '',"
              "leader_stu_no VARCHAR(20) NOT NULL DEFAULT '',"
              "leader_since DATETIME NULL,"
-             "status TINYINT NOT NULL DEFAULT 1 COMMENT '1=正常 0=停用',"
+             // v5.0(重构): 三态生命周期, 对齐 student.status 口径。0=待审核 1=正常 2=已驳回 3=已停用。
+             // 老库存量全是 1(正常), 无需回填; 停用从 0 挪到 3, 0 让位给"待审核"。
+             "status TINYINT NOT NULL DEFAULT 0 COMMENT '0=待审核 1=正常 2=已驳回 3=已停用',"
+             "reject_reason VARCHAR(200) NOT NULL DEFAULT '' COMMENT '驳回/停用理由(留痕)',"
+             "audited_at DATETIME NULL COMMENT '最近一次审核/停用操作时间',"
              "created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
              "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
              ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='社团账号(认证主体)'", ig, err);
@@ -4786,6 +5373,39 @@ static void dbEnsureSchema() {
              "KEY idx_lh_club (club_id,start_at),"
              "CONSTRAINT fk_lh_club FOREIGN KEY (club_id) REFERENCES club(id)"
              ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='历任社长记录'", ig, err);
+  // 入社/退社申请(v5.0 重构): 单表双类型(type 1=加入 2=退出), 审批用 WHERE status=0 条件更新
+  // 实现"并发恰一次"(与申诉 audit 同款)。刻意不对 student 建外键(同 club_member 的理由:
+  // 学生注销是物理删除, 注销流程里显式清理本表); MySQL 无部分唯一索引, 同社团同学生同类型
+  // 只能有一条待审由业务层(先锁学生行再查重)保证。
+  dbQuery(c, "CREATE TABLE IF NOT EXISTS club_member_request ("
+             "id INT AUTO_INCREMENT PRIMARY KEY,"
+             "club_id INT NOT NULL,"
+             "stu_no VARCHAR(20) NOT NULL,"
+             "type TINYINT NOT NULL DEFAULT 1 COMMENT '1=加入 2=退出',"
+             "reason VARCHAR(200) NOT NULL DEFAULT '' COMMENT '申请理由',"
+             "status TINYINT NOT NULL DEFAULT 0 COMMENT '0=待审 1=同意 2=驳回',"
+             "reply VARCHAR(200) NOT NULL DEFAULT '' COMMENT '审批回复(驳回必填)',"
+             "handler VARCHAR(50) NOT NULL DEFAULT '' COMMENT '审批人',"
+             "handled_at DATETIME NULL,"
+             "created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+             "KEY idx_cmr_club (club_id,type,status),"
+             "KEY idx_cmr_stu (stu_no),"
+             "CONSTRAINT fk_cmr_club FOREIGN KEY (club_id) REFERENCES club(id)"
+             ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='入社/退社申请'", ig, err);
+  // 老库补列(v5.0 重构): club 三态生命周期列。失败必须可见 —— 打印带业务后果的告警。
+  // 注: 旧口径 status=0 表示"停用", 但 v5.0 初版代码从未写过 0(无停用功能), 故不做数据搬移;
+  // 若有手工把 status 改成 0 的库, 请先手工 UPDATE club SET status=3 WHERE status=0 再升级。
+  if (!hasColOf("club", "reject_reason")) {
+    dbQuery(c, "ALTER TABLE club ADD COLUMN reject_reason VARCHAR(200) NOT NULL DEFAULT '' "
+               "COMMENT '驳回/停用理由(留痕)'", ig, err);
+    if (!hasColOf("club", "reject_reason"))
+      std::cerr << "[migrate] WARN club.reject_reason 补列失败(驳回/停用无法留痕): " << err << "\n";
+  }
+  if (!hasColOf("club", "audited_at")) {
+    dbQuery(c, "ALTER TABLE club ADD COLUMN audited_at DATETIME NULL COMMENT '最近一次审核/停用操作时间'", ig, err);
+    if (!hasColOf("club", "audited_at"))
+      std::cerr << "[migrate] WARN club.audited_at 补列失败(审核时间无法留痕): " << err << "\n";
+  }
 
   // 通知公告(v5.0): 按社团隔离, 撤回用 status=0 软删除, 已读用独立表(不改公告行)
   dbQuery(c, "CREATE TABLE IF NOT EXISTS announcement ("

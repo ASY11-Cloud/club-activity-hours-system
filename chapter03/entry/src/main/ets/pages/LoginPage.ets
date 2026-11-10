@@ -198,6 +198,15 @@ struct LoginPage {
           .width('100%').justifyContent(FlexAlign.SpaceBetween)
           .padding({ left: 18, right: 18, top: 12 })
 
+          // v5.0(重构): 社团也可像成员一样注册, 提交后由平台管理员审核
+          Row() {
+            Text('是社团? ').fontSize(12).fontColor(Theme.textSecondary)
+            Text('注册社团(提交管理员审核)').fontSize(12).fontColor(Theme.primary)
+              .onClick(() => router.pushUrl({ url: 'pages/ClubRegisterPage' }))
+          }
+          .width('100%').justifyContent(FlexAlign.Center)
+          .padding({ left: 18, right: 18, top: 6 })
+
           // 演示账号提示
           Column({ space: 5 }) {
             Text('演示账号').fontSize(13).fontWeight(FontWeight.Medium).width('100%')

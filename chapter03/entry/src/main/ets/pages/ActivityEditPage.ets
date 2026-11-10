@@ -35,8 +35,9 @@ struct ActivityEditPage {
   aboutToAppear(): void {
     const ctx = getContext(this) as common.UIAbilityContext;
     AppConfig.init(ctx).then(() => {
-      if (!AppConfig.isAdmin) {
-        this.blocked = true; // 无权限: 仅管理员可编辑活动
+      // v5.0(重构): 活动编辑归属于社团 —— 仅社团账号可编辑本社团活动(服务端同样收紧)
+      if (!AppConfig.isClubAccount) {
+        this.blocked = true;
         return;
       }
       this.load();
@@ -229,7 +230,7 @@ struct ActivityEditPage {
 
   @Builder
   deniedView() {
-    AdminGuardView({ tip: '活动编辑仅限管理员, 请以管理员身份登录后访问' })
+    AdminGuardView({ tip: '活动编辑归属于社团, 请以社团账号登录后访问' })
   }
 
   /** 类别选择(与发布页同口径): 改类别只影响之后审核通过的学时规则, 已认定学时不变 */

@@ -886,3 +886,149 @@ export function parseClubStats(resp: Record<string, Object>): ClubStats | null {
     outsider_join_count: numOf(d, 'outsider_join_count')
   };
 }
+
+// ==================== v5.0(重构) 社团广场 / 入社退社申请 / 社团审核 ====================
+
+/**
+ * 社团广场条目(GET /api/club/square)。
+ * my_status 仅学生登录返回:
+ *   0=未加入 1=在册 2=加入申请审核中 3=最近一条加入申请被驳回 4=曾退出/被移除 5=退出申请审核中
+ */
+export interface ClubSquareInfo {
+  club_id: number;
+  club_name: string;
+  intro: string;
+  dept: string;
+  leader_name: string;
+  member_count: number;
+  activity_count: number;
+  my_status: number;       // 非学生登录时为 -1(不显示个人状态)
+}
+
+export function myStatusText(s: number): string {
+  if (s === 1) return '已加入';
+  if (s === 2) return '申请审核中';
+  if (s === 3) return '申请被驳回';
+  if (s === 4) return '已退出';
+  if (s === 5) return '退出审核中';
+  return '';
+}
+
+export function parseClubSquare(resp: Record<string, Object>): ClubSquareInfo[] {
+  const d = dataOf(resp);
+  const out: ClubSquareInfo[] = [];
+  if (d === null) return out;
+  const list = d['list'] as Array<Record<string, Object>> | null;
+  if (list === null) return out;
+  for (let i = 0; i < list.length; i++) {
+    const it = list[i];
+    out.push({
+      club_id: numOf(it, 'club_id'),
+      club_name: strOf(it, 'club_name'),
+      intro: strOf(it, 'intro'),
+      dept: strOf(it, 'dept'),
+      leader_name: strOf(it, 'leader_name'),
+      member_count: numOf(it, 'member_count'),
+      activity_count: numOf(it, 'activity_count'),
+      my_status: it['my_status'] === undefined ? -1 : numOf(it, 'my_status')
+    });
+  }
+  return out;
+}
+
+/** 入社/退社申请(GET /api/club/requests)。type: 1=加入 2=退出; status: 0=待审 1=同意 2=驳回 */
+export interface MemberRequest {
+  id: number;
+  type: number;
+  status: number;
+  stu_no: string;
+  name: string;
+  reason: string;
+  created_at: string;
+  reply: string;
+  handler: string;
+  handled_at: string;
+  other_clubs: string;   // 申请人当前已加入的其他社团(审批参考)
+}
+
+export function requestTypeText(t: number): string {
+  return t === 1 ? '申请加入' : '申请退出';
+}
+
+export function requestStatusText(s: number): string {
+  if (s === 0) return '待审批';
+  if (s === 1) return '已同意';
+  return '已驳回';
+}
+
+export function parseMemberRequests(resp: Record<string, Object>): MemberRequest[] {
+  const d = dataOf(resp);
+  const out: MemberRequest[] = [];
+  if (d === null) return out;
+  const list = d['list'] as Array<Record<string, Object>> | null;
+  if (list === null) return out;
+  for (let i = 0; i < list.length; i++) {
+    const it = list[i];
+    out.push({
+      id: numOf(it, 'id'),
+      type: numOf(it, 'type'),
+      status: numOf(it, 'status'),
+      stu_no: strOf(it, 'stu_no'),
+      name: strOf(it, 'name'),
+      reason: strOf(it, 'reason'),
+      created_at: strOf(it, 'created_at'),
+      reply: strOf(it, 'reply'),
+      handler: strOf(it, 'handler'),
+      handled_at: strOf(it, 'handled_at'),
+      other_clubs: strOf(it, 'other_clubs')
+    });
+  }
+  return out;
+}
+
+/** 平台管理员视角的社团(GET /api/admin/clubs)。status: 0=待审核 1=正常 2=已驳回 3=已停用 */
+export interface AdminClubInfo {
+  club_id: number;
+  account: string;
+  club_name: string;
+  intro: string;
+  dept: string;
+  leader_name: string;
+  status: number;
+  reject_reason: string;
+  audited_at: string;
+  member_count: number;
+  activity_count: number;
+}
+
+export function clubStatusText(s: number): string {
+  if (s === 0) return '待审核';
+  if (s === 1) return '正常';
+  if (s === 2) return '已驳回';
+  return '已停用';
+}
+
+export function parseAdminClubs(resp: Record<string, Object>): AdminClubInfo[] {
+  const d = dataOf(resp);
+  const out: AdminClubInfo[] = [];
+  if (d === null) return out;
+  const list = d['list'] as Array<Record<string, Object>> | null;
+  if (list === null) return out;
+  for (let i = 0; i < list.length; i++) {
+    const it = list[i];
+    out.push({
+      club_id: numOf(it, 'club_id'),
+      account: strOf(it, 'account'),
+      club_name: strOf(it, 'club_name'),
+      intro: strOf(it, 'intro'),
+      dept: strOf(it, 'dept'),
+      leader_name: strOf(it, 'leader_name'),
+      status: numOf(it, 'status'),
+      reject_reason: strOf(it, 'reject_reason'),
+      audited_at: strOf(it, 'audited_at'),
+      member_count: numOf(it, 'member_count'),
+      activity_count: numOf(it, 'activity_count')
+    });
+  }
+  return out;
+}

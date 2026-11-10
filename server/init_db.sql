@@ -33,21 +33,25 @@ CREATE TABLE admin_user (
 -- ---------------------------------------------------------------------
 DROP TABLE IF EXISTS announcement_read;
 DROP TABLE IF EXISTS announcement;
+DROP TABLE IF EXISTS club_member_request;
 DROP TABLE IF EXISTS club_leader_history;
 DROP TABLE IF EXISTS club_member;
 DROP TABLE IF EXISTS club;
 
 CREATE TABLE club (
   id            INT AUTO_INCREMENT PRIMARY KEY,
-  account       VARCHAR(50)  NOT NULL UNIQUE COMMENT '社团登录账号(长期不变)',
-  pwd_hash      VARCHAR(100) NOT NULL DEFAULT '' COMMENT '口令: sha256i:<hex>; 空值由服务启动时初始化为默认口令',
-  club_name     VARCHAR(100) NOT NULL DEFAULT '' COMMENT '社团名称',
+  account       VARCHAR(50)  NOT NULL UNIQUE COMMENT '社团登录账号(注册时自设, 长期不变)',
+  pwd_hash      VARCHAR(100) NOT NULL DEFAULT '' COMMENT '口令: sha256i:<hex>',
+  club_name     VARCHAR(100) NOT NULL DEFAULT '' COMMENT '社团名称(唯一)',
   intro         VARCHAR(500) NOT NULL DEFAULT '' COMMENT '社团简介',
   dept          VARCHAR(100) NOT NULL DEFAULT '' COMMENT '挂靠单位/院系',
   leader_name   VARCHAR(50)  NOT NULL DEFAULT '' COMMENT '现任社长姓名(换届只改这里)',
   leader_stu_no VARCHAR(20)  NOT NULL DEFAULT '' COMMENT '现任社长学号(追溯与提醒用)',
   leader_since  DATETIME     NULL COMMENT '本任开始时间',
-  status        TINYINT      NOT NULL DEFAULT 1 COMMENT '1=正常 0=停用',
+  -- v5.0(重构) 三态生命周期, 对齐 student.status 口径; 旧口径 0=停用 已挪到 3
+  status        TINYINT      NOT NULL DEFAULT 0 COMMENT '0=待审核 1=正常 2=已驳回 3=已停用',
+  reject_reason VARCHAR(200) NOT NULL DEFAULT '' COMMENT '驳回/停用理由(留痕)',
+  audited_at    DATETIME     NULL COMMENT '最近一次审核/停用操作时间',
   created_at    DATETIME     DEFAULT CURRENT_TIMESTAMP,
   updated_at    DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='社团账号(认证主体)';
@@ -80,6 +84,25 @@ CREATE TABLE club_leader_history (
   KEY idx_lh_club (club_id, start_at),
   CONSTRAINT fk_lh_club FOREIGN KEY (club_id) REFERENCES club(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='历任社长记录';
+
+-- 入社/退社申请(v5.0 重构): 单表双类型(type 1=加入 2=退出), status 0=待审 1=同意 2=驳回。
+-- 审批用 WHERE status=0 条件更新实现"并发恰一次"; 同社团同学生同类型只允许一条待审
+-- 由业务层保证(先锁学生行再查重)。刻意不对 student 建外键(理由同 club_member)。
+CREATE TABLE club_member_request (
+  id         INT AUTO_INCREMENT PRIMARY KEY,
+  club_id    INT          NOT NULL,
+  stu_no     VARCHAR(20)  NOT NULL,
+  type       TINYINT      NOT NULL DEFAULT 1 COMMENT '1=加入 2=退出',
+  reason     VARCHAR(200) NOT NULL DEFAULT '' COMMENT '申请理由',
+  status     TINYINT      NOT NULL DEFAULT 0 COMMENT '0=待审 1=同意 2=驳回',
+  reply      VARCHAR(200) NOT NULL DEFAULT '' COMMENT '审批回复(驳回必填)',
+  handler    VARCHAR(50)  NOT NULL DEFAULT '' COMMENT '审批人',
+  handled_at DATETIME     NULL,
+  created_at DATETIME     DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_cmr_club (club_id, type, status),
+  KEY idx_cmr_stu (stu_no),
+  CONSTRAINT fk_cmr_club FOREIGN KEY (club_id) REFERENCES club(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='入社/退社申请';
 
 -- ---------------------------------------------------------------------
 -- 1. 学生表

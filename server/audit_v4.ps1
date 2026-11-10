@@ -162,11 +162,13 @@ function ConcurrentPost([string]$path, [string[]]$tokens, [string]$json) {
 }
 
 Write-Host '############ v4.0 系统全面测试 ############'
-$admin = ''; $t1 = ''; $t2 = ''
+$admin = ''; $club = ''; $t1 = ''; $t2 = ''
 $measure = @{}
 try {
   Setup
   $admin = Login 'admin' 'admin' 'admin123'
+  # v5.0(重构): 活动发布/编辑/上下线归属于社团, 相关用例改用社团账号执行
+  $club = Login 'club' 'club' 'club123'
   $t1 = Login 'student' 'A9001' '123456'
   $t2 = Login 'student' 'A9002' '123456'
 
@@ -231,18 +233,18 @@ try {
   $r = Api 'POST' '/api/login' $big
   Check '超大请求体被拒且服务存活' ([int]$r.code -ne 0 -and [int](Api 'GET' '/api/health').code -eq 0)
 
-  $r = Api 'POST' '/api/activity/add' @{ content = 'x'; hours = 1 } $admin
+  $r = Api 'POST' '/api/activity/add' @{ content = 'x'; hours = 1 } $club
   Check '发布活动缺标题 -> 400' ([int]$r.code -eq 400)
-  $r = Api 'POST' '/api/activity/add' @{ title = '审计-0学时'; content = 'x'; hours = 0; capacity = 1; category = 'sports'; start_time = '2026-12-01 10:00:00'; end_time = '2026-12-01 12:00:00' } $admin
+  $r = Api 'POST' '/api/activity/add' @{ title = '审计-0学时'; content = 'x'; hours = 0; capacity = 1; category = 'sports'; start_time = '2026-12-01 10:00:00'; end_time = '2026-12-01 12:00:00' } $club
   Check '0 学时活动被拒 -> 400' ([int]$r.code -eq 400)
-  $r = Api 'POST' '/api/activity/add' @{ title = '审计-越界'; content = 'x'; hours = 1000; capacity = 1; category = 'sports'; start_time = '2026-12-01 10:00:00'; end_time = '2026-12-01 12:00:00' } $admin
+  $r = Api 'POST' '/api/activity/add' @{ title = '审计-越界'; content = 'x'; hours = 1000; capacity = 1; category = 'sports'; start_time = '2026-12-01 10:00:00'; end_time = '2026-12-01 12:00:00' } $club
   Check '学时越界 -> 400' ([int]$r.code -eq 400)
-  $r = Api 'POST' '/api/activity/add' @{ title = '审计-容量负'; content = 'x'; hours = 1; capacity = -1; category = 'sports'; start_time = '2026-12-01 10:00:00'; end_time = '2026-12-01 12:00:00' } $admin
+  $r = Api 'POST' '/api/activity/add' @{ title = '审计-容量负'; content = 'x'; hours = 1; capacity = -1; category = 'sports'; start_time = '2026-12-01 10:00:00'; end_time = '2026-12-01 12:00:00' } $club
   Check '容量负数 -> 400' ([int]$r.code -eq 400)
-  $r = Api 'POST' '/api/activity/add' @{ title = '审计-时间倒置'; content = 'x'; hours = 1; capacity = 10; start_time = '2026-12-01 12:00:00'; end_time = '2026-12-01 10:00:00' } $admin
+  $r = Api 'POST' '/api/activity/add' @{ title = '审计-时间倒置'; content = 'x'; hours = 1; capacity = 10; start_time = '2026-12-01 12:00:00'; end_time = '2026-12-01 10:00:00' } $club
   Check '开始晚于结束 -> 400' ([int]$r.code -eq 400)
 
-  $r = Api 'POST' '/api/activity/add' @{ title = '审计-非法类别回落'; content = '审计'; hours = 1; capacity = 1; category = 'bogus'; start_time = '2026-12-05 10:00:00'; end_time = '2026-12-05 12:00:00' } $admin
+  $r = Api 'POST' '/api/activity/add' @{ title = '审计-非法类别回落'; content = '审计'; hours = 1; capacity = 1; category = 'bogus'; start_time = '2026-12-05 10:00:00'; end_time = '2026-12-05 12:00:00' } $club
   $newId = 0
   if ([int]$r.code -eq 0) { $newId = [int]$r.data.id }
   Check '非法 category 回落 sports' ([int]$r.code -eq 0 -and (Scalar "SELECT category FROM activity WHERE id=$newId") -eq 'sports')
@@ -350,6 +352,12 @@ try {
   }
   Check ('学生访问 ' + $adminPaths.Count + ' 个管理接口全部 403') ($bad -eq 0) ('violations=' + ($badList -join '; '))
 
+  # v5.0(重构): 活动发布/上下线归属于社团 —— 平台管理员也应被拒
+  $r = Api 'POST' '/api/activity/add' @{ title = '审计-越权发布'; content = 'x'; hours = 1; capacity = 1; category = 'sports'; start_time = '2026-12-01 10:00:00'; end_time = '2026-12-01 12:00:00' } $admin
+  Check '平台管理员发布活动 -> 403(归属社团)' ([int]$r.code -eq 403) ($r.msg)
+  $r = Api 'POST' '/api/activity/status' @{ activity_id = 9201; status = 0 } $admin
+  Check '平台管理员上下线活动 -> 403(归属社团)' ([int]$r.code -eq 403) ($r.msg)
+
   $s = Api 'GET' '/api/signup/list?stu_no=A9002&size=50' $null $t1
   $leak = @($s.data.list | Where-Object { [string]$_.stu_no -ne 'A9001' }).Count
   Check '学生伪造 stu_no 仍只返回本人' ($leak -eq 0)
@@ -362,7 +370,7 @@ try {
   $kw = Api 'GET' "/api/student/list?kw=%27%20OR%20%271%27%3D%271" $null $admin
   Check '检索 SQL 注入无效/无 500' ([int]$kw.code -eq 0)
 
-  $xss = Api 'POST' '/api/activity/add' @{ title = '<script>alert(1)</script>'; content = 'x'; hours = 1; capacity = 1; category = 'sports'; start_time = '2026-12-10 10:00:00'; end_time = '2026-12-10 12:00:00' } $admin
+  $xss = Api 'POST' '/api/activity/add' @{ title = '<script>alert(1)</script>'; content = 'x'; hours = 1; capacity = 1; category = 'sports'; start_time = '2026-12-10 10:00:00'; end_time = '2026-12-10 12:00:00' } $club
   $xid = 0
   if ([int]$xss.code -eq 0) { $xid = [int]$xss.data.id }
   $stored = Scalar "SELECT title FROM activity WHERE id=$xid"
@@ -428,7 +436,7 @@ try {
   $upd = Api 'POST' '/api/activity/update' @{
     activity_id = 9202; title = '审计-不限容量-改'; content = '兼容性更新'; hours = 1.0; capacity = 0
     start_time = '2026-12-01 10:00:00'; end_time = '2026-12-01 12:00:00'; publisher = '审计'
-  } $admin
+  } $club
   Check '旧客户端改活动(不带 category)保留原类别' ([int]$upd.code -eq 0 -and (Scalar "SELECT category FROM activity WHERE id=9202") -eq 'sports') ([string]$upd.msg)
 
   $cfgProps = @($cfg.data.PSObject.Properties.Name)

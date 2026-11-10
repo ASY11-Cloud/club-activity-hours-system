@@ -71,9 +71,45 @@ WHERE s.category = '';
 UPDATE activity a
 SET a.taken = (SELECT COUNT(*) FROM signup s WHERE s.activity_id = a.id AND s.status <> 2);
 
--- ---------- 5. v5.0 社团成员归属 ----------
--- 已通过注册的学生全部挂到默认社团 1(演示需要: 内部活动对他们可见)。
--- 服务端只在 club_member 为空时自动回填一次, 这里保证"纯 SQL 初始化"同样自洽。
-INSERT IGNORE INTO club_member (club_id, stu_no, role, status)
-SELECT 1, s.stu_no, IF(s.stu_no = '2023001', 'leader', 'member'), 1
-FROM student s WHERE s.status = 1;
+-- ---------- 6. v5.0(重构) 多社团体系: 注册/审核/入社申请全流程演示数据 ----------
+-- 设计: 成员归属一律通过"已同意的加入申请"产生(club_member_request 留痕),
+--       保证演示库的每一条归属都可追溯到完整的 注册->审核->申请->审批 链路。
+--
+-- 社团清单(演示账号, 口令均为 club123 —— pwd_hash 留空由服务启动时统一初始化):
+--   club1 计算机协会  account=club  status=1  社长=张三(2023001)
+--   club2 篮球协会    account=ball  status=1  社长=李铭(2023002)
+--   club3 茶艺社      account=tea   status=0  待平台管理员审核(演示审核动作)
+--
+-- 成员归属(全部经申请审批产生):
+--   计算机协会: 张三(社长) / 王五 / 孙洋
+--   篮球协会:   李铭(社长) / 赵磊
+--   2023006 周凯: 不属于任何社团(有一条待审的加入申请, 演示社团账号审批动作)
+
+-- 6.1 三个社团: club1/club2 已审核(status=1), club3 待审核(status=0, 演示平台管理员审核动作)
+INSERT INTO club (id, account, pwd_hash, club_name, intro, dept, leader_name, leader_stu_no, leader_since, status, audited_at) VALUES
+(1, 'club', '', '计算机协会', '面向全校的计算机技术社团, 组织算法训练、开发实训与技术分享。', '计算机学院', '张三', '2023001', '2026-10-20 09:00:00', 1, '2026-10-20 09:05:00'),
+(2, 'ball', '', '篮球协会', '组织校内篮球联赛、三人制街球赛与裁判培训。', '体育学院', '李铭', '2023002', '2026-10-20 10:00:00', 1, '2026-10-20 10:05:00'),
+(3, 'tea',  '', '茶艺社',   '茶文化科普与茶艺体验活动, 每周固定茶会。',  '人文学院', '周凯', '2023006', '2026-11-08 15:00:00', 0, NULL)
+ON DUPLICATE KEY UPDATE club_name = VALUES(club_name), leader_name = VALUES(leader_name), leader_stu_no = VALUES(leader_stu_no);
+
+-- 6.2 历任社长初始化记录(change_type=3): 与 club 行的 leader_* 一致, 只追加不覆盖
+INSERT INTO club_leader_history (club_id, leader_name, leader_stu_no, start_at, end_at, change_type, operator, reason)
+SELECT id, leader_name, leader_stu_no, IFNULL(leader_since, created_at), NULL, 3, account, '社团注册初始化'
+FROM club WHERE id IN (2, 3)
+  AND NOT EXISTS (SELECT 1 FROM club_leader_history h WHERE h.club_id = club.id AND h.end_at IS NULL);
+
+-- 6.3 成员归属(与申请记录一一对应)
+INSERT INTO club_member (club_id, stu_no, role, status, joined_at) VALUES
+(1, '2023001', 'leader', 1, '2026-10-20 09:00:00'),
+(1, '2023003', 'member', 1, '2026-10-24 14:00:00'),
+(1, '2023005', 'member', 1, '2026-10-26 16:00:00'),
+(2, '2023002', 'leader', 1, '2026-10-20 10:10:00'),
+(2, '2023004', 'member', 1, '2026-10-23 11:00:00')
+ON DUPLICATE KEY UPDATE status = 1, quit_at = NULL;
+
+-- 6.4 入社申请留痕: 2 条已同意(成员归属的来源) + 1 条待审(演示社团账号审批动作)
+INSERT INTO club_member_request (club_id, stu_no, type, reason, status, reply, handler, handled_at, created_at) VALUES
+(1, '2023003', 1, '想参加算法训练和技术分享', 1, '', '张三', '2026-10-24 14:00:00', '2026-10-23 20:00:00'),
+(1, '2023005', 1, '对网络安全方向感兴趣',     1, '', '张三', '2026-10-26 16:00:00', '2026-10-26 10:00:00'),
+(2, '2023004', 1, '喜欢打篮球, 想参加联赛',   1, '', '李铭', '2026-10-23 11:00:00', '2026-10-22 19:00:00'),
+(1, '2023006', 1, '想加入计算机协会学习鸿蒙开发', 0, '', '', NULL, '2026-11-08 20:00:00');

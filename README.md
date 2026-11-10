@@ -8,9 +8,9 @@
 > 本轮改动明细、为什么改、验证方式与环境坑，见 [`HANDOFF.md`](HANDOFF.md)。
 > 操作步骤与验收演示见 [`docs/使用说明.md`](docs/使用说明.md)（Word 版 `使用说明文档.docx`，与 md 同源，均对应 v5.0）。
 >
-> **版本归档**：第三版最终版（v3.0）已单独归档为分支 `v3.0` 与标签 `v3.0`（commit `5bcf487`；开发期曾用 v3.2，归档名统一为 v3.0），v4.0/v5.0 在 `main` 继续演进，**不会覆盖**该快照。`git checkout v3.0` 即可取第三版终稿。
+> **版本归档**：第三版最终版（v3.0）已单独归档为分支 `v3.0` 与标签 `v3.0`（commit `5bcf487`）；第四版归档为分支/标签 `v4.0`；初版 v5.0（预置单社团设计，被判失败）留档于分支/标签 `v5.0-old`，均不随后续演进被覆盖。
 >
-> **v5.0（当前）核心变更**：认证主体从「个人」上移为「社团」——社团账号长期存在，社长换届只改"现任社长"信息（账号/密码/Token 均不变）+ 追加一条历任记录；活动新增参与范围（仅本社团 / 全校开放），范围校验前置到报名与签到建记录之前；新增社团主页、成员管理、通知公告、社团维度统计。
+> **v5.0（当前，重构版）核心变更**：社团像成员一样**注册制**——注册（自设账号/社团名/密码）→ 平台管理员审核 → 获得独立编号；学生可在**社团广场**浏览/搜索社团并**申请加入**，退出需**社团账号审批**（审批时显示申请人已加入的社团供参考），可同时属于多个社团；**活动发布/编辑/上下线收敛为社团账号专属**（平台管理员 403），平台管理员职责收敛为社团注册审核 + 停用/恢复 + 学生注册审核与全量管理；社团账号保留换届、参与范围（仅本社团/全校开放）、成员管理、通知公告、社团维度统计。初版 v5.0 的「预置单社团 + 管理页直接维护归属」设计已被本版取代（留档 `v5.0-old`）。
 
 ## 功能总览
 
@@ -33,7 +33,10 @@
 - 学时申诉（v4.0）：成员对已通过记录发起申诉；管理员在审核中心"学时申诉"页签通过（可调整 0~活动学时）或驳回；通过后在事务内按明细重算 `hours_total`，全程留痕
 - 规则可视化（v4.0）：`GET /api/config/get` 下发七大类 `rules`，`POST /api/config/set` 接受 `rules` 白名单；App 设置页可视化编辑，保存后下一次审核立即生效
 - 签到异常检测（v4.0）：`GET /api/report/anomaly` 输出批量签到（10 分钟 ≥5 人）、签到超 24h 未签退、认定学时大于活动学时三类风险，报表页"异常检测"页签展示并可导出
+- **社团注册制（v5.0 重构）**：社团像成员一样注册（自设登录账号 + 社团名 + 密码，均唯一性校验），提交后 `status=0` 待审核不能登录；平台管理员在「社团审核」面板通过（分配独立编号 `club.id`）/ 驳回（必填理由），另可停用/恢复；`club.status` 三态（0 待审 / 1 正常 / 2 已驳回 / 3 已停用），审核全程留痕（`reject_reason` + `audited_at`）
+- **入社/退社审批（v5.0 重构）**：学生在「社团广场」浏览/搜索社团并申请加入，退出需提交申请；社团账号在用户管理页审批（默认待审列表，**每条附申请人已加入社团名单供参考**）；同意加入 `ON DUPLICATE KEY UPDATE` 入册（退社可复入、原岗位保留）、同意退出置离册（学时保留）；申请判重 409、审批 `WHERE status=0` 条件更新并发恰一次、社长不可退出/被移除；**可见性天然联动**——在册才可见内部活动，退出审批通过即失效；可同时属于多个社团
 - **社团账号与换届（v5.0）**：`club` 表承载社团账号与口令，`leader_name / leader_stu_no / leader_since` 为社团对象上的可变三元组；换届接口需输入当前账号密码 + `expect_leader` 乐观并发比对 + 行锁串行化，只追加一条历任记录（在任唯一），**不签发新账号、不重建 Token**，账号/密码/历史活动与学时全部保留
+- **活动发布归属社团（v5.0 重构）**：`/api/activity/add|update|status` 仅社团账号可调（平台管理员 403「活动发布归属于社团」），上下线只能操作本社团活动；App 管理面板同步调整——社团账号保留发布入口，平台管理员改为「社团审核」卡片
 - **活动参与范围（v5.0）**：发布/编辑可选「仅本社团成员」/「全校开放」；列表按可见性过滤、内部活动带专用标签；**范围校验前置到建记录之前**——外社团学生直接报名 403、用转发签到码签到 403 且不产生报名行与学时、刷卡 403；公开活动引来外社团报名时审核面板标记「外社团」，审核权归活动所属社团
 - **成员 / 公告 / 统计（v5.0）**：社团成员按岗位与状态筛选、移除保留学生账号与历史学时（现任社长不可直接移除）；公告支持发布/置顶/撤回与成员未读标记；`/api/stats/club` 单条聚合 SQL 输出社团维度统计，含公开活动带来的外社团参与人数与人次
 - 嵌入式扩展：ESP32 + MFRC522 读卡实机刷卡签到，到场即认定学时（已被管理员驳回的报名需先重新报名，刷卡不会绕过审核）；签到状态通过 `checkin` 同步回本地库，成员在「我的报名」与活动详情可直接看到「已刷卡签到」；固件带 WiFi 断线自动重连与同卡 5 秒冷却；可选 `X-Device-Key` 设备密钥，防止局域网内伪造刷卡
@@ -63,8 +66,9 @@ chapter03/
 ├── chapter03/                 # 鸿蒙工程（DevEco Studio 打开此目录）
 │   └── entry/src/main/ets/    # 页面与数据层源码
 │       ├── common/            # ApiClient / AppConfig / DbHelper / Models / GuardViews / Nav / Theme
-│       └── pages/             # 引导页、登录注册、主界面(活动/管理/我的 Tab)、详情、发布/编辑、审核(报名+注册)、用户管理、
-│                              # 学时报表、日志、设置、社团主页(ClubProfilePage)、通知公告(AnnouncementPage)
+│       └── pages/             # 引导页、登录注册、社团注册(ClubRegisterPage)、主界面(活动/管理/我的 Tab)、详情、发布/编辑、
+│                              # 审核(报名+注册)、用户管理(含入社退社审批)、学时报表、日志、设置、社团主页(ClubProfilePage)、
+│                              # 社团广场(ClubSquarePage)、社团审核(ClubAuditPage)、通知公告(AnnouncementPage)
 ├── server/                    # 自主 C++ Web 服务器
 │   ├── server.cpp             # 全部服务端逻辑（含解析、校验、Token、事务、日志）
 │   ├── init_db.sql            # MySQL 建库建表 + 演示数据
@@ -84,6 +88,7 @@ chapter03/
 │   ├── audit_v4.ps1           # 系统全面测试（103 项：功能/边界/安全/性能/一致性/兼容）
 │   ├── verify_club.ps1        # v5.0 社团账号与换届（60 项：含并发恰一次、成员、公告、统计）
 │   ├── verify_scope.ps1       # v5.0 活动参与范围（17 项：不可见/403/无学时/外社团报名/冲突）
+│   ├── verify_membership.ps1  # v5.0 社团注册/入社退社审批（56 项：注册三态/审核/并发审批恰一次/可见性联动/复入/边界）
 │   └── build.bat              # 编译脚本
 ├── esp32_rfid/rfid_esp32.ino  # ESP32 + MFRC522 刷卡签到固件
 ├── docs/使用说明.md            # 操作手册与验收流程（可读版，与 docx 同源）
@@ -115,6 +120,7 @@ chapter03/
    - `powershell -ExecutionPolicy Bypass -File server\audit_v4.ps1` 系统全面测试（103 项：功能 / 边界 / 安全 / 性能 / 一致性 / 兼容，含 p95 与并发指标）
    - `powershell -ExecutionPolicy Bypass -File server\verify_club.ps1` v5.0 社团账号与换届（60 项：含**并发换届恰一次成功**、成员口径、公告、统计；历任社长历史刻意保留）
    - `powershell -ExecutionPolicy Bypass -File server\verify_scope.ps1` v5.0 活动参与范围（17 项：内部活动不可见 / 报名 403 / **输码签到 403 且无报名无学时** / 刷卡 403 / 公开活动外社团报名 / 满员 403 / 跨社团冲突 409）
+   - `powershell -ExecutionPolicy Bypass -File server\verify_membership.ps1` v5.0 社团注册与入社退社（56 项：注册三态 / 管理员审核 / **并发审批恰一次** / other_clubs 参考信息 / 可见性联动 / 退出复入 / 社长边界 / 平台管理员发布 403）
 
 ## 接口一览（自主 C++ 服务器）
 
@@ -123,6 +129,10 @@ chapter03/
 | GET | `/api/health` | 公开 | 健康检查（`version` 当前 5.0、`db` 为 MySQL 连通性、`time` 为服务器时间） |
 | POST | `/api/login` | 公开 | 登录签发 Token（`type=student\|admin\|club`；社团账号下发 `club_id` / `club_name` / `account_type`，对外 `role` 仍为 `admin`；失败节流：60 秒内 5 次失败临时拒绝） |
 | POST | `/api/register` | 公开 | 成员注册申请（待管理员审批；可选 `card_no`，卡号全局唯一、自动转大写） |
+| POST | `/api/club/register` | 公开 | **社团注册申请**（自设账号/社团名均唯一；提交后 `status=0` 待审核不能登录） |
+| GET | `/api/club/square` | 登录 | **社团广场**：全部正常社团 + 成员/活动计数；学生额外返回 `my_status`（0 未加入 / 1 在册 / 2 加入审核中 / 3 被驳回 / 4 已退出 / 5 退出审核中） |
+| POST | `/api/club/join` | 成员 | **申请加入社团**（同社团同类型待审判重 409；先锁学生行） |
+| POST | `/api/club/leave` | 成员 | **申请退出社团**（在册才可；社长 400；审批通过前仍是成员） |
 | POST | `/api/signin` | 公开／设备密钥 | ESP32 刷卡签到（可选 `X-Device-Key`） |
 | POST | `/api/logout` | 登录 | 注销当前 Token |
 | GET | `/api/student/requests` | 管理员 | 待审批注册申请列表 |
@@ -134,9 +144,9 @@ chapter03/
 | POST | `/api/student/delete` | 管理员 | 管理员注销学生（`stu_no` + `confirm_stu_no` 一致才执行，防误触） |
 | POST | `/api/admin/password` | 管理员 | 修改管理员口令（校验原口令，存 `sha256i:` 迭代加盐哈希） |
 | GET | `/api/activity/list` | 登录 | 活动列表（含 `valid_count` / `remaining` / `expired` / `category` / `taken` / **`join_scope`**；按可见性过滤：学生 = 全校开放 + 本人社团内部活动，社团管理员 = 本社团，平台管理员 = 全部；支持 `page`/`size` 分页，管理员 `all=1` 含已下线） |
-| POST | `/api/activity/add` | 管理员 | 发布活动（时间窗与数值校验；`category` 白名单，非法值回落 `sports`；**`join_scope` 白名单 `club`/`all`**） |
-| POST | `/api/activity/update` | 管理员 | 编辑活动（允许历史开始时间；上限不得小于有效报名数；`join_scope` 未传递时保留原值，返回 `outsider_count` 供提示） |
-| POST | `/api/activity/status` | 管理员 | 活动上线／下线（软删除） |
+| POST | `/api/activity/add` | **社团账号** | 发布活动（时间窗与数值校验；`category` 白名单，非法值回落 `sports`；**`join_scope` 白名单 `club`/`all`**；平台管理员 403「活动发布归属于社团」） |
+| POST | `/api/activity/update` | **社团账号** | 编辑活动（仅本社团；允许历史开始时间；上限不得小于有效报名数；`join_scope` 未传递时保留原值，返回 `outsider_count` 供提示） |
+| POST | `/api/activity/status` | **社团账号** | 活动上线／下线（软删除；只能操作本社团活动） |
 | GET | `/api/activity/signin_code?activity_id=` | 管理员 | 当前 60 秒签到码（`code` / `expire_in` / `window`） |
 | POST | `/api/signin/code` | 成员 | `{activity_id, code}` 输码签到（宽限前后 60 秒；无报名自动建并通过） |
 | POST | `/api/signin/out` | 成员 | `{activity_id}` 签退，按在场时长折算学时 |
@@ -160,6 +170,10 @@ chapter03/
 | POST | `/api/club/password` | 社团账号 | 修改社团账号口令（校验原口令） |
 | GET | `/api/club/members` | 社团账号 | 本社团成员（`role`/`status`/`kw` 筛选 + 岗位计数） |
 | POST | `/api/club/member/remove` | 社团账号 | 移除成员（置 `status=0`，保留学生账号与历史学时；现任社长返回 400） |
+| GET | `/api/club/requests` | 社团账号 | **入社/退社申请列表**（默认待审；`type`/`status`/分页；每条附 `other_clubs` 申请人已加入社团） |
+| POST | `/api/club/request/audit` | 社团账号 | **审批申请** `{request_id, approve, reply}`：同意加入即入册（复入保留原岗位）/ 同意退出置离册；驳回必填理由；条件更新并发恰一次，重复审批 409 |
+| GET | `/api/admin/clubs` | 平台管理员 | **全量社团列表**（`status`/`kw`/分页 + `pending_count` 待审数） |
+| POST | `/api/admin/club/audit` | 平台管理员 | **社团审核** `{club_id, action, reason}`：approve 通过 / reject 驳回（必填理由）/ disable 停用 / enable 恢复；状态机条件更新，重复操作 409 |
 | GET | `/api/announcement/list` | 登录 | 公告列表（学生=本人所属社团已发布；社团管理员=本社团全部；含 `unread_count` / `is_read`） |
 | POST | `/api/announcement/add` | 管理员 | 发布公告（`club_id` 取 Token，平台管理员可显式指定；支持 `top_flag` 置顶） |
 | POST | `/api/announcement/status` | 管理员 | 撤回/恢复公告（`ann_id` + `status`；跨社团 403） |
@@ -170,10 +184,13 @@ chapter03/
 
 | 身份 | 账号 | 口令 | 说明 |
 |---|---|---|---|
-| 平台管理员 | admin | admin123 | 账号 + 密码（`club_id=0`，跨社团） |
+| 平台管理员 | admin | admin123 | 账号 + 密码（`club_id=0`，跨社团；社团注册审核 / 学生注册审核 / 全量管理） |
 | 社团管理员 | club | club123 | v5.0：社团账号（计算机协会，`club_id=1`），登录页身份选"管理员" |
+| 社团管理员 | ball | club123 | v5.0：社团账号（篮球协会，`club_id=2`，已审核） |
+| 待审社团 | tea | — | 茶艺社（`club_id=3`，`status=0` 待审核，供演示平台管理员审核动作） |
 | 普通成员 | 2023001 | 123456 | 学号 + 密码（张三，初始密码 123456） |
 | 普通成员 | 2023002 | 123456 | 学号 + 密码（李铭，初始密码 123456） |
+| 普通成员 | 2023006 | 123456 | 学号 + 密码（周凯，无社团，有一条待审加入申请，演示广场/审批） |
 | RFID 卡 | A1B2C3D4 | — | 张三签到卡（扩展） |
 | RFID 卡 | E5F60708 | — | 李铭签到卡（扩展） |
 

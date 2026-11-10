@@ -13,6 +13,9 @@
     "pages/UserManagePage",
     "pages/ClubProfilePage",
     "pages/AnnouncementPage",
+    "pages/ClubSquarePage",
+    "pages/ClubRegisterPage",
+    "pages/ClubAuditPage",
     "pages/ServerLogPage",
     "pages/SettingsPage"
   ]

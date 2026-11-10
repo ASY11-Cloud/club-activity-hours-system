@@ -12,7 +12,8 @@ import { AdminGuardView } from '../common/GuardViews';
 import {
   StudentInfo, StudentGroupCounts, CancelImpact, parseStudentList, parseStudentGroupCounts,
   parseCancelImpact, dataOf, numOf, studentStatusText,
-  ClubMember, parseClubMembers, memberRoleText
+  ClubMember, parseClubMembers, memberRoleText,
+  MemberRequest, parseMemberRequests, requestTypeText, requestStatusText
 } from '../common/Models';
 import { Theme } from '../common/Theme';
 import { StateView } from '../components/StateView';
@@ -46,6 +47,12 @@ struct UserManagePage {
   @State memberActiveCount: number = 0;
   @State memberMsg: string = '';
 
+  // ---- v5.0(重构) 入社/退社申请审批(社团账号可见) ----
+  @State requests: MemberRequest[] = [];
+  @State showHandled: boolean = false;     // false=只看待审 true=全部
+  @State replyFor: number = -1;            // 需要填写理由(驳回)的申请 id
+  @State replyInput: string = '';
+
   // ---- 注销学生(危险操作): 同一时刻只展开一个 ----
   @State cancelStuNo: string = '';        // 当前展开注销面板的学号
   @State cancelImpact: CancelImpact | null = null;
@@ -63,7 +70,10 @@ struct UserManagePage {
       }
       this.load();
       // 社团账号额外拉本社团成员(平台管理员没有 club_id, 只看全平台列表)
-      if (AppConfig.isClubAccount) this.loadClubMembers();
+      if (AppConfig.isClubAccount) {
+        this.loadClubMembers();
+        this.loadRequests();
+      }
     }).catch((e: Error) => {
       this.loadError = '初始化失败: ' + e.message;
       this.loading = false;
@@ -109,6 +119,134 @@ struct UserManagePage {
         }
       }
     });
+  }
+
+  // ==================== v5.0(重构) 入社/退社申请审批 ====================
+
+  async loadRequests(): Promise<void> {
+    if (!AppConfig.isClubAccount) return;
+    const path = this.showHandled ? '/api/club/requests?status=&size=50' : '/api/club/requests?size=50';
+    const resp = await ApiClient.get(path);
+    if (resp['code'] === 0) {
+      this.requests = parseMemberRequests(resp);
+    }
+  }
+
+  /** 审批: 同意直接提交; 驳回必须填理由(先展开输入框, 二次点击提交) */
+  async auditRequest(r: MemberRequest, approve: boolean): Promise<void> {
+    if (!approve && this.replyFor !== r.id) {
+      this.replyFor = r.id;
+      this.replyInput = '';
+      return;
+    }
+    const body: Record<string, Object> = { 'request_id': r.id, 'approve': approve ? 1 : 0 };
+    if (!approve) {
+      if (this.replyInput.trim() === '') {
+        this.memberMsg = '驳回必须填写理由';
+        return;
+      }
+      body['reply'] = this.replyInput.trim();
+    }
+    const resp = await ApiClient.post('/api/club/request/audit', body, true);
+    this.memberMsg = (resp['msg'] as string) || (resp['code'] === 0 ? '已审批' : '审批失败');
+    this.replyFor = -1;
+    this.replyInput = '';
+    await this.loadRequests();
+    await this.loadClubMembers();
+  }
+
+  @Builder
+  requestSection() {
+    Column({ space: 10 }) {
+      Row() {
+        Text('入社/退社审批').fontSize(Theme.fsTitle).fontWeight(FontWeight.Bold)
+          .fontColor(Theme.textBody).layoutWeight(1)
+        Text(this.showHandled ? '查看待审' : '查看全部')
+          .fontSize(Theme.fsCaption).fontColor(Theme.primary)
+          .onClick(() => {
+            this.showHandled = !this.showHandled;
+            this.loadRequests();
+          })
+      }.width('100%')
+
+      if (this.requests.length === 0) {
+        Text(this.showHandled ? '暂无申请记录' : '暂无待审申请')
+          .fontSize(Theme.fsCaption).fontColor(Theme.textTertiary).width('100%')
+      }
+
+      ForEach(this.requests, (r: MemberRequest) => {
+        Column({ space: 8 }) {
+          Row({ space: 8 }) {
+            Text(requestTypeText(r.type))
+              .fontSize(10)
+              .fontColor(Theme.textOnPrimary)
+              .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+              .backgroundColor(r.type === 1 ? Theme.success : Theme.warning)
+              .borderRadius(6)
+            Text(r.name + ' (' + r.stu_no + ')')
+              .fontSize(Theme.fsSmall).fontWeight(FontWeight.Medium).fontColor(Theme.textBody)
+              .layoutWeight(1)
+            Text(requestStatusText(r.status))
+              .fontSize(Theme.fsCaption)
+              .fontColor(r.status === 0 ? Theme.warning : r.status === 1 ? Theme.success : Theme.danger)
+          }.width('100%')
+
+          if (r.reason !== '') {
+            Text('理由: ' + r.reason).fontSize(Theme.fsCaption).fontColor(Theme.textSecondary).width('100%')
+          }
+          // 审批参考信息: 申请人当前已加入的其他社团(判据在服务端)
+          if (r.other_clubs !== '') {
+            Text('已加入社团: ' + r.other_clubs)
+              .fontSize(Theme.fsCaption).fontColor(Theme.primary).width('100%')
+          } else if (r.type === 1 && r.status === 0) {
+            Text('已加入社团: 暂无(首次入社)')
+              .fontSize(Theme.fsCaption).fontColor(Theme.textTertiary).width('100%')
+          }
+          Text(r.created_at).fontSize(10).fontColor(Theme.textTertiary).width('100%')
+
+          if (r.status === 0) {
+            Row({ space: 10 }) {
+              Button('同意')
+                .layoutWeight(1).height(32).fontSize(Theme.fsSmall)
+                .fontColor(Theme.textOnPrimary).backgroundColor(Theme.success)
+                .borderRadius(Theme.radiusPill)
+                .onClick(() => this.auditRequest(r, true))
+              Button('驳回')
+                .layoutWeight(1).height(32).fontSize(Theme.fsSmall)
+                .fontColor(Theme.onColorDanger).backgroundColor(Theme.dangerBg)
+                .borderRadius(Theme.radiusPill)
+                .onClick(() => this.auditRequest(r, false))
+            }.width('100%')
+          } else {
+            Text('审批人 ' + (r.handler === '' ? '-' : r.handler) +
+              (r.handled_at === '' ? '' : ' · ' + r.handled_at) +
+              (r.reply === '' ? '' : ' · 回复: ' + r.reply))
+              .fontSize(10).fontColor(Theme.textTertiary).width('100%')
+          }
+
+          if (this.replyFor === r.id) {
+            Column({ space: 6 }) {
+              TextInput({ placeholder: '请填写驳回理由(必填)', text: this.replyInput })
+                .fontSize(Theme.fsSmall).height(40).width('100%')
+                .backgroundColor(Theme.bgSubtle).borderRadius(Theme.radiusMd)
+                .onChange((v: string) => { this.replyInput = v; })
+              Button('确认驳回')
+                .width('100%').height(32).fontSize(Theme.fsSmall)
+                .fontColor(Theme.textOnPrimary).backgroundColor(Theme.danger)
+                .borderRadius(Theme.radiusPill)
+                .enabled(this.replyInput.trim() !== '')
+                .onClick(() => this.auditRequest(r, false))
+            }
+            .width('100%').padding(8)
+            .backgroundColor(Theme.bgSubtle).borderRadius(Theme.radiusMd)
+          }
+        }
+        .width('100%').padding(12)
+        .backgroundColor(Theme.bgCard).borderRadius(Theme.radiusMd)
+      }, (r: MemberRequest) => r.id.toString())
+    }
+    .width('100%').padding(12)
+    .backgroundColor(Theme.bgSubtle).borderRadius(Theme.radiusLg)
   }
 
   async removeMember(m: ClubMember): Promise<void> {
@@ -464,6 +602,15 @@ struct UserManagePage {
           Button('刷新').fontSize(13).height(30).backgroundColor(Theme.primary)
             .onClick(() => this.load())
         }.width('100%').padding({ left: 14, right: 14, top: 12, bottom: 6 })
+
+        // 入社/退社申请审批(社团账号专属, v5.0 重构)
+        if (AppConfig.isClubAccount) {
+          Column() {
+            this.requestSection()
+          }
+          .width('100%')
+          .padding({ left: Theme.pagePadding, right: Theme.pagePadding, top: 8 })
+        }
 
         // 本社团成员(社团账号专属)
         if (AppConfig.isClubAccount) {

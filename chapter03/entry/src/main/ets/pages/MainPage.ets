@@ -60,6 +60,9 @@ struct MainPage {
   // ---- 管理员: 待办 ----
   @State pendingSignup: number = 0;
   @State pendingReg: number = 0;
+  // ---- v5.0(重构): 平台管理员的待审社团 / 社团账号的待审入社退社申请 ----
+  @State pendingClubs: number = 0;
+  @State pendingClubReq: number = 0;
 
   private tabsController: TabsController = new TabsController();
 
@@ -197,13 +200,27 @@ struct MainPage {
     this.mySignupActs = ids;
   }
 
-  /** 管理员待办: 待审报名 / 待批注册 */
+  /** 管理员待办: 待审报名 / 待批注册; 社团账号则统计待审入社退社申请 */
   async loadPending(): Promise<void> {
+    if (AppConfig.isClubAccount) {
+      const resp = await ApiClient.get('/api/club/requests?size=1');
+      if (resp['code'] === 0) {
+        const d = resp['data'] as Record<string, Object>;
+        this.pendingClubReq = Number(d['total']);
+      }
+      return;
+    }
     const resp = await ApiClient.get('/api/stats/pending');
     if (resp['code'] !== 0) return;
     const d = resp['data'] as Record<string, Object>;
     this.pendingSignup = Number(d['signup_pending']);
     this.pendingReg = Number(d['register_pending']);
+    // v5.0(重构): 平台管理员不再发布活动, 待办变为"社团注册审核"
+    const clubs = await ApiClient.get('/api/admin/clubs?status=0&size=1');
+    if (clubs['code'] === 0) {
+      const cd = clubs['data'] as Record<string, Object>;
+      this.pendingClubs = Number(cd['pending_count']);
+    }
   }
 
   // ==================== 展示辅助 ====================
@@ -282,6 +299,8 @@ struct MainPage {
   /** 角标数字: 同样在 builder 内部按 kind 读状态, 避免"按值传参不刷新" */
   badgeOf(kind: string): number {
     if (kind === 'audit') return this.pendingSignup + this.pendingReg;
+    if (kind === 'clubs') return this.pendingClubs;
+    if (kind === 'reqs') return this.pendingClubReq;
     return 0;
   }
 
@@ -719,8 +738,17 @@ struct MainPage {
           Theme.success, 'pages/AuditPage', 'audit')
         this.bigCard('用户管理', '全量学生信息 + 分组查找(注册状态/学时达标)',
           Theme.admin, 'pages/UserManagePage', '')
-        this.bigCard('发布活动', '表单 + 本地草稿箱, 同步发布到服务器',
-          Theme.primary, 'pages/ActivityPublishPage', '')
+        // v5.0(重构): 发布/编辑活动归属于社团 —— 社团账号保留发布入口并新增入社退社审批;
+        // 平台管理员不再发布活动, 改为社团注册审核。
+        if (AppConfig.isClubAccount) {
+          this.bigCard('发布活动', '表单 + 本地草稿箱, 同步发布到服务器',
+            Theme.primary, 'pages/ActivityPublishPage', '')
+          this.bigCard('入社/退社审批', '成员加入与退出申请审批(附已加入社团参考)',
+            Theme.success, 'pages/UserManagePage', 'reqs')
+        } else {
+          this.bigCard('社团审核', '社团注册审批 + 停用/恢复, 待审角标',
+            Theme.warning, 'pages/ClubAuditPage', 'clubs')
+        }
         this.bigCard('服务器日志', '实时请求日志(内存 + MySQL request_log)',
           Theme.signin, 'pages/ServerLogPage', '')
         this.bigCard('学时报表', '全量学时排行 + 明细(双端一致)',
@@ -803,6 +831,9 @@ struct MainPage {
             this.rowItem('我的报名', '本地记录 + 服务器状态同步', 'pages/MySignupPage')
           }
           this.rowItem('学时报表', '排行榜 + 个人明细', 'pages/HoursReportPage')
+          this.dividerLine()
+          // v5.0(重构): 社团广场 —— 浏览/搜索社团, 申请加入, 管理我的社团(含退出申请)
+          this.rowItem('社团广场', '浏览/搜索社团, 申请加入, 我的社团管理', 'pages/ClubSquarePage')
           this.dividerLine()
           this.rowItem('通知公告', '社团公告 + 未读标记', 'pages/AnnouncementPage')
           this.dividerLine()
