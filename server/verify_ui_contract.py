@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+﻿#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
 UI 契约测试: 校验 App 端(ArkTS)读取的字段在服务端响应中真实存在且语义正确。
@@ -56,8 +56,11 @@ def login(role, account, secret):
 print('== 0. 登录 ==')
 admin = login('admin', 'admin', 'admin123')
 stu = login('student', '2023001', '123456')   # 成员登录口径: 学号 + 密码(初始 123456)
+# v5.0: 活动编辑归属社团(平台管理员 403), 演示活动 1/2 属计算机协会 -> 用种子社团账号编辑
+club = login('club', 'club', 'club123')
 check('管理员登录', admin is not None)
 check('成员登录(2023001 + 密码)', stu is not None)
+check('社团账号登录(活动编辑主体)', club is not None)
 
 print('== 1. 活动列表分页(活动广场滚动加载) ==')
 r, _ = call('GET', '/api/activity/list?page=1&size=3', token=stu)
@@ -163,7 +166,7 @@ if target:
         'end_time': target['end_time'], 'hours': target['hours'],
         'capacity': target['capacity'], 'publisher': target['publisher'],
     }
-    r0, _ = call('POST', '/api/activity/update', body, token=admin)
+    r0, _ = call('POST', '/api/activity/update', body, token=club)
     check('同值编辑成功(含历史开始时间)', r0.get('code') == 0, str(r0.get('msg')))
     r, _ = call('GET', '/api/activity/list?page=1&size=200', token=admin)
     after = None
@@ -185,16 +188,16 @@ if target:
             'end_time': a2['end_time'], 'hours': a2['hours'],
             'capacity': 1, 'publisher': a2['publisher'],
         }
-        r0, _ = call('POST', '/api/activity/update', b2, token=admin)
+        r0, _ = call('POST', '/api/activity/update', b2, token=club)
         check('人数上限 < 有效报名数被拒(活动2)', r0.get('code') == 400, str(r0.get('msg')))
 
     bad = dict(body)
     # 上限取"当前有效报名数 + 1": 不能写死 2, 否则报名数一变用例就失效
     bad['capacity'] = target['valid_count'] + 1
-    r0, _ = call('POST', '/api/activity/update', bad, token=admin)
+    r0, _ = call('POST', '/api/activity/update', bad, token=club)
     check('人数上限 >= 有效报名数可保存', r0.get('code') == 0,
           'capacity=%s valid=%s %s' % (bad['capacity'], target['valid_count'], r0.get('msg')))
-    r0, _ = call('POST', '/api/activity/update', body, token=admin)  # 还原
+    r0, _ = call('POST', '/api/activity/update', body, token=club)  # 还原
     check('还原活动1 原始人数上限', r0.get('code') == 0)
     # 还原后必须回到脚本启动时的值, 否则说明用例把演示数据改坏了
     r, _ = call('GET', '/api/activity/list?page=1&size=200', token=admin)
@@ -207,9 +210,9 @@ if target:
           'now=%s' % (back['capacity'] if back else 'n/a'))
     bad2 = dict(body)
     bad2['end_time'] = bad2['start_time']
-    r0, _ = call('POST', '/api/activity/update', bad2, token=admin)
+    r0, _ = call('POST', '/api/activity/update', bad2, token=club)
     check('结束时间 <= 开始被拒', r0.get('code') == 400, str(r0.get('msg')))
-    r0, _ = call('POST', '/api/activity/update', dict(body, activity_id=999999), token=admin)
+    r0, _ = call('POST', '/api/activity/update', dict(body, activity_id=999999), token=club)
     check('不存在的活动 404', r0.get('code') == 404)
     r0, _ = call('POST', '/api/activity/update', body, token=stu)
     check('成员不能编辑(403)', r0.get('code') == 403)

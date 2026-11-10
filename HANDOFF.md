@@ -187,7 +187,7 @@ GET /api/logs             + level/method/kw/matched
 python server\verify_demo_data.py 8000        # 8 通过, 0 失败（只读）
 python server\verify_v3.py 8000               # 34 通过, 0 失败（跑完需手动删测试活动, 见 9.5）
 python server\verify_ui_contract.py 8000      # 48 通过, 0 失败（跑完自动还原）
-python server\test_api.py                     # 26 通过（会写入，跑完按第 9.6 节还原）
+python server\test_api.py                     # 34 通过（v5.0 起自建临时活动，跑完自动清理）
 ```
 
 实测结论（2026-10-28）：
@@ -211,14 +211,14 @@ python server\test_api.py                     # 26 通过（会写入，跑完�
    DELETE FROM activity WHERE title LIKE 'v3 %' OR title = '历史活动';
    ```
    否则 `verify_demo_data.py` 的"活动列表 = 8 个"会失败。
-6. **`test_api.py` 会真实写入**：它会审核 `client_id='ptest-audit-1'` 这条报名，使张三学时 +2.0。它不再按"学号下第一条待审"取记录（旧写法会误伤 seed 里的演示报名）。跑完要还原演示数据，执行：
+6. **~~`test_api.py` 会真实写入~~（2026-11-10 已改造，见 §45.5：脚本自建临时活动并自动清理，不再动演示数据；以下为历史说明）**：它会审核 `client_id='ptest-audit-1'` 这条报名，使张三学时 +2.0。它不再按"学号下第一条待审"取记录（旧写法会误伤 seed 里的演示报名）。跑完要还原演示数据，执行：
    ```sql
    UPDATE signup SET status=0, hours=0, audited_at=NULL WHERE client_id='ptest-audit-1';
    UPDATE hours_total SET total_hours=4.5, sign_count=2 WHERE stu_no='2023001';
    ```
    还原后 `verify_demo_data.py` 应为 8/8（总学时 20.5，榜首李铭 5.5）。
 7. **ArkTS 路由传参**用 `router.pushUrl({ url, params })` 的对象形式；拼 `?id=` 在 `getParams()` 里读不到（这正是第五批修掉的致命 bug）。
-8. `test_api.py` 以前会重置数据，现在必须显式 `--reset`；但即使不加，它仍会写入第 6 条所述的那一条审核。
+8. `test_api.py` 以前会重置数据，现在必须显式 `--reset`；2026-11-10 起它改为自建临时活动并自动清理（§45.5），不再写入演示数据。
 
 ---
 
@@ -1467,3 +1467,34 @@ CodeBuddy 完成 §34-43 后工作区有 25 个文件未提交。逐项复核：
 ### 44.4 待办提醒
 - 根目录有个名为 `0` 的垃圾文件（构建日志重定向产物，内容为 GBK 乱码），未跟踪，建议删除。
 - §37 合并后的引导/登录页、§43 审核分工的**模拟器界面级验证**仍未做（HAP 已可安装）。
+
+## 45. 全项目检查（CodeBuddy 交接后独立复查，2026-11-10 18:30）
+
+### 45.1 结论
+- 服务端 v5.0 运行正常（`/api/health` db:true）；数据基线 **8 活动 / 19 报名（9 通过 + 8 待审 + 2 驳回演示）/ 5 人 20.5 学时**，测试后零残留（无 id>=9000 活动、无 2029xxx 测试学生）。
+- 回归全绿：`audit_v4` 105、`verify_membership` 56、`verify_club` 60、`verify_scope` 17、`verify_v4` 45；Python 侧 `verify_demo_data` 13、`verify_cancel` 7、`verify_v3` 45、`verify_ui_contract` 63、`test_p1p2` 38（连跑两次）、`test_cancel_api` 33（连跑两次）。
+- HAP `assembleHap` **BUILD SUCCESSFUL**（增量，ArkTS UP-TO-DATE）。
+- 静态红线：`server.cpp` 无 thread_local（仅注释）；17 页面与 `main_pages.json` 一致；无实义 emoji（RegisterPage 的 ✓(U+2713) 为文本符号，沿用 §44.3 约定）；版本口径 5.0 三处一致。
+
+### 45.2 发现并修复（**均为测试脚本未跟上 v5.0，服务端无 bug**）
+1. `verify_demo_data.py` 断言过时：`taken 合计` 写死 19，实际 17 —— 种子数据含 2 条"驳回"演示（李铭/赵磊），驳回不占名额。改为与"通过+待审"实际条数比对（顺手修了 `status=0` 假值坑：`0 or -1` → `-1`）。
+2. `test_p1p2.py` / `test_cancel_api.py` / `verify_v3.py` / `verify_ui_contract.py` 仍用 admin 发布/编辑活动 → v5.0 已收敛为社团账号（admin 403 "活动发布归属于社团"）。统一改用种子社团 `club/club123`；`test_p1p2` 各测试活动改为互不重叠时间段（否则被时间冲突规则挡住），上下线也改社团 token。
+3. `hours_total.sign_count` 漂移（张三 2023001：sign_count=3，实际通过报名 2 条；学时总额 4.5 正确）——历史测试还原不完整。用 `POST /api/hours/rebuild` 重建，恢复 5 人 20.5 学时。
+4. `test_cancel_api` 第 12 节流用例固定学号 `2029998`，60s 窗口内连跑会继承上轮计数假红 → 改每轮唯一学号（`2029XXX`）。
+5. `test_cancel_api` 原依赖演示活动 1 报名（v5.0 重播种子后该活动已结束）→ 改为社团账号临时建活动、跑完删除。
+
+### 45.3 环境要点（重要，§44 未记）
+- 本机 `python` 仍是 **Store 存根**（`python.exe --version` 返回 9009，实际未安装）。
+- 可用解释器：`D:\WorkBuddy\resources\vendor\python\python.exe`（Python 3.13）。所有 `.py` 回归改用该绝对路径执行。
+- **ps1 套件受执行策略限制**：`powershell -NoProfile -ExecutionPolicy Bypass -File .\verify_x.ps1`（直接 `& .\x.ps1` 报 SecurityError）。
+- 构建仍需 `DEVECO_SDK_HOME` + `NODE_HOME="D:\HuaWei\DevEco Studio\tools\node"`（见 §19/§44）。
+
+### 45.4 待办
+- 模拟器界面级验证（§37 合并登录页 / §43 双账号页签与角标）—— HAP 已可装。
+- 课程设计正式报告（需求/架构/库表/接口/测试记录）未写。
+- 真机签名配置（需华为开发者账号）、ESP32 实物联调。
+
+### 45.5 test_api.py 完成 v5.0 适配（§9.6 的手工还原自此不再需要）
+- 现象：34 项中 2 项 FAIL（演示活动 1/2 已结束），且审核用例会把演示报名 `ptest-audit-1` 审成通过（张三 +2.0 学时），必须手工执行两条 SQL 还原。
+- 改造：脚本用种子社团自建临时活动（未来 days=40 时段），报名/审核全部落在该活动上；`AUDIT_CID` 改为 `ptest-tmp-audit-1`（原值 `ptest-audit-1` 与演示种子 client_id 撞车，报名幂等会直接命中演示记录）；结束时删临时活动 + `POST /api/hours/rebuild`。
+- 结果：**34/34 PASS**，连跑两次，基线始终 8 活动 / 19 报名 / 5 人 20.5 学时。§9 第 6 条"跑完要还原"降级为历史说明。

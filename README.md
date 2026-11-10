@@ -1,4 +1,4 @@
-# 社团活动报名与学时认定系统
+﻿# 社团活动报名与学时认定系统
 
 题号 86 · HarmonyOS 课程设计（进阶级・系统 · 95 分）
 
@@ -74,13 +74,13 @@ chapter03/
 │   ├── init_db.sql            # MySQL 建库建表 + 演示数据
 │   ├── start_server.bat       # 一键启动（自检 MySQL → server.exe 8000），日常推荐
 │   ├── stop_server.bat        # 一键停止（taskkill server.exe，释放 8000 端口）
-│   ├── test_api.py            # 33 项回归测试（会真实审核，跑完需还原）
-│   ├── test_cancel_api.py     # 注销接口 30 项（含密码确认、失败节流、名额回补，自建自清理）
+│   ├── test_api.py            # 34 项回归测试（v5.0 起自建临时活动，自动清理）
+│   ├── test_cancel_api.py     # 注销接口 33 项（含密码确认、失败节流、名额回补，自建自清理）
 │   ├── test_p1p2.py           # 并发与权限 38 项（含时间冲突 / 签到码 / 类别上限，自建自清理）
 │   ├── verify_demo_data.py    # 演示数据一致性校验（13 项，只读）
 │   ├── verify_cancel.py       # 注销后数据一致性（7 项，只读）
 │   ├── verify_v3.py           # 服务端新功能回归（45 项）
-│   ├── verify_ui_contract.py  # App 读取字段契约测试（53 项）
+│   ├── verify_ui_contract.py  # App 读取字段契约测试（63 项）
 │   ├── testdata_seed.sql      # 边界测试数据（id≥9000 / 学号 T9xxx，与基线隔离）
 │   ├── testdata_clean.sql     # 测试数据清理（幂等，清理后基线复原）
 │   ├── verify_test_data.ps1   # 结构/落库/接口/基线 四阶段核验（83 项，无 Python 可用）
@@ -108,13 +108,14 @@ chapter03/
 3. 构建鸿蒙 App：`hvigorw assembleHap --mode module -p product=default --no-daemon`，产物 `entry-default-unsigned.hap`
 4. 安装运行：`hdc install -r entry-default-unsigned.hap`，模拟器默认服务器地址 `10.0.2.2:8000`
 5. 回归测试（**演示前建议全跑一遍**）：
-   - `python server\verify_demo_data.py` 演示基线（8 活动 / 19 报名 / 5 人 / 20.5 学时，只读）
+   - ⚠️ 本机 `python` 是 Store 存根（返回 9009），用 `D:\WorkBuddy\resources\vendor\python\python.exe`（3.13）替代下文 `python`；ps1 套件须加 `-ExecutionPolicy Bypass`。
+   - `python server\verify_demo_data.py` 演示基线（8 活动 / 19 报名 = 9 通过 + 8 待审 + 2 驳回演示 / 5 人 20.5 学时，只读）
    - `python server\verify_cancel.py` 注销后数据一致性（无孤儿 / 汇总相符，只读）
-   - `python server\verify_ui_contract.py` App 读取字段契约（53 项，只读）
+   - `python server\verify_ui_contract.py` App 读取字段契约（63 项，只读）
    - `python server\test_p1p2.py` 并发与权限专项（38 项，越权 / 满员竞态 / 时间冲突 / 签到码 / 类别上限，自建自清理）
-   - `python server\test_cancel_api.py` 注销接口全链路（30 项，含名额回补，自建自清理）
-   - `python server\test_api.py` 基础回归（**会真实审核 `ptest-audit-1`，跑完需按 HANDOFF 9.6 还原**）
-   - `python server\verify_v3.py 8000` 服务端新功能（会创建并清理测试活动）
+   - `python server\test_cancel_api.py` 注销接口全链路（33 项，含名额回补，自建自清理）
+- `python server\test_api.py` 基础回归（34 项；v5.0 起自建临时活动、跑完自动删除并 rebuild，不再改动演示数据）
+   - `python server\verify_v3.py 8000` 服务端新功能（45 项；会创建一个测试活动，需手工清理，见 HANDOFF §45.2）
    - **无 Python 时的数据核验**：依次执行 `testdata_seed.sql` → `verify_test_data.ps1 -Stage schema/seed` → 重启服务端 → `-Stage api` → `testdata_clean.sql` → `-Stage baseline`（83 项，见 `docs/数据一致性核验-v3.2.md`）
    - `powershell -ExecutionPolicy Bypass -File server\verify_v4.ps1` v4.0 验收（45 项：申诉闭环 / 规则读写 / 异常检测 / 越权 / 基线，自建自清理）
    - `powershell -ExecutionPolicy Bypass -File server\audit_v4.ps1` 系统全面测试（103 项：功能 / 边界 / 安全 / 性能 / 一致性 / 兼容，含 p95 与并发指标）

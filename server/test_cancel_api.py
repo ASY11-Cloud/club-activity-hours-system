@@ -6,11 +6,15 @@
 用法: python test_cancel_api.py
 """
 import json
+import subprocess
 import urllib.request
+from datetime import datetime, timedelta
 
 BASE = "http://127.0.0.1:8000"
 TEST_NO = "2029999"
 TEST_NAME = "TESTSUT"
+MYSQL = ["mysql", "-u", "root", "-p123456", "--default-character-set=utf8mb4",
+         "-N", "-B", "club_system", "-e"]
 
 
 def call(method, path, body=None, token=None):
@@ -48,6 +52,17 @@ def login(kind, account, secret):
 admin = login("admin", "admin", "admin123")
 check("admin login", admin is not None)
 
+# v5.0: 活动发布收敛为社团账号, 演示活动多已结束 -> 用种子社团临时建一个测试活动, 跑完删除
+club = login("club", "club", "club123")
+check("club login", club is not None)
+_fmt = lambda d: (datetime.now() + timedelta(days=d)).strftime("%Y-%m-%d %H:%M")
+_r = call("POST", "/api/activity/add", {
+    "title": "注销测试活动-勿留", "content": "test_cancel_api 自建", "location": "测试场地",
+    "start_time": _fmt(2), "end_time": _fmt(3), "hours": 1.0, "capacity": 10,
+    "category": "sports"}, club)
+AID = (_r.get("data") or {}).get("id")
+check("create test activity", _r.get("code") == 0 and AID, _r.get("msg", ""))
+
 # ---- 0. 清理上一次可能残留的测试账号 ----
 call("POST", "/api/student/delete", {"stu_no": TEST_NO, "confirm_stu_no": TEST_NO}, admin)
 
@@ -67,13 +82,13 @@ check("approve test student", r.get("code") == 0, r.get("msg", ""))
 stu = login("student", TEST_NO, "123456")
 check("test student login", stu is not None)
 
-# ---- 2. 让该学生产生报名数据(活动 1) ----
-r = call("POST", "/api/signup/add", {"activity_id": 1, "client_id": "test-cancel-1"}, stu)
+# ---- 2. 让该学生产生报名数据(自建测试活动) ----
+r = call("POST", "/api/signup/add", {"activity_id": AID, "client_id": "test-cancel-1"}, stu)
 check("test student signup", r.get("code") == 0, r.get("msg", ""))
 
 # 报名占用名额: 注销级联删报名后 taken 必须回补(否则活动会永久"少一个名额")
 acts = call("GET", "/api/activity/list?all=1", None, admin)
-a1 = [a for a in (acts.get("data") or {}).get("list", []) if a["id"] == 1]
+a1 = [a for a in (acts.get("data") or {}).get("list", []) if a["id"] == AID]
 taken_after_signup = int(a1[0]["taken"]) if a1 else -1
 check("signup 占用名额(taken = valid_count)", bool(a1) and taken_after_signup == int(a1[0]["valid_count"]),
       "taken=%s" % taken_after_signup)
@@ -109,7 +124,7 @@ check("cancel reports token revoked>=1", (dd.get("token_revoked") or 0) >= 1, "g
 
 # 注销级联删掉报名后, 活动名额必须还回去(taken 与有效报名数继续自洽)
 acts = call("GET", "/api/activity/list?all=1", None, admin)
-a1 = [a for a in (acts.get("data") or {}).get("list", []) if a["id"] == 1]
+a1 = [a for a in (acts.get("data") or {}).get("list", []) if a["id"] == AID]
 taken_after_cancel = int(a1[0]["taken"]) if a1 else -1
 check("注销后 taken 回补 1 个名额", bool(a1) and taken_after_cancel == taken_after_signup - 1,
       "before=%d after=%d" % (taken_after_signup, taken_after_cancel))
@@ -147,7 +162,9 @@ r = call("GET", "/api/student/impact?stu_no=" + TEST_NO, None, admin)
 check("cleanup verified (404)", r.get("code") == 404, "code=%s" % r.get("code"))
 
 # ---- 12. 注销失败节流: 持 Token 者不能反复猜密码后毁号 ----
-LOCK_NO = "2029998"
+import time
+# 节流窗口 60s 按 "IP+学号" 记, 固定学号连跑会继承上一轮的计数 -> 用每轮唯一学号保证可重复执行
+LOCK_NO = "2029%03d" % (int(time.time()) % 1000)
 call("POST", "/api/student/delete", {"stu_no": LOCK_NO, "confirm_stu_no": LOCK_NO}, admin)
 r = call("POST", "/api/register", {"stu_no": LOCK_NO, "name": "LOCKTEST", "dept": "TEST", "pwd": "123456"})
 check("lockout: register test student", r.get("code") == 0, r.get("msg", ""))
@@ -168,5 +185,11 @@ r = call("POST", "/api/student/cancel", {"confirm_pwd": "123456"}, ltok)
 check("lockout: 6th attempt -> 429", r.get("code") == 429, "code=%s" % r.get("code"))
 r = call("POST", "/api/student/delete", {"stu_no": LOCK_NO, "confirm_stu_no": LOCK_NO}, admin)
 check("lockout: cleanup by admin ok", r.get("code") == 0, r.get("msg", ""))
+
+# ---- 13. 清理: 删除自建的测试活动(不留残留数据) ----
+subprocess.run(MYSQL + ["DELETE FROM activity WHERE id=%s" % AID], capture_output=True)
+left = subprocess.run(MYSQL + ["SELECT COUNT(*) FROM activity WHERE id=%s" % AID],
+                      capture_output=True).stdout.decode("utf-8", "ignore").strip()
+check("cleanup test activity", left == "0", "left=%s" % left)
 
 print("\nresult: %d passed, %d failed" % (ok_count, fail_count))

@@ -72,6 +72,20 @@ r = call("POST", "/api/login", {"type": "admin", "account": "admin", "secret": "
 t("admin login ok", r.get("code") == 0 and r["data"].get("role") == "admin" and r["data"].get("token"), r.get("data"))
 ADMIN = r.get("data", {}).get("token", "")
 
+# v5.0: 活动发布收敛为社团账号, 且演示活动多已结束 -> 用种子社团临时建一个活动,
+# 本脚本的报名/审核全部落在该活动上, 跑完删除并 rebuild 学时(不再需要手工还原演示数据)
+r = call("POST", "/api/login", {"type": "club", "account": "club", "secret": "club123"})
+t("club login ok", r.get("code") == 0, r.get("data"))
+CLUB = r.get("data", {}).get("token", "")
+import datetime as _dtm
+_fmt = lambda d: (_dtm.datetime.now() + _dtm.timedelta(days=d)).strftime("%Y-%m-%d %H:%M")
+r = call("POST", "/api/activity/add", {
+    "title": "API验收临时活动", "content": "test_api.py 自建", "location": "测试场地",
+    "start_time": _fmt(40), "end_time": _fmt(41), "hours": 2.0, "capacity": 20,
+    "category": "sports"}, token=CLUB)
+TEMP_AID = (r.get("data") or {}).get("id")
+t("create temp activity", r.get("code") == 0 and TEMP_AID, r)
+
 r = call("POST", "/api/login", {"type": "admin", "account": "admin", "secret": "badpwd"})
 t("admin wrong password rejected", r.get("code") == 401, r)
 
@@ -102,7 +116,7 @@ t("admin access logs -> ok", r.get("code") == 0, r.get("data", {}).get("total"))
 # ================= 3. 学生报名(身份强制) =================
 print("========== 3. 学生报名(服务端强制登录身份) ==========")
 r = call("POST", "/api/signup/add",
-         {"client_id": "ptest-2023002-1", "activity_id": 2, "stu_no": "2023002", "name": "李铭"},
+         {"client_id": "ptest-2023002-1", "activity_id": TEMP_AID, "stu_no": "2023002", "name": "李铭"},
          token=STU1)  # 伪造李铭身份 -> 应被强制为 2023001
 t("signup with forged identity forced to login stu", r.get("code") == 0, r)
 r = call("GET", "/api/signup/list", token=STU1)
@@ -115,14 +129,15 @@ r = call("POST", "/api/login", {"type": "student", "account": "2023002", "secret
 t("student2 login", r.get("code") == 0, r.get("data"))
 STU2 = r.get("data", {}).get("token", "")
 r = call("POST", "/api/signup/add",
-         {"client_id": "ptest-2023002-2", "activity_id": 1, "stu_no": "2023002", "name": "李铭"},
+         {"client_id": "ptest-2023002-2", "activity_id": TEMP_AID, "stu_no": "2023002", "name": "李铭"},
          token=STU2)
 t("student2 signup ok", r.get("code") == 0, r)
 
 # 保证 2023001 有待审核记录(验收脚本可重复运行, 不依赖上次数据)
-AUDIT_CID = "ptest-audit-1"
+# 注意: 不能用 ptest-audit-1 —— 那是演示种子的 client_id, 幂等会命中它并审掉演示报名
+AUDIT_CID = "ptest-tmp-audit-1"
 r = call("POST", "/api/signup/add",
-         {"client_id": AUDIT_CID, "activity_id": 1, "stu_no": "2023001", "name": "张三"},
+         {"client_id": AUDIT_CID, "activity_id": TEMP_AID, "stu_no": "2023001", "name": "张三"},
          token=STU1)
 t("ensure pending signup for audit", r.get("code") == 0, r)
 
@@ -208,6 +223,18 @@ r = call("POST", "/api/logout", {}, token=tmp_tok)
 ok_logout = r.get("code") == 0
 r = call("GET", "/api/signup/list", token=tmp_tok)
 t("logout invalidates token", ok_logout and r.get("code") == 401, r)
+
+# ================= 清理: 临时活动 + 学时重建(可重复执行, 不动演示数据) =================
+if TEMP_AID:
+    try:
+        subprocess.run(["mysql", "-u", "root", "-p123456", "--default-character-set=utf8mb4",
+                        "club_system", "-e",
+                        "DELETE FROM signup WHERE activity_id=%s; DELETE FROM activity WHERE id=%s;"
+                        % (TEMP_AID, TEMP_AID)], capture_output=True, timeout=30)
+        r = call("POST", "/api/hours/rebuild", {}, token=ADMIN)
+        print("清理: 临时活动 #%s 已删除, 学时按已通过报名重建 -> %s" % (TEMP_AID, r.get("data")))
+    except Exception as e:
+        print("清理失败(请手工删除临时活动 #%s): %s" % (TEMP_AID, e))
 
 # ================= 汇总 =================
 print("=" * 50)

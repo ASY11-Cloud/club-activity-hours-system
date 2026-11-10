@@ -54,18 +54,23 @@ def dt(days=0, minutes=0):
     return (datetime.now() + timedelta(days=days, minutes=minutes)).strftime('%Y-%m-%d %H:%M')
 
 
-def add_act(admin, title, start, end, hours=2.0, capacity=0, category='sports'):
+def add_act(club, title, start, end, hours=2.0, capacity=0, category='sports'):
+    # v5.0: 活动发布收敛为社团账号(平台管理员 403), 发布者由登录社团自动确定
     _, r = api('/api/activity/add', {
         'title': title, 'content': 'P1P2 测试', 'location': '测试场地',
         'start_time': start, 'end_time': end, 'hours': hours, 'capacity': capacity,
-        'category': category, 'publisher': '系统管理员'}, token=admin)
+        'category': category}, token=club)
     return r['data']['id'] if r.get('code') == 0 else None
 
 
-# ---------- 准备: 管理员 + 3 个测试学生 ----------
+# ---------- 准备: 管理员 + 种子社团 + 3 个测试学生 ----------
 _, r = api('/api/login', {'type': 'admin', 'account': 'admin', 'secret': 'admin123'})
 assert r['code'] == 0, 'admin login failed'
 at = r['data']['token']
+# v5.0: 发布/编辑活动须用社团账号(种子社团 club/club123)
+_, r = api('/api/login', {'type': 'club', 'account': 'club', 'secret': 'club123'})
+assert r['code'] == 0, 'club login failed'
+ct = r['data']['token']
 
 STU = [('2029101', '并发甲', 'CARD-9101'), ('2029102', '并发乙', 'CARD-9102'),
        ('2029103', '并发丙', 'CARD-9103')]
@@ -81,26 +86,27 @@ for no, name, card in STU:
     stu_tokens[no] = r['data']['token']
 tA, tB, tC = stu_tokens['2029101'], stu_tokens['2029102'], stu_tokens['2029103']
 
-# 测试活动: A1 容量1 / A2 不限 / A3 将改为已结束 / A4 进行中(刷卡) / A5 仅验证时间校验
+# 测试活动: 各活动时间互不重叠(时间冲突规则会拦重叠报名, 除 a6/a7 这组故意重叠的用例)
 now = datetime.now()
-a1 = add_act(at, 'P1满员竞态', dt(minutes=5), dt(days=2), capacity=1)
-a2 = add_act(at, 'P1容量不限', dt(minutes=5), dt(days=2), capacity=0)
-a3 = add_act(at, 'P2已结束', dt(minutes=5), dt(days=2), capacity=10)
-a4 = add_act(at, 'P1刷卡重复', dt(minutes=1), dt(days=2), capacity=10)
+a1 = add_act(ct, 'P1满员竞态', dt(days=3), dt(days=4), capacity=1)
+a2 = add_act(ct, 'P1容量不限', dt(days=5), dt(days=6), capacity=0)
+a3 = add_act(ct, 'P2已结束', dt(days=7), dt(days=8), capacity=10)
+a4 = add_act(ct, 'P1刷卡重复', dt(days=9), dt(days=10), capacity=10)
 # A5 专用于"驳回后重报": 独立活动且不限人数, 避免复用 a1(容量 1 已被竞态测试占位)造成偶发失败
-a5 = add_act(at, 'P2驳回重报', dt(minutes=5), dt(days=2), capacity=0)
+a5 = add_act(ct, 'P2驳回重报', dt(days=11), dt(days=12), capacity=0)
 # v3.2 新用例: a6/a7 同一时段(时间冲突)/ a8 动态签到码与签退(未来时段避免与其他报名重叠)
-a6 = add_act(at, 'P1冲突甲', dt(days=20), dt(days=21), capacity=0)
-a7 = add_act(at, 'P1冲突乙', dt(days=20), dt(days=21), capacity=0)
-a8 = add_act(at, 'P1动态签到码', dt(days=10), dt(days=11), capacity=0)
+a6 = add_act(ct, 'P1冲突甲', dt(days=20), dt(days=21), capacity=0)
+a7 = add_act(ct, 'P1冲突乙', dt(days=20), dt(days=21), capacity=0)
+a8 = add_act(ct, 'P1动态签到码', dt(days=13), dt(days=14), capacity=0)
 # a9 类别上限(skill): 活动 5 学时, 单活动上限设 2 -> 审核通过只认 2
-a9 = add_act(at, 'P1类别上限', dt(days=30), dt(days=31), hours=5.0, capacity=0, category='skill')
+a9 = add_act(ct, 'P1类别上限', dt(days=30), dt(days=31), hours=5.0, capacity=0, category='skill')
 check('setup activities created', None not in (a1, a2, a3, a4, a5, a6, a7, a8, a9))
 # A3 通过"编辑"改为过去时间段(编辑允许历史时间, 发布不允许 —— 本身就是一条 P2 用例)
+# v5.0: 编辑同样须社团账号(且限本社团活动)
 _, r = api('/api/activity/update', {'activity_id': a3, 'title': 'P2已结束', 'content': '',
                                     'location': '测试场地', 'start_time': dt(days=-3),
                                     'end_time': dt(days=-2), 'hours': 2.0,
-                                    'capacity': 10, 'publisher': '系统管理员'}, token=at)
+                                    'capacity': 10}, token=ct)
 check('edit allows past time (P2)', r['code'] == 0, r.get('msg', ''))
 
 try:
@@ -238,19 +244,17 @@ try:
     # 9) 已结束活动拒绝报名
     _, r = api('/api/signup/add', {'client_id': 'p2-end', 'activity_id': a3}, token=tA)
     check('ended activity rejects signup', r['code'] == 400 and '结束' in r['msg'], r.get('msg', ''))
-    # 10) 已下线活动拒绝报名
-    api('/api/activity/status', {'activity_id': a4, 'status': 0}, token=at)
+    # 10) 已下线活动拒绝报名 (v5.0: 上下线须社团账号)
+    api('/api/activity/status', {'activity_id': a4, 'status': 0}, token=ct)
     _, r = api('/api/signup/add', {'client_id': 'p2-off', 'activity_id': a4}, token=tC)
     check('offline activity rejects signup', r['code'] == 400 and '未开放' in r['msg'], r.get('msg', ''))
-    api('/api/activity/status', {'activity_id': a4, 'status': 1}, token=at)
-    # 11) 时间校验: 结束早于开始
+    api('/api/activity/status', {'activity_id': a4, 'status': 1}, token=ct)
+    # 11) 时间校验: 结束早于开始 (v5.0: 发布须社团账号)
     _, r = api('/api/activity/add', {'title': '坏时间', 'start_time': dt(days=3),
-                                     'end_time': dt(days=1), 'hours': 1.0, 'capacity': 0,
-                                     'publisher': '系统管理员'}, token=at)
+                                     'end_time': dt(days=1), 'hours': 1.0, 'capacity': 0}, token=ct)
     check('end<=start rejected on publish', r['code'] == 400, r.get('msg', ''))
     _, r = api('/api/activity/add', {'title': '坏时间2', 'start_time': dt(days=1),
-                                     'end_time': dt(days=1), 'hours': 1.0, 'capacity': 0,
-                                     'publisher': '系统管理员'}, token=at)
+                                     'end_time': dt(days=1), 'hours': 1.0, 'capacity': 0}, token=ct)
     check('end==start rejected on publish', r['code'] == 400, r.get('msg', ''))
     # 12) 驳回后重报: 状态复位待审 + 旧备注清空 (用独立活动 a5, 不复用竞态活动)
     _, r = api('/api/signup/add', {'client_id': 'rej-1', 'activity_id': a5}, token=tB)

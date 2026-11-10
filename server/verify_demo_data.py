@@ -58,9 +58,10 @@ def main():
     n = len(acts)
     check("活动列表 = 8 个已发布", st == 200 and r.get("code") == 0 and n == 8, "count=%d" % n)
 
-    # 6. 报名列表 19 条(状态全覆盖)
+    # 6. 报名列表 19 条(状态全覆盖: 通过9 + 待审8 + 驳回演示2)
     st, r = req("GET", "/api/signup/list", token=token)
-    n = len(r["data"]["list"]) if r.get("data") else 0
+    signups = (r["data"]["list"] if r.get("data") else [])
+    n = len(signups)
     check("报名列表 = 19 条", st == 200 and r.get("code") == 0 and n == 19, "count=%d" % n)
 
     # 7. 学时报表 5 人, 冠军李铭 5.5h
@@ -79,7 +80,10 @@ def main():
                  for a in acts if int(a.get("taken", -1)) != int(a.get("valid_count", -2))]
     check("每个活动 taken == valid_count", len(bad_taken) == 0, "bad=%s" % bad_taken[:3])
     sum_taken = sum(int(a.get("taken") or 0) for a in acts)
-    check("taken 合计 = 19 条有效报名", sum_taken == 19, "sum=%d" % sum_taken)
+    # 有效报名 = 通过 + 待审(驳回演示不占名额): 种子数据 19 条中 2 条为驳回展示
+    valid_n = len([s for s in signups if s.get("status") is not None and int(s["status"]) in (0, 1)])
+    check("taken 合计 = 有效报名数(通过+待审)", sum_taken == valid_n,
+          "sum=%d valid=%d(总%d, 驳回%d)" % (sum_taken, valid_n, n, n - valid_n))
 
     # 7.2 分类学时汇总(报表图表数据源): 合计应等于 20.5 学时
     by_cat = (r.get("data") or {}).get("by_category") or []

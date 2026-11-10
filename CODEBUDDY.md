@@ -45,7 +45,11 @@
 | `verify_test_data.ps1` | 分阶段 | 一致性核验（需先 seed + restart 对账） |
 
 - 全部自隔离（测试学号 A90xx/V90xx、活动 9100-9299，前后自清理）。
-- **历史 python 脚本（test_p1p2.py 等）是 v3 时代的，口径已过时**，不要拿它的"8/19/5/20.5"基线来判断 v5 数据是否漂移；v5 的种子在 `server/seed_demo_data.sql`。
+- **Python 回归（2026-11-10 已适配 v5.0，全绿）**：`verify_demo_data` 13、`verify_cancel` 7、`verify_v3` 45、`verify_ui_contract` 63、`test_p1p2` 38、`test_cancel_api` 33。
+  - ⚠️ 本机 `python` 是 **Store 存根**（返回 9009）；用 **`D:\WorkBuddy\resources\vendor\python\python.exe`**（3.13）执行。
+  - v5.0 已把活动发布/编辑/上下线收敛到**社团账号**，这些脚本里的 `activity/add|update|status` 必须用 `club/club123` 令牌，admin 会 403。
+  - `verify_v3.py` 会留下一个测试活动（id>=9000），跑完按 HANDOFF §9.6 清理：删报名 → 删活动 → `POST /api/hours/rebuild`。
+- 基线口径：v5 种子在 `server/seed_demo_data.sql`；**19 条报名 = 9 通过 + 8 待审 + 2 驳回演示**（驳回不占名额，所以 taken 合计 17 才是对的）。
 - 修复"汇总 vs 明细"不一致的入口：`POST /api/hours/rebuild`（管理员）。
 
 ## 3. 红线：这些坑已经踩过，别再踩
@@ -88,4 +92,4 @@
 - [ ] 真机调试签名未配置。
 - [ ] ESP32 实物未联调（`esp32_rfid/rfid_esp32.ino`，刷卡走 `POST /api/signin`）。
 - [ ] 模拟器界面级验证：§37 引导/登录合并、§43 审核分工两种账号的页签与角标，未实测。
-- [ ] v3 时代的 python 测试脚本口径过时，可归档到 `server/legacy/` 防误用。
+- [x] ~~v3 时代的 python 测试脚本口径过时~~ —— 2026-11-10 已全部适配 v5.0 并跑通（见 §2）。

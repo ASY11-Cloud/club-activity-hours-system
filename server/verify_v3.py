@@ -65,6 +65,10 @@ check("错误口令被拒绝(401)", r2.get("code") == 401, r2)
 r = call("POST", "/api/login", {"type": "student", "account": "2023001", "secret": "123456"})
 check("学生 2023001 登录成功(学号+密码)", r.get("code") == 0, r)
 STOK = r["data"]["token"] if r.get("code") == 0 else ""
+# v5.0: 活动发布/编辑收敛为社团账号, 本节新建与编辑活动必须用种子社团 Token
+r = call("POST", "/api/login", {"type": "club", "account": "club", "secret": "club123"})
+check("社团账号 club/club123 登录成功", r.get("code") == 0, r)
+CTOK = r["data"]["token"] if r.get("code") == 0 else ""
 
 # ---------- 2. 活动列表分页 ----------
 print("\n[2] 活动列表分页")
@@ -85,13 +89,13 @@ print("\n[3] 活动编辑")
 sid = call("POST", "/api/activity/add",
            {"title": "v3 编辑测试活动", "content": "初始内容", "location": "测试室",
             "start_time": "2099-01-01 10:00", "end_time": "2099-01-01 12:00",
-            "hours": 1.5, "capacity": 10, "publisher": "管理员"}, tok=ATOK)
+            "hours": 1.5, "capacity": 10}, tok=CTOK)
 check("新建测试活动成功", sid.get("code") == 0, sid)
 NEW_ID = sid["data"]["id"] if sid.get("code") == 0 else 0
 up = call("POST", "/api/activity/update",
           {"activity_id": NEW_ID, "title": "v3 编辑后标题", "content": "改后内容", "location": "新地点",
            "start_time": "2099-01-02 09:00", "end_time": "2099-01-02 11:30",
-           "hours": 3.0, "capacity": 20, "publisher": "管理员"}, tok=ATOK)
+           "hours": 3.0, "capacity": 20}, tok=CTOK)
 check("编辑成功", up.get("code") == 0, up)
 lst = call("GET", "/api/activity/list?all=1", tok=ATOK)["data"]["list"]
 ed = [a for a in lst if a["id"] == NEW_ID]
@@ -105,30 +109,30 @@ check("活动行下发 taken(名额计数)", bool(ed) and isinstance(ed[0].get("
 call("POST", "/api/activity/update",
      {"activity_id": NEW_ID, "title": "v3 编辑后标题", "content": "改后内容", "location": "新地点",
       "start_time": "2099-01-02 09:00", "end_time": "2099-01-02 11:30",
-      "hours": 3.0, "capacity": 20, "publisher": "管理员", "category": "volunteer"}, tok=ATOK)
+      "hours": 3.0, "capacity": 20, "category": "volunteer"}, tok=CTOK)
 ed = [a for a in call("GET", "/api/activity/list?all=1", tok=ATOK)["data"]["list"] if a["id"] == NEW_ID]
 check("类别可改为 volunteer", bool(ed) and ed[0].get("category") == "volunteer",
       ed[0].get("category") if ed else None)
 call("POST", "/api/activity/update",
      {"activity_id": NEW_ID, "title": "v3 编辑后标题", "start_time": "2099-01-02 09:00",
-      "end_time": "2099-01-02 11:30", "hours": 3.0, "capacity": 20, "category": "not-a-category"}, tok=ATOK)
+      "end_time": "2099-01-02 11:30", "hours": 3.0, "capacity": 20, "category": "not-a-category"}, tok=CTOK)
 ed = [a for a in call("GET", "/api/activity/list?all=1", tok=ATOK)["data"]["list"] if a["id"] == NEW_ID]
 check("非法类别回落 sports", bool(ed) and ed[0].get("category") == "sports",
       ed[0].get("category") if ed else None)
 check("编辑时允许开始时间早于当前(历史活动可改)",
       call("POST", "/api/activity/update",
            {"activity_id": NEW_ID, "title": "历史活动", "start_time": "2020-01-01 10:00",
-            "end_time": "2020-01-01 12:00", "hours": 2, "capacity": 0}, tok=ATOK).get("code") == 0)
+            "end_time": "2020-01-01 12:00", "hours": 2, "capacity": 0}, tok=CTOK).get("code") == 0)
 bad = call("POST", "/api/activity/update",
            {"activity_id": NEW_ID, "title": "结束早于开始", "start_time": "2099-01-02 10:00",
-            "end_time": "2099-01-02 09:00", "hours": 2, "capacity": 0}, tok=ATOK)
+            "end_time": "2099-01-02 09:00", "hours": 2, "capacity": 0}, tok=CTOK)
 check("结束早于开始被拒绝", bad.get("code") == 400, bad)
 check("普通成员不能编辑活动(403)",
       call("POST", "/api/activity/update", {"activity_id": NEW_ID, "title": "x"}, tok=STOK).get("code") == 403)
 check("不存在的活动返回 404",
       call("POST", "/api/activity/update", {"activity_id": 999999, "title": "x",
                                             "start_time": "2099-01-02 10:00",
-                                            "end_time": "2099-01-02 11:00"}, tok=ATOK).get("code") == 404)
+                                            "end_time": "2099-01-02 11:00"}, tok=CTOK).get("code") == 404)
 
 # ---------- 4. 报名列表筛选 + 分页 ----------
 print("\n[4] 报名列表筛选与分页")
