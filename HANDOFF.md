@@ -1459,7 +1459,7 @@ CodeBuddy 完成 §34-43 后工作区有 25 个文件未提交。逐项复核：
 现象：verify_v4 出现"驳回记录保留原因"1 项 FAIL，服务端落库代码（UPDATE appeal SET reply=...）核对无误。
 根因：脚本用 mysql CLI 取 SQL 结果做中文断言（IndexOf('上限')），但 PowerShell 按 [Console]::OutputEncoding 解码子进程输出——控制台代码页 936(GBK) 下 utf8mb4 字节被读成乱码。同一脚本在 UTF-8 控制台跑是绿的，属**环境相关偶发**。
 修复：6 个 ps1 头部统一加 `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8`。复跑 verify_v4 45/45。
-教训（写入 CODEBUDDY.md 同款坑）：凡是"读 DB 中文做断言"的脚本必须显式设解码，别依赖控制台代码页。
+教训：凡是"读 DB 中文做断言"的脚本必须显式设解码，别依赖控制台代码页。
 
 ### 44.3 修复二：ClubSquarePage 搜索框 emoji 清理
 全 App emoji 复查发现 1 处真违规：ClubSquarePage.ets:211 `Text('🔍')`。已改为 `Text('搜')` + Theme 令牌配色。RegisterPage 的 ✓(U+2713) 与 MainPage 注释中的字符码为历史约定，保留。
