@@ -127,7 +127,8 @@ function StageSeed {
 function StageApi {
   Write-Host '---- 3. 重启后对账 + 接口业务核验 ----'
   $h = Api 'GET' '/api/health'
-  Check '服务在线且 version=3.2' ([int]$h.code -eq 0 -and [string]$h.data.version -eq '3.2') ("ver=" + $h.data.version)
+  # v4/v5 起版本号持续前移; 本脚本核验 v3.2 引入的数据一致性能力, 只要求版本 >= 3.2
+  Check '服务在线且 version>=3.2' ([int]$h.code -eq 0 -and [double]([string]$h.data.version) -ge 3.2) ("ver=" + $h.data.version)
 
   $drift = Num "SELECT COUNT(*) FROM activity a WHERE a.taken<>(SELECT COUNT(*) FROM signup s WHERE s.activity_id=a.id AND s.status<>2)"
   Check '启动对账后全库 taken 与真实报名数一致' ($drift -eq 0) ("drift=" + $drift)

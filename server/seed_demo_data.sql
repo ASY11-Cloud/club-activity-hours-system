@@ -70,3 +70,10 @@ WHERE s.category = '';
 -- 与 server 启动时的对账口径相同, 重复执行也安全。
 UPDATE activity a
 SET a.taken = (SELECT COUNT(*) FROM signup s WHERE s.activity_id = a.id AND s.status <> 2);
+
+-- ---------- 5. v5.0 社团成员归属 ----------
+-- 已通过注册的学生全部挂到默认社团 1(演示需要: 内部活动对他们可见)。
+-- 服务端只在 club_member 为空时自动回填一次, 这里保证"纯 SQL 初始化"同样自洽。
+INSERT IGNORE INTO club_member (club_id, stu_no, role, status)
+SELECT 1, s.stu_no, IF(s.stu_no = '2023001', 'leader', 'member'), 1
+FROM student s WHERE s.status = 1;

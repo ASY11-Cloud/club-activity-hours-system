@@ -1123,3 +1123,71 @@ powershell -ExecutionPolicy Bypass -File tools\md2docx.ps1 -Md docs\使用说明
 - MySQL 8.0.46、`ONLY_FULL_GROUP_BY + STRICT_TRANS_TABLES` 下全部 SQL 可执行；
 - 小数据量 p95 13~18ms，100 并发 60ms 全成功，内存无持续增长；
 - 未覆盖：真机/模拟器 UI 交互、长时间浸泡（soak）、TLS 抓包、多机部署。已写入报告的"未覆盖/限制"。
+
+## 32. v5.0：认证主体上移为社团 + 活动参与范围（2026-11-09）
+
+本轮把账号归属从「个人」改为「社团」，并让活动支持「仅本社团 / 全校开放」。验收脚本 `server/verify_club.ps1`（60 项）与 `server/verify_scope.ps1`（17 项）。
+
+### 32.1 数据与账号归属（P0）
+
+- 新表：`club`（账号/口令/名称/简介/挂靠单位/现任社长三元组）、`club_member`（`club_id + stu_no` 主键，岗位 `leader|minister|member`，`status` + `quit_at`）、`club_leader_history`（任期 `start_at/end_at`、`change_type`、`operator`、`reason`）；
+- 已有表加列：`activity.club_id`、`activity.join_scope`（`'club'`/`'all'`）+ `idx_scope (club_id, join_scope, status)`；`signup.club_id`（报名时快照）；
+- `dbEnsureSchema()` 幂等迁移：所有 DDL 先经 `hasColOf()` / `information_schema` 判定，已存在则跳过；失败向 `stderr` 打印带业务后果的告警（不静默）；
+- `TokenInfo` 增 `club_id`；`/api/login` 支持 `type=club`，对外 `role` 仍为 `admin`，另下发 `club_id` / `club_name` / `account_type`；
+- 演示数据：默认社团 `id=1`（账号 `club` / `club123`），已通过注册的学生全部回填到社团 1，`2023001` 为 `leader`；历史活动 `join_scope` 保持 `'all'`（守住基线）。### 32.2 社长换届闭环（P1）
+
+- `POST /api/club/leader {new_name,new_stu_no,confirm_pwd,reason,expect_leader}`：事务内 `SELECT ... FOR UPDATE` 锁社团行 → 校验口令 → 比对 `expect_leader` → 结束上一条 `end_at IS NULL` → 追加新记录 → 更新 `club.leader_*` → 岗位迁移（旧社长降 `member`，新社长 `ON DUPLICATE KEY UPDATE` 自动纳入）；
+- 失败口径：未填姓名 400 / 口令错误 403（计节流）/ 期望值不符 409 / 连续失败 429 / 仅社团账号可用（`club_id=0` 返回 403）；
+- 学号留空 = 沿用上一任学号（只改姓名时不清空追溯信息）；姓名与学号都未变时返回「社长未变更, 未产生新记录」且不写历史；
+- 留痕：`withAudit()` 写响应头 `X-Audit-Note` + 请求日志；历史行记录 `operator`（社团账号）、`reason`、`change_type`；
+- App：`ClubProfilePage` 四区块（信息卡 / 内联换届表单：密码确认 + `AlertDialog` 二次确认 + 403/409/429 分支文案 / 历任社长时间轴含「在任」标记 / 权限继承说明卡）；管理面板与「我的」页均有入口，平台管理员进入显示提示而非空页面。### 32.3 活动参与范围与越权堵漏（P2，核心）
+
+背景：`/api/signin` 与 `/api/signin/code` 原逻辑是「无报名则直接建记录 → 通过 → 累加学时」。若只做列表过滤，外社团学生拿到转发来的签到码即可直接刷学时。
+
+- 写入口同批拦截（顺序：先判范围，再建记录）：
+  - `POST /api/signup/add`：`join_scope='club'` 且报名人不在 `club_member(club_id, stu_no, status=1)` → 403；
+  - `POST /api/signin/code`、`POST /api/signin`：同上，且**在插入 signup 之前**返回；
+- 读入口过滤：`/api/activity/list` 生成一份 `WHERE` 字符串供 `total` 与数据行复用；学生 = `join_scope='all' OR club_id IN (本人社团)`，社团管理员 = `club_id = Token.club_id`，平台管理员 = 全部；
+- 编辑语义：`/api/activity/update` 的 `join_scope` 未显式传递时保留原值（照抄 `category` 的 `hasCategory` 写法），避免旧客户端把公开活动刷成默认；返回 `outsider_count` 供 UI 提示；
+- 时间冲突校验**不加** `club_id`：跨社团同时间段仍 409，否则学生可同报 A 社团内部活动与 B 社团公开活动，两边通过即双算学时（已修 bug 的变体）；
+- `signup.club_id` 在建记录时快照活动所属社团，后续活动迁移/改范围都不影响历史归集。
+
+### 32.4 成员 / 公告 / 统计（P3/P4/P5）
+
+- 成员：`GET /api/club/members`（`role`/`status`/`kw` 筛选 + 岗位计数一次聚合）；`POST /api/club/member/remove` 只置 `status=0` 并写 `quit_at`，保留学生账号与历史学时；现任社长 400；重复移除返回「已不在册」；
+- 公告：`announcement` + `announcement_read`（`(ann_id,stu_no)` 唯一，`INSERT IGNORE` 幂等）；学生只看本人所属社团已发布公告；未读数按登录人计算；撤回后成员不可见、社团管理员仍可见（`status=0`）；
+- 统计：`GET /api/stats/club` 单条聚合 SQL（成员/活动/内部/公开/报名/通过/学时/通过率/外社团人数与人次 + 学时分布 + 热门活动），`club_id` 只从 Token 取；App 报表页新增「社团维度统计」卡（仅社团账号）。
+
+### 32.5 验收与回归（2026-11-09）
+
+| 脚本 | 项数 | 结果 | 说明 |
+|---|---:|---|---|
+| `verify_club.ps1` | 60 | 全绿 | 登录/信息/换届成功/密码错 403/期望值 409/**并发恰一次**/在任唯一/成员/公告/统计/审计 |
+| `verify_scope.ps1` | 17 | 全绿 | 不可见/报名 403/输码 403 且无报名无学时/刷卡 403/公开活动可报/满员 403/冲突 409/存量保留 |
+| `verify_v4.ps1` | 45 | 全绿 | v4 能力回归 + 基线 8/19/20.5 |
+| `audit_v4.ps1` | 103 | 全绿 | 六维审计（p95 13~18ms 不变） |
+| `verify_test_data.ps1` | 11+10+48+14 | 全绿 | 四阶段：结构/落库/重启对账+接口/基线 |
+
+- 服务端 `-O2 -Wall` 零警告（`build.log` 为空），`health.version=5.0`，常驻 8000；
+- 并发换届实测：两请求同 `expect_leader` 同时提交 → `code=0 name=并发甲` 与 `code=409`，`is_current=true` 仍仅 1 条；
+- 基线零漂移：8 活动 / 19 报名 / 5 人 / 20.5 学时 / 榜首李铭 5.5 / 待审注册 3。### 32.6 六条硬约束（改动前请先读）
+
+1. **禁止 `thread_local` 传请求级状态**：MinGW emutls 析构会崩；换届审计沿用 `withAudit()` + `X-Audit-Note` + `takeAudit()`；
+2. **DB 默认与 UI 默认刻意不同向**：`activity.join_scope` 默认 `'all'`（历史数据语义不变），发布页默认「仅本社团」（新建默认收紧）。两处都写了注释，别"顺手统一"；
+3. **编辑接口缺省保留**：`join_scope` 未传递时保留原值，否则旧客户端会把公开活动刷回默认；
+4. **时间冲突校验不加 `club_id`**：加了就能跨社团各报一个、两边通过双算学时；
+5. **写接口的 `club_id` 只取 Token**，请求体里的 `club_id` 只在平台管理员分支被接受；
+6. **`.bat` 保持 GBK+CRLF、`.ps1` 保持 UTF-8 带 BOM**（本轮新增两个脚本已按此写），服务端重编固定 `stop → build → start`。
+
+### 32.7 本轮顺手修的两处"测试脚本自身缺陷"
+
+- `verify_v4.ps1` 批量签到用例把 5 条 `checked_at` 写成 `NOW()-INTERVAL 1..5 MINUTE`，当运行时刻靠近 10 分钟分桶边界时会被切成两桶只剩 4 条，用例随机失败。改为"对齐当前窗口起点 +1..+5 分钟"，保证同桶；
+- `verify_v4.ps1` / `audit_v4.ps1` / `verify_test_data.ps1` 里的 `version=4.0` / `version=3.2` 硬编码改为 `>=`，避免版本号前移后把能力回归误判为失败。
+
+### 32.8 已知取舍（v5.0 不做）
+
+- 换届是"持社团账号口令 + 二次确认"，没有双人审批流；口令即权限，所以换届接口单独做了**同 IP+社团 60 秒节流**；
+- 学时仍按全局 `hours_total(stu_no)` 累计，社团维度只是聚合视角（`signup.club_id`）；不做"每社团独立学时账本"；
+- 学生可属于多个社团（`club_member` 允许），但 App 不提供加入/退出入口，目前由管理页维护；
+- 注册流程不强制加入社团（强制会让既有注册脚本与演示流程全废）；
+- 没有单活动查询接口：详情页仍依赖列表数据，鉴权靠"列表过滤 + 写接口校验"双保险，不依赖 UI 隐藏。

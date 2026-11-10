@@ -445,7 +445,15 @@ struct AuditPage {
     Column() {
       Row() {
         Column({ space: 2 }) {
-          Text(s.name).fontSize(15).fontWeight(FontWeight.Medium)
+          Row({ space: 6 }) {
+            Text(s.name).fontSize(15).fontWeight(FontWeight.Medium)
+            // 公开活动引来的外社团报名: 让管理员一眼看出"这不是自己社团的人"
+            if (s.is_outsider) {
+              Text('外社团').fontSize(10).fontColor(Theme.report)
+                .padding({ left: 5, right: 5, top: 1, bottom: 1 })
+                .backgroundColor(Theme.reportBg).borderRadius(4)
+            }
+          }
           Text(s.stu_no).fontSize(12).fontColor(Theme.textTertiary)
         }.alignItems(HorizontalAlign.Start).layoutWeight(1)
         Text(statusText(s.status))

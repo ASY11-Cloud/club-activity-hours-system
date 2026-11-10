@@ -24,6 +24,7 @@ struct ActivityEditPage {
   @State capacity: string = '0';
   @State publisher: string = '';
   @State category: string = 'sports';
+  @State joinScope: string = 'all';  // 回填后覆盖; 提交时显式带上, 避免服务端缺省保留旧值
   @State validCount: number = 0;     // 当前有效报名数(提示人数上限下限)
   @State status: number = 1;
   @State msg: string = '';
@@ -87,6 +88,7 @@ struct ActivityEditPage {
     this.capacity = found.capacity.toString();
     this.publisher = found.publisher;
     this.category = found.category === '' ? 'sports' : found.category;
+    this.joinScope = found.join_scope === 'club' ? 'club' : 'all';
     this.validCount = found.valid_count;
     this.status = found.status;
     const s = this.parseTime(found.start_time);
@@ -204,11 +206,19 @@ struct ActivityEditPage {
         'hours': Number(this.hours),
         'capacity': Number(this.capacity),
         'publisher': this.publisher.trim(),
-        'category': this.category
+        'category': this.category,
+        'join_scope': this.joinScope
       };
       const resp = await ApiClient.post('/api/activity/update', body);
       if (resp['code'] === 0) {
+        // 改为"仅本社团"时, 已有外社团报名保留(学时已认定), 这里提示清楚避免误以为丢失
+        const data = resp['data'] as Record<string, Object>;
+        const outsiders = data['outsider_count'] !== undefined ? Number(data['outsider_count']) : 0;
         this.msg = '保存成功, 活动#' + this.activityId + ' 已更新';
+        if (this.joinScope === 'club' && outsiders > 0) {
+          this.msg = this.msg + '; 已有 ' + outsiders.toString() +
+            ' 名外社团成员报名, 其记录与已认定学时保留, 仅影响后续新报名';
+        }
       } else {
         this.msg = '保存失败: ' + (resp['msg'] as string);
       }
@@ -241,6 +251,29 @@ struct ActivityEditPage {
         }, (k: string) => k)
       }.width('100%')
     }.width('100%').alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  scopePicker() {
+    Column({ space: 6 }) {
+      Text('参与范围(改动只影响后续新报名, 已认定记录保留)')
+        .fontSize(11).fontColor(Theme.textTertiary).width('100%')
+      Row({ space: 8 }) {
+        this.scopeOption('club', '仅本社团成员')
+        this.scopeOption('all', '全校开放')
+      }.width('100%')
+    }.width('100%').alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  scopeOption(key: string, title: string) {
+    Text(title).fontSize(12).fontWeight(FontWeight.Medium)
+      .fontColor(this.joinScope === key ? Theme.textOnPrimary : Theme.textBody)
+      .textAlign(TextAlign.Center)
+      .layoutWeight(1).padding({ top: 7, bottom: 7 })
+      .backgroundColor(this.joinScope === key ? Theme.primary : Theme.bgSubtle)
+      .borderRadius(8)
+      .onClick(() => this.joinScope = key)
   }
 
   @Builder
@@ -292,6 +325,8 @@ struct ActivityEditPage {
                 .onChange((v: string) => this.location = v)
 
               this.categoryPicker()
+
+              this.scopePicker()
 
               this.timeCell('开始时间', true)
               this.timeCell('结束时间', false)

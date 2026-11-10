@@ -24,6 +24,64 @@ CREATE TABLE admin_user (
 ) ENGINE=InnoDB COMMENT='管理员账号表(口令不存明文)';
 
 -- ---------------------------------------------------------------------
+-- 0.5 社团账号表 (v5.0: 认证主体是社团, 不是个人)
+--     account/pwd_hash 属于社团长期持有; 社长只是 leader_* 三个可变字段。
+--     换届 = 改字段 + 追加历任记录, 不换账号、不重新注册, 因此没有"权限交接"动作。
+-- ---------------------------------------------------------------------
+-- ---------------------------------------------------------------------
+-- 公告表引用 club(id), 重建社团表前先卸掉 —— 保证本脚本可重复执行。
+-- ---------------------------------------------------------------------
+DROP TABLE IF EXISTS announcement_read;
+DROP TABLE IF EXISTS announcement;
+DROP TABLE IF EXISTS club_leader_history;
+DROP TABLE IF EXISTS club_member;
+DROP TABLE IF EXISTS club;
+
+CREATE TABLE club (
+  id            INT AUTO_INCREMENT PRIMARY KEY,
+  account       VARCHAR(50)  NOT NULL UNIQUE COMMENT '社团登录账号(长期不变)',
+  pwd_hash      VARCHAR(100) NOT NULL DEFAULT '' COMMENT '口令: sha256i:<hex>; 空值由服务启动时初始化为默认口令',
+  club_name     VARCHAR(100) NOT NULL DEFAULT '' COMMENT '社团名称',
+  intro         VARCHAR(500) NOT NULL DEFAULT '' COMMENT '社团简介',
+  dept          VARCHAR(100) NOT NULL DEFAULT '' COMMENT '挂靠单位/院系',
+  leader_name   VARCHAR(50)  NOT NULL DEFAULT '' COMMENT '现任社长姓名(换届只改这里)',
+  leader_stu_no VARCHAR(20)  NOT NULL DEFAULT '' COMMENT '现任社长学号(追溯与提醒用)',
+  leader_since  DATETIME     NULL COMMENT '本任开始时间',
+  status        TINYINT      NOT NULL DEFAULT 1 COMMENT '1=正常 0=停用',
+  created_at    DATETIME     DEFAULT CURRENT_TIMESTAMP,
+  updated_at    DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='社团账号(认证主体)';
+
+-- 成员归属: 刻意不对 student 建外键 —— 学生注销是物理删除 student 行,
+-- 有外键会让注销报 1451; 注销流程里显式清理本表。
+CREATE TABLE club_member (
+  club_id   INT          NOT NULL,
+  stu_no    VARCHAR(20)  NOT NULL,
+  role      VARCHAR(20)  NOT NULL DEFAULT 'member' COMMENT 'leader|minister|member',
+  status    TINYINT      NOT NULL DEFAULT 1 COMMENT '1=在册 0=已退出',
+  joined_at DATETIME     DEFAULT CURRENT_TIMESTAMP,
+  quit_at   DATETIME     NULL,
+  PRIMARY KEY (club_id, stu_no),
+  KEY idx_cm_stu (stu_no),
+  CONSTRAINT fk_cm_club FOREIGN KEY (club_id) REFERENCES club(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='社团成员与社团内岗位';
+
+CREATE TABLE club_leader_history (
+  id            INT AUTO_INCREMENT PRIMARY KEY,
+  club_id       INT          NOT NULL,
+  leader_name   VARCHAR(50)  NOT NULL DEFAULT '',
+  leader_stu_no VARCHAR(20)  NOT NULL DEFAULT '',
+  start_at      DATETIME     NOT NULL,
+  end_at        DATETIME     NULL COMMENT 'NULL=在任',
+  change_type   TINYINT      NOT NULL DEFAULT 1 COMMENT '1=换届 2=更正 3=初始化',
+  operator      VARCHAR(50)  NOT NULL DEFAULT '',
+  reason        VARCHAR(200) NOT NULL DEFAULT '',
+  created_at    DATETIME     DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_lh_club (club_id, start_at),
+  CONSTRAINT fk_lh_club FOREIGN KEY (club_id) REFERENCES club(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='历任社长记录';
+
+-- ---------------------------------------------------------------------
 -- 1. 学生表
 -- ---------------------------------------------------------------------
 DROP TABLE IF EXISTS appeal;
@@ -32,6 +90,34 @@ DROP TABLE IF EXISTS hours_total;
 DROP TABLE IF EXISTS signup;
 DROP TABLE IF EXISTS activity;
 DROP TABLE IF EXISTS student;
+
+-- ---------------------------------------------------------------------
+-- 0.6 通知公告表 (v5.0)
+--     放在社团表之后: 公告外键指向 club(id)。
+--     撤回用 status=0 软删除, 已读用独立表(不改公告行)。
+-- ---------------------------------------------------------------------
+DROP TABLE IF EXISTS announcement_read;
+DROP TABLE IF EXISTS announcement;
+
+CREATE TABLE announcement (
+  id         INT AUTO_INCREMENT PRIMARY KEY,
+  club_id    INT          NOT NULL,
+  title      VARCHAR(100) NOT NULL DEFAULT '',
+  content    TEXT,
+  publisher  VARCHAR(50)  NOT NULL DEFAULT '',
+  top_flag   TINYINT      NOT NULL DEFAULT 0 COMMENT '1=置顶',
+  status     TINYINT      NOT NULL DEFAULT 1 COMMENT '1=已发布 0=已撤回',
+  created_at DATETIME     DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_ann_club (club_id, created_at),
+  CONSTRAINT fk_ann_club FOREIGN KEY (club_id) REFERENCES club(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='社团公告';
+
+CREATE TABLE announcement_read (
+  ann_id  INT         NOT NULL,
+  stu_no  VARCHAR(20) NOT NULL,
+  read_at DATETIME    DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (ann_id, stu_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='公告已读';
 
 CREATE TABLE student (
   id         INT AUTO_INCREMENT PRIMARY KEY,
@@ -63,9 +149,15 @@ CREATE TABLE activity (
   category   VARCHAR(20)   NOT NULL DEFAULT 'sports' COMMENT '活动类别(七大类之一)',
   -- 有效报名数缓存(status<>2): 报名用条件 UPDATE 原子扣减, 启动时按真实行数对账
   taken      INT           NOT NULL DEFAULT 0 COMMENT '有效报名数缓存',
+  -- v5.0 社团归属与参与范围。join_scope 的 DB 默认刻意是 'all'(历史活动语义不变),
+  -- 而 App 发布页默认选中"仅本社团成员"(新建活动默认收紧), 两者不同向是有意为之。
+  club_id    INT           NOT NULL DEFAULT 1 COMMENT '所属社团',
+  join_scope VARCHAR(10)   NOT NULL DEFAULT 'all' COMMENT '参与范围: club=仅本社团成员 all=全校开放',
   publisher  VARCHAR(50)   DEFAULT '' COMMENT '发布人姓名',
   status     TINYINT       NOT NULL DEFAULT 1 COMMENT '1=已发布 0=下线',
-  created_at DATETIME      DEFAULT CURRENT_TIMESTAMP
+  created_at DATETIME      DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_activity_club (club_id, status),
+  KEY idx_scope (club_id, join_scope, status)
 ) ENGINE=InnoDB COMMENT='活动表';
 
 -- ---------------------------------------------------------------------
@@ -80,6 +172,8 @@ CREATE TABLE signup (
   status      TINYINT      NOT NULL DEFAULT 0 COMMENT '0=待审核 1=已通过 2=已驳回',
   -- 报名时的活动类别快照: 报表按类别汇总不再依赖 JOIN, 活动改类别也不影响历史认定
   category    VARCHAR(20)  NOT NULL DEFAULT '' COMMENT '活动类别快照',
+  -- 报名时的社团快照: 学时归属与社团统计一律以它为准(活动所属社团), 不跟随学生所属社团
+  club_id     INT          NOT NULL DEFAULT 1 COMMENT '所属社团(报名时快照)',
   checkin     TINYINT      NOT NULL DEFAULT 0 COMMENT '0=未签到 1=已刷卡/输码签到',
   checked_at  DATETIME     NULL COMMENT '签到时间(刷卡或签到码)',
   signout_at  DATETIME     NULL COMMENT '签退时间(动态签到码签到后可用, 用于按在场时长折算)',
@@ -92,6 +186,7 @@ CREATE TABLE signup (
   UNIQUE KEY uk_act_stu (activity_id, stu_no),
   KEY idx_status (status),
   KEY idx_stu (stu_no),
+  KEY idx_signup_club (club_id, status),
   CONSTRAINT fk_signup_activity FOREIGN KEY (activity_id) REFERENCES activity(id),
   CONSTRAINT fk_signup_student  FOREIGN KEY (stu_no)     REFERENCES student(stu_no)
 ) ENGINE=InnoDB COMMENT='报名表';
@@ -201,3 +296,22 @@ INSERT INTO signup (client_id, activity_id, stu_no, name, status, category) VALU
 -- 服务端每次启动也会做同样的一次对账(dbEnsureSchema), 这里保证纯 SQL 初始化也自洽。
 UPDATE activity a
 SET a.taken = (SELECT COUNT(*) FROM signup s WHERE s.activity_id = a.id AND s.status <> 2);
+
+-- ---------------------------------------------------------------------
+-- v5.0 社团账号演示数据
+--   社团登录: club / club123  (pwd_hash 留空, 服务端首次启动初始化为 club123 的强哈希)
+--   社长: 张三(2023001); 历任记录从社团创建日开始, 页面第一天就有可追溯起点
+-- ---------------------------------------------------------------------
+INSERT INTO club (id, account, pwd_hash, club_name, intro, dept,
+                  leader_name, leader_stu_no, leader_since, status) VALUES
+(1, 'club', '', '计算机协会',
+ '面向全校的计算机技术社团, 组织算法训练、开发实训与技术分享。',
+ '计算机学院', '张三', '2023001', '2026-09-01 00:00:00', 1);
+
+INSERT INTO club_member (club_id, stu_no, role, status) VALUES
+(1, '2023001', 'leader', 1),
+(1, '2023002', 'member', 1);
+
+INSERT INTO club_leader_history (club_id, leader_name, leader_stu_no, start_at, end_at,
+                                 change_type, operator, reason) VALUES
+(1, '张三', '2023001', '2026-09-01 00:00:00', NULL, 3, '系统', '社团创建时初始化');

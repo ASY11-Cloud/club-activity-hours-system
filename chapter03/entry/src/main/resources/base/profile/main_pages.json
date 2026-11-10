@@ -11,6 +11,8 @@
     "pages/AuditPage",
     "pages/HoursReportPage",
     "pages/UserManagePage",
+    "pages/ClubProfilePage",
+    "pages/AnnouncementPage",
     "pages/ServerLogPage",
     "pages/SettingsPage"
   ]

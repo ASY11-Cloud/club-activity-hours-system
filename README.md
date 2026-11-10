@@ -6,9 +6,11 @@
 
 > 版本演进与 v2.0 相对 v1.0 的升级说明见 [`VERSION.md`](VERSION.md)；归档分支：`v1.0`（第一版）、`v2.0`（第二版最终版，同 main）。
 > 本轮改动明细、为什么改、验证方式与环境坑，见 [`HANDOFF.md`](HANDOFF.md)。
-> 操作步骤与验收演示见 [`docs/使用说明.md`](docs/使用说明.md)（Word 版 `使用说明文档.docx`，与 md 同源，均对应 v4.0）。
+> 操作步骤与验收演示见 [`docs/使用说明.md`](docs/使用说明.md)（Word 版 `使用说明文档.docx`，与 md 同源，均对应 v5.0）。
 >
-> **版本归档**：第三版最终版（v3.0）已单独归档为分支 `v3.0` 与标签 `v3.0`（commit `5bcf487`；开发期曾用 v3.2，归档名统一为 v3.0），v4.0 在 `main` 继续演进，**不会覆盖**该快照。`git checkout v3.0` 即可取第三版终稿。
+> **版本归档**：第三版最终版（v3.0）已单独归档为分支 `v3.0` 与标签 `v3.0`（commit `5bcf487`；开发期曾用 v3.2，归档名统一为 v3.0），v4.0/v5.0 在 `main` 继续演进，**不会覆盖**该快照。`git checkout v3.0` 即可取第三版终稿。
+>
+> **v5.0（当前）核心变更**：认证主体从「个人」上移为「社团」——社团账号长期存在，社长换届只改"现任社长"信息（账号/密码/Token 均不变）+ 追加一条历任记录；活动新增参与范围（仅本社团 / 全校开放），范围校验前置到报名与签到建记录之前；新增社团主页、成员管理、通知公告、社团维度统计。
 
 ## 功能总览
 
@@ -31,6 +33,9 @@
 - 学时申诉（v4.0）：成员对已通过记录发起申诉；管理员在审核中心"学时申诉"页签通过（可调整 0~活动学时）或驳回；通过后在事务内按明细重算 `hours_total`，全程留痕
 - 规则可视化（v4.0）：`GET /api/config/get` 下发七大类 `rules`，`POST /api/config/set` 接受 `rules` 白名单；App 设置页可视化编辑，保存后下一次审核立即生效
 - 签到异常检测（v4.0）：`GET /api/report/anomaly` 输出批量签到（10 分钟 ≥5 人）、签到超 24h 未签退、认定学时大于活动学时三类风险，报表页"异常检测"页签展示并可导出
+- **社团账号与换届（v5.0）**：`club` 表承载社团账号与口令，`leader_name / leader_stu_no / leader_since` 为社团对象上的可变三元组；换届接口需输入当前账号密码 + `expect_leader` 乐观并发比对 + 行锁串行化，只追加一条历任记录（在任唯一），**不签发新账号、不重建 Token**，账号/密码/历史活动与学时全部保留
+- **活动参与范围（v5.0）**：发布/编辑可选「仅本社团成员」/「全校开放」；列表按可见性过滤、内部活动带专用标签；**范围校验前置到建记录之前**——外社团学生直接报名 403、用转发签到码签到 403 且不产生报名行与学时、刷卡 403；公开活动引来外社团报名时审核面板标记「外社团」，审核权归活动所属社团
+- **成员 / 公告 / 统计（v5.0）**：社团成员按岗位与状态筛选、移除保留学生账号与历史学时（现任社长不可直接移除）；公告支持发布/置顶/撤回与成员未读标记；`/api/stats/club` 单条聚合 SQL 输出社团维度统计，含公开活动带来的外社团参与人数与人次
 - 嵌入式扩展：ESP32 + MFRC522 读卡实机刷卡签到，到场即认定学时（已被管理员驳回的报名需先重新报名，刷卡不会绕过审核）；签到状态通过 `checkin` 同步回本地库，成员在「我的报名」与活动详情可直接看到「已刷卡签到」；固件带 WiFi 断线自动重连与同卡 5 秒冷却；可选 `X-Device-Key` 设备密钥，防止局域网内伪造刷卡
 
 ## 系统架构
@@ -42,10 +47,11 @@
 自主 C++ Web 服务器 (bind 0.0.0.0:8000, Token 鉴权, 连接池, keep-alive, 事务化报名/学时)
    │
    ▼
-MySQL 8.0 (club_system: admin_user / student / activity / signup / hours_total / request_log / sys_config)
+MySQL 8.0 (club_system: admin_user / club / club_member / club_leader_history / student / activity / signup / hours_total / announcement / announcement_read / request_log / sys_config)
 ```
 
-- 双角色权限：**管理员**（发布 / 审核报名与注册 / 用户管理 / 学时全量 / 服务器日志）与**普通成员**（报名 / 我的报名 / 本人学时 / 注销本人账号），服务端 Token 统一校验 + App 页面级守卫；登录支持**失败节流**（同账号 60 秒内失败 5 次临时拒绝，防口令暴力猜测），退出登录同时**注销服务端 Token**
+- 三类角色：**平台管理员**（跨社团：发布 / 审核报名与注册 / 用户管理 / 学时全量 / 服务器日志）、**社团管理员**（`club_id>0`，仅本社团：社团主页与换届 / 成员 / 本社团活动与审核 / 公告 / 报表）、**普通成员**（报名 / 我的报名 / 本人学时 / 注销本人账号）。服务端 Token（`role + club_id`）统一校验 + App 页面级守卫；对外 `role` 仍下发 `admin`（兼容旧脚本与 App 的 `isAdmin`），新语义走 `club_id` / `club_name` / `account_type`；登录支持**失败节流**（同账号 60 秒内失败 5 次临时拒绝，防口令暴力猜测），退出登录同时**注销服务端 Token**
+- 数据边界：`activity.club_id` 与 `signup.club_id`（报名时快照）决定归属；可见性、可报性、审核权、学时归属全部由服务端 SQL 判定，App 不做权限判定；写接口的 `club_id` 只取 Token，不接受请求体传入
 - 数据一致性三层保证：本地唯一 `client_id` 幂等 + 服务端唯一键（`uk_client`、`uk_act_stu`）去重 + 事务化容量 / 学时累计（审核、刷卡均为“锁行 + 条件更新 + 影响行数校验”）
 - 账号注销：学生自助（**必须输入本人登录密码**，学号是公开信息不能当凭据）/ 管理员代注销（学号二次确认防误触），事务级联删除报名 + 学时 + 账号，回收全部 Token，审计留痕，学号可复用；错密码连续 5 次触发 60 秒节流
 - 失败可解释：所有写操作失败均返回中文原因并弹 toast，登录失效自动清会话（详见 HANDOFF 第 19 节）
@@ -57,7 +63,8 @@ chapter03/
 ├── chapter03/                 # 鸿蒙工程（DevEco Studio 打开此目录）
 │   └── entry/src/main/ets/    # 页面与数据层源码
 │       ├── common/            # ApiClient / AppConfig / DbHelper / Models / GuardViews / Nav / Theme
-│       └── pages/             # 引导页、登录注册、主界面(活动/管理/我的 Tab)、详情、发布/编辑、审核(报名+注册)、用户管理、学时报表、日志、设置
+│       └── pages/             # 引导页、登录注册、主界面(活动/管理/我的 Tab)、详情、发布/编辑、审核(报名+注册)、用户管理、
+│                              # 学时报表、日志、设置、社团主页(ClubProfilePage)、通知公告(AnnouncementPage)
 ├── server/                    # 自主 C++ Web 服务器
 │   ├── server.cpp             # 全部服务端逻辑（含解析、校验、Token、事务、日志）
 │   ├── init_db.sql            # MySQL 建库建表 + 演示数据
@@ -75,6 +82,8 @@ chapter03/
 │   ├── verify_test_data.ps1   # 结构/落库/接口/基线 四阶段核验（83 项，无 Python 可用）
 │   ├── verify_v4.ps1          # v4.0 验收（45 项：申诉/规则/异常/权限/基线）
 │   ├── audit_v4.ps1           # 系统全面测试（103 项：功能/边界/安全/性能/一致性/兼容）
+│   ├── verify_club.ps1        # v5.0 社团账号与换届（60 项：含并发恰一次、成员、公告、统计）
+│   ├── verify_scope.ps1       # v5.0 活动参与范围（17 项：不可见/403/无学时/外社团报名/冲突）
 │   └── build.bat              # 编译脚本
 ├── esp32_rfid/rfid_esp32.ino  # ESP32 + MFRC522 刷卡签到固件
 ├── docs/使用说明.md            # 操作手册与验收流程（可读版，与 docx 同源）
@@ -83,8 +92,8 @@ chapter03/
 ├── docs/系统测试报告-v4.0.md   # 六维测试范围/验收标准、性能数据、缺陷分级与改进优先级
 ├── tools/md2docx.ps1          # Markdown → Word（纯 OOXML，不依赖 Word）
 ├── HANDOFF.md                 # 改动交接（改了什么 / 为什么 / 怎么验）
-├── VERSION.md                 # 版本演进（v1.0 → v2.0 → v3.0 → v3.1 → v3.2 → v4.0）
-└── 使用说明文档.docx           # 使用说明 Word 版（v4.0，含分类规则 / 签到码 / 预警 / 申诉 / 异常 / 深色章节 与验收 FAQ）
+├── VERSION.md                 # 版本演进（v1.0 → v2.0 → v3.0 → v3.1 → v3.2 → v4.0 → v5.0）
+└── 使用说明文档.docx           # 使用说明 Word 版（v5.0，含社团账号 / 换届 / 参与范围 / 成员 / 公告 / 统计章节 与验收 FAQ）
 ```
 
 ## 快速开始
@@ -104,13 +113,15 @@ chapter03/
    - **无 Python 时的数据核验**：依次执行 `testdata_seed.sql` → `verify_test_data.ps1 -Stage schema/seed` → 重启服务端 → `-Stage api` → `testdata_clean.sql` → `-Stage baseline`（83 项，见 `docs/数据一致性核验-v3.2.md`）
    - `powershell -ExecutionPolicy Bypass -File server\verify_v4.ps1` v4.0 验收（45 项：申诉闭环 / 规则读写 / 异常检测 / 越权 / 基线，自建自清理）
    - `powershell -ExecutionPolicy Bypass -File server\audit_v4.ps1` 系统全面测试（103 项：功能 / 边界 / 安全 / 性能 / 一致性 / 兼容，含 p95 与并发指标）
+   - `powershell -ExecutionPolicy Bypass -File server\verify_club.ps1` v5.0 社团账号与换届（60 项：含**并发换届恰一次成功**、成员口径、公告、统计；历任社长历史刻意保留）
+   - `powershell -ExecutionPolicy Bypass -File server\verify_scope.ps1` v5.0 活动参与范围（17 项：内部活动不可见 / 报名 403 / **输码签到 403 且无报名无学时** / 刷卡 403 / 公开活动外社团报名 / 满员 403 / 跨社团冲突 409）
 
 ## 接口一览（自主 C++ 服务器）
 
 | 方法 | 路径 | 权限 | 说明 |
 |---|---|---|---|
-| GET | `/api/health` | 公开 | 健康检查（`version` 当前 4.0、`db` 为 MySQL 连通性、`time` 为服务器时间） |
-| POST | `/api/login` | 公开 | 登录签发 Token（失败节流：60 秒内 5 次失败临时拒绝） |
+| GET | `/api/health` | 公开 | 健康检查（`version` 当前 5.0、`db` 为 MySQL 连通性、`time` 为服务器时间） |
+| POST | `/api/login` | 公开 | 登录签发 Token（`type=student\|admin\|club`；社团账号下发 `club_id` / `club_name` / `account_type`，对外 `role` 仍为 `admin`；失败节流：60 秒内 5 次失败临时拒绝） |
 | POST | `/api/register` | 公开 | 成员注册申请（待管理员审批；可选 `card_no`，卡号全局唯一、自动转大写） |
 | POST | `/api/signin` | 公开／设备密钥 | ESP32 刷卡签到（可选 `X-Device-Key`） |
 | POST | `/api/logout` | 登录 | 注销当前 Token |
@@ -122,9 +133,9 @@ chapter03/
 | POST | `/api/student/cancel` | 成员 | 学生自助注销（`confirm_pwd` 输本人登录密码；事务内校验，错 5 次节流 60 秒） |
 | POST | `/api/student/delete` | 管理员 | 管理员注销学生（`stu_no` + `confirm_stu_no` 一致才执行，防误触） |
 | POST | `/api/admin/password` | 管理员 | 修改管理员口令（校验原口令，存 `sha256i:` 迭代加盐哈希） |
-| GET | `/api/activity/list` | 登录 | 活动列表（含 `valid_count` / `remaining` / `expired` / `category` / `taken`；支持 `page`/`size` 分页，管理员 `all=1` 含已下线） |
-| POST | `/api/activity/add` | 管理员 | 发布活动（时间窗与数值校验；`category` 白名单，非法值回落 `sports`） |
-| POST | `/api/activity/update` | 管理员 | 编辑活动（允许历史开始时间；上限不得小于有效报名数） |
+| GET | `/api/activity/list` | 登录 | 活动列表（含 `valid_count` / `remaining` / `expired` / `category` / `taken` / **`join_scope`**；按可见性过滤：学生 = 全校开放 + 本人社团内部活动，社团管理员 = 本社团，平台管理员 = 全部；支持 `page`/`size` 分页，管理员 `all=1` 含已下线） |
+| POST | `/api/activity/add` | 管理员 | 发布活动（时间窗与数值校验；`category` 白名单，非法值回落 `sports`；**`join_scope` 白名单 `club`/`all`**） |
+| POST | `/api/activity/update` | 管理员 | 编辑活动（允许历史开始时间；上限不得小于有效报名数；`join_scope` 未传递时保留原值，返回 `outsider_count` 供提示） |
 | POST | `/api/activity/status` | 管理员 | 活动上线／下线（软删除） |
 | GET | `/api/activity/signin_code?activity_id=` | 管理员 | 当前 60 秒签到码（`code` / `expire_in` / `window`） |
 | POST | `/api/signin/code` | 成员 | `{activity_id, code}` 输码签到（宽限前后 60 秒；无报名自动建并通过） |
@@ -143,12 +154,24 @@ chapter03/
 | GET | `/api/config/get` | 登录 | 读取系统配置：`required_hours` + 七大类 `rules`（`max_activity` / `max_total`，0=不限） |
 | POST | `/api/config/set` | 管理员 | 设置 `required_hours` 与/或 `rules`（类别白名单、数值 0~999，非法项整体拒绝） |
 | GET | `/api/logs` | 管理员 | 实时请求日志（内存环形缓冲；`level=err\|slow`、`method`、`kw` 筛选） |
+| GET | `/api/club/info` | 社团账号 | 社团信息 + 现任社长与在任天数 + 成员/活动/报名/学时统计（`club_id` 只取 Token） |
+| POST | `/api/club/leader` | 社团账号 | 换届 `{new_name,new_stu_no,confirm_pwd,reason,expect_leader}`：行锁串行化 + 密码确认 + 乐观并发（冲突 409）+ 密码错误节流 429 |
+| GET | `/api/club/leaders` | 社团账号 | 历任社长（分页，`is_current` 标记在任；只追加不覆盖） |
+| POST | `/api/club/password` | 社团账号 | 修改社团账号口令（校验原口令） |
+| GET | `/api/club/members` | 社团账号 | 本社团成员（`role`/`status`/`kw` 筛选 + 岗位计数） |
+| POST | `/api/club/member/remove` | 社团账号 | 移除成员（置 `status=0`，保留学生账号与历史学时；现任社长返回 400） |
+| GET | `/api/announcement/list` | 登录 | 公告列表（学生=本人所属社团已发布；社团管理员=本社团全部；含 `unread_count` / `is_read`） |
+| POST | `/api/announcement/add` | 管理员 | 发布公告（`club_id` 取 Token，平台管理员可显式指定；支持 `top_flag` 置顶） |
+| POST | `/api/announcement/status` | 管理员 | 撤回/恢复公告（`ann_id` + `status`；跨社团 403） |
+| POST | `/api/announcement/read` | 成员 | 标记公告已读（幂等写入 `announcement_read`） |
+| GET | `/api/stats/club` | 管理员 | 社团维度统计：成员/活动（内部·公开）/报名/通过率/学时/学时分布/热门活动/**外社团参与人数与人次** |
 
 ## 演示账号
 
 | 身份 | 账号 | 口令 | 说明 |
 |---|---|---|---|
-| 管理员 | admin | admin123 | 账号 + 密码 |
+| 平台管理员 | admin | admin123 | 账号 + 密码（`club_id=0`，跨社团） |
+| 社团管理员 | club | club123 | v5.0：社团账号（计算机协会，`club_id=1`），登录页身份选"管理员" |
 | 普通成员 | 2023001 | 123456 | 学号 + 密码（张三，初始密码 123456） |
 | 普通成员 | 2023002 | 123456 | 学号 + 密码（李铭，初始密码 123456） |
 | RFID 卡 | A1B2C3D4 | — | 张三签到卡（扩展） |

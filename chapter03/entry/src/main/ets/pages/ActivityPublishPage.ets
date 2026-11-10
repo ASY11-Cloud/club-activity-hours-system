@@ -24,6 +24,9 @@ struct ActivityPublishPage {
   @State capacity: string = '0';
   @State publisher: string = '';
   @State category: string = 'sports';    // 七大类之一, 决定学时规则口径
+  // v5.0 参与范围: UI 默认"仅本社团"(新建活动默认收紧);
+  // DB 默认 'all' 只为兜住历史数据 —— 两处不同向是有意为之, 不要"顺手统一"。
+  @State joinScope: string = 'club';
   @State drafts: LocalDraft[] = [];
   @State allActs: ActivityInfo[] = [];   // 已发布活动(含已下线), 供上下线管理
   @State editingDraftId: number = 0;     // >0 表示当前表单正在编辑该草稿(保存为更新, 不新增)
@@ -196,12 +199,12 @@ struct ActivityPublishPage {
       if (this.editingDraftId > 0) {
         await DbHelper.updateDraft(this.editingDraftId, this.title.trim(), this.content.trim(),
           this.location.trim(), this.fmtDate(this.startDate), this.fmtDate(this.endDate),
-          Number(this.hours), Number(this.capacity), this.publisher.trim(), this.category);
+          Number(this.hours), Number(this.capacity), this.publisher.trim(), this.category, this.joinScope);
         this.msg = '草稿 #' + this.editingDraftId + ' 已更新';
       } else {
         const id = await DbHelper.addDraft(this.title.trim(), this.content.trim(), this.location.trim(),
           this.fmtDate(this.startDate), this.fmtDate(this.endDate),
-          Number(this.hours), Number(this.capacity), this.publisher.trim(), this.category);
+          Number(this.hours), Number(this.capacity), this.publisher.trim(), this.category, this.joinScope);
         this.msg = id > 0 ? '草稿已保存到本地 SQLite' : '草稿保存失败';
         if (id > 0) this.editingDraftId = id;
       }
@@ -221,18 +224,18 @@ struct ActivityPublishPage {
       if (id > 0) {
         await DbHelper.updateDraft(id, this.title.trim(), this.content.trim(), this.location.trim(),
           this.fmtDate(this.startDate), this.fmtDate(this.endDate),
-          Number(this.hours), Number(this.capacity), this.publisher.trim(), this.category);
+          Number(this.hours), Number(this.capacity), this.publisher.trim(), this.category, this.joinScope);
       } else {
         id = await DbHelper.addDraft(this.title.trim(), this.content.trim(), this.location.trim(),
           this.fmtDate(this.startDate), this.fmtDate(this.endDate),
-          Number(this.hours), Number(this.capacity), this.publisher.trim(), this.category);
+          Number(this.hours), Number(this.capacity), this.publisher.trim(), this.category, this.joinScope);
       }
       if (id > 0) {
         this.editingDraftId = id;
         await this.loadDrafts();
         await this.publish(id, this.title.trim(), this.content.trim(), this.location.trim(),
           this.fmtDate(this.startDate), this.fmtDate(this.endDate),
-          Number(this.hours), Number(this.capacity), this.publisher.trim(), this.category);
+          Number(this.hours), Number(this.capacity), this.publisher.trim(), this.category, this.joinScope);
       } else {
         this.msg = '草稿保存失败, 无法发布';
       }
@@ -254,6 +257,7 @@ struct ActivityPublishPage {
     this.capacity = d.capacity.toString();
     if (d.publisher !== '') this.publisher = d.publisher;
     this.category = d.category === '' ? 'sports' : d.category;
+    this.joinScope = d.join_scope === 'club' ? 'club' : 'all';
     const s = toDate(d.start_time);
     const e = toDate(d.end_time);
     if (s !== null) this.startDate = s;
@@ -271,6 +275,7 @@ struct ActivityPublishPage {
     this.hours = '1.0';
     this.capacity = '0';
     this.category = 'sports';
+    this.joinScope = 'club';   // 新建活动默认收紧为"仅本社团"
     this.msg = '';
     const base = new Date();
     base.setDate(base.getDate() + 1);
@@ -281,7 +286,7 @@ struct ActivityPublishPage {
   /** 发布草稿(以草稿自身字段为准) */
   async publish(draftId: number, draftTitle: string, draftContent: string, draftLocation: string,
     draftStart: string, draftEnd: string, draftHours: number, draftCapacity: number,
-    draftPublisher: string, draftCategory: string): Promise<void> {
+    draftPublisher: string, draftCategory: string, draftScope: string): Promise<void> {
     if (this.busy) return;
     this.busy = true;
     this.msg = '';
@@ -299,7 +304,8 @@ struct ActivityPublishPage {
         'hours': draftHours,
         'capacity': draftCapacity,
         'publisher': draftPublisher,
-        'category': draftCategory
+        'category': draftCategory,
+        'join_scope': draftScope
       };
       this.msg = '正在同步服务器(MySQL)...';
       const resp = await ApiClient.post('/api/activity/add', body);
@@ -359,7 +365,7 @@ struct ActivityPublishPage {
             .onClick(() => this.loadDraftToForm(d))
           Button('发布到服务器').fontSize(12).height(28).backgroundColor(Theme.primary)
             .onClick(() => this.publish(d.id, d.title, d.content, d.location, d.start_time,
-              d.end_time, d.hours, d.capacity, d.publisher, d.category))
+              d.end_time, d.hours, d.capacity, d.publisher, d.category, d.join_scope))
         }
         Button('删除').fontSize(12).height(28).backgroundColor(Theme.danger)
           .onClick(() => this.confirmDeleteDraft(d.id, d.title))
@@ -395,6 +401,33 @@ struct ActivityPublishPage {
       }.width('100%').margin({ top: 6 })
     }
     .width('100%').padding(10).backgroundColor(Theme.primaryBg).borderRadius(10).margin({ bottom: 8 })
+  }
+
+  /** 参与范围: 仅本社团成员 / 全校开放(分段按钮, 两选项一眼看清) */
+  @Builder
+  scopePicker() {
+    Column({ space: 6 }) {
+      Text('参与范围')
+        .fontSize(11).fontColor(Theme.textTertiary).width('100%')
+      Row({ space: 8 }) {
+        this.scopeOption('club', '仅本社团成员', '只有本社团成员可见、可报名')
+        this.scopeOption('all', '全校开放', '全部已通过审核的学生可见、可报名')
+      }.width('100%')
+    }.width('100%').alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  scopeOption(key: string, title: string, desc: string) {
+    Column({ space: 3 }) {
+      Text(title).fontSize(12).fontWeight(FontWeight.Medium)
+        .fontColor(this.joinScope === key ? Theme.textOnPrimary : Theme.textBody)
+      Text(desc).fontSize(10).maxLines(2)
+        .fontColor(this.joinScope === key ? Theme.textOnPrimary : Theme.textTertiary)
+    }
+    .layoutWeight(1).padding(8).alignItems(HorizontalAlign.Start)
+    .backgroundColor(this.joinScope === key ? Theme.primary : Theme.bgSubtle)
+    .borderRadius(8)
+    .onClick(() => this.joinScope = key)
   }
 
   /** 类别选择(七大类单选): 与服务端白名单同口径, 决定审核通过时的学时上限规则 */
@@ -465,6 +498,8 @@ struct ActivityPublishPage {
                 .onChange((v: string) => this.location = v)
 
               this.categoryPicker()
+
+              this.scopePicker()
 
               // 时间滚轮选择(点击弹出 DatePicker + TimePicker)
               this.timeCell('开始时间', 'start')

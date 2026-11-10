@@ -14,7 +14,7 @@ import { LoginGuardView } from '../common/GuardViews';
 import {
   HoursRow, HoursDetail, CategoryStat, WarningRow, parseHoursReport, parseHoursDetail,
   parseCategoryStats, parseWarningList, parseSignups, dataOf, numOf, csvCell, categoryText,
-  AnomalyBurst, AnomalyNotOut, AnomalyExceed,
+  AnomalyBurst, AnomalyNotOut, AnomalyExceed, ClubStats, parseClubStats,
   parseAnomalyBurst, parseAnomalyNotOut, parseAnomalyExceed
 } from '../common/Models';
 import { Theme } from '../common/Theme';
@@ -41,6 +41,13 @@ struct HoursReportPage {
   @State notLoggedIn: boolean = false;
   @State exporting: boolean = false;
   @State calibrating: boolean = false;
+  // v5.0 社团维度统计(仅社团账号): 内部/公开活动数 + 公开活动带来的外社团参与
+  @State csInternal: number = 0;
+  @State csPublic: number = 0;
+  @State csOutsider: number = 0;
+  @State csOutsiderJoin: number = 0;
+  @State csPassRate: number = 0;
+  @State csLoaded: boolean = false;
 
   aboutToAppear(): void {
     const ctx = getContext(this) as common.UIAbilityContext;
@@ -80,6 +87,23 @@ struct HoursReportPage {
     }
     // 学分预警名单(仅管理员): 未达标学生 + 缺口学时, 可直接导出
     if (AppConfig.isAdmin) {
+      // 社团账号额外拉一条社团维度统计(平台管理员没有"本社团", 不展示)
+      if (AppConfig.isClubAccount) {
+        const cs = await ApiClient.get('/api/stats/club');
+        const st: ClubStats | null = cs['code'] === 0 ? parseClubStats(cs) : null;
+        if (st !== null) {
+          this.csInternal = st.internal_count;
+          this.csPublic = st.public_count;
+          this.csOutsider = st.outsider_count;
+          this.csOutsiderJoin = st.outsider_join_count;
+          this.csPassRate = st.pass_rate;
+          this.csLoaded = true;
+        } else {
+          this.csLoaded = false;
+        }
+      } else {
+        this.csLoaded = false;
+      }
       const w = await ApiClient.get('/api/report/warning');
       this.warnList = w['code'] === 0 ? parseWarningList(w) : [];
       // 签到异常检测(v4.0): 批量签到 / 长期未签退 / 学时超限
@@ -336,7 +360,9 @@ struct HoursReportPage {
             .padding({ right: 10, top: 2, bottom: 2 })
             .onClick(() => router.back())
           Text('学时统计报表').fontSize(18).fontWeight(FontWeight.Bold).layoutWeight(1)
-          Text(AppConfig.isAdmin ? '管理员·全量' : '成员·本人明细')
+          // 社团账号看到的是"本社团活动产生的学时"(按 signup.club_id 口径), 不是平台全量
+          Text(AppConfig.isClubAccount ? '社团·本社团活动口径'
+            : (AppConfig.isAdmin ? '管理员·全量' : '成员·本人明细'))
             .fontSize(10).fontColor(Theme.textOnPrimary)
             .padding({ left: 7, right: 7, top: 2, bottom: 2 })
             .backgroundColor(AppConfig.isAdmin ? Theme.admin : Theme.success)
@@ -363,7 +389,9 @@ struct HoursReportPage {
             Row().width('100%').height(0.5).backgroundColor(Theme.divider)
 
             Row({ space: 6 }) {
-              Text('汇总由服务端审核事务自动累计, 可一键重算修复历史漂移')
+              Text(AppConfig.isClubAccount
+                ? '学时归属「活动所属社团」: 公开活动带来的外社团参与也计入本社团'
+                : '汇总由服务端审核事务自动累计, 可一键重算修复历史漂移')
                 .fontSize(10).fontColor(Theme.textTertiary).layoutWeight(1)
               Button('重算学时').fontSize(11).height(26).backgroundColor(Theme.admin)
                 .onClick(() => this.rebuild())
@@ -398,6 +426,47 @@ struct HoursReportPage {
             Text(this.serverSubText()).fontSize(11).fontColor(Theme.textTertiary)
           }.layoutWeight(1).padding(12).backgroundColor(Theme.successBg).borderRadius(12)
         }.width('100%').padding({ left: 14, right: 14, bottom: 8 })
+
+        // v5.0 社团维度统计卡(仅社团账号): 参与范围分布 + 公开活动的外部参与
+        if (this.csLoaded) {
+          Column({ space: 8 }) {
+            Row({ space: 6 }) {
+              Text('社团维度统计').fontSize(13).fontWeight(FontWeight.Medium).fontColor(Theme.textPrimary)
+                .layoutWeight(1)
+              Text('按活动所属社团归集').fontSize(10).fontColor(Theme.textTertiary)
+            }.width('100%')
+
+            Row({ space: 10 }) {
+              Column({ space: 3 }) {
+                Text('仅本社团活动').fontSize(11).fontColor(Theme.textTertiary)
+                Text(this.csInternal.toString()).fontSize(18).fontWeight(FontWeight.Bold)
+                  .fontColor(Theme.primary)
+              }.layoutWeight(1).padding(10).backgroundColor(Theme.primaryBg).borderRadius(Theme.radiusSm)
+
+              Column({ space: 3 }) {
+                Text('全校开放活动').fontSize(11).fontColor(Theme.textTertiary)
+                Text(this.csPublic.toString()).fontSize(18).fontWeight(FontWeight.Bold)
+                  .fontColor(Theme.success)
+              }.layoutWeight(1).padding(10).backgroundColor(Theme.successBg).borderRadius(Theme.radiusSm)
+
+              Column({ space: 3 }) {
+                Text('通过率').fontSize(11).fontColor(Theme.textTertiary)
+                Text((Math.round(this.csPassRate * 10) / 10).toString() + '%')
+                  .fontSize(18).fontWeight(FontWeight.Bold).fontColor(Theme.report)
+              }.layoutWeight(1).padding(10).backgroundColor(Theme.reportBg).borderRadius(Theme.radiusSm)
+            }.width('100%')
+
+            Row({ space: 6 }) {
+              Text('外社团参与').fontSize(11).fontColor(Theme.textSecondary)
+              Text(this.csOutsider.toString() + ' 人 / ' + this.csOutsiderJoin.toString() + ' 次')
+                .fontSize(12).fontWeight(FontWeight.Medium).fontColor(Theme.warning)
+              Text('（仅全校开放活动可产生）').fontSize(10)
+                .fontColor(Theme.textTertiary).layoutWeight(1)
+            }.width('100%')
+          }
+          .width('100%').padding(12).margin({ left: 14, right: 14, bottom: 8 })
+          .backgroundColor(Theme.bgCard).borderRadius(Theme.radiusMd).alignItems(HorizontalAlign.Start)
+        }
 
         // 双端一致判定: 本地缓存相对服务器可能滞后(审核结果在服务器), 一键校准后再比对
         Row({ space: 8 }) {

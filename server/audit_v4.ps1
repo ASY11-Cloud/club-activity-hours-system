@@ -173,7 +173,8 @@ try {
   # ============================================================
   Section 'A. 功能完整性（接口矩阵与契约）'
   $h = Api 'GET' '/api/health'
-  Check 'health 可用且 version=4.0' ([int]$h.code -eq 0 -and [string]$h.data.version -eq '4.0' -and [bool]$h.data.db)
+  # v5.0 起版本号前移到 5.0; 本脚本做 v4 及以后能力的审计, 只要求版本 >= 4.0
+  Check 'health 可用且 version>=4.0' ([int]$h.code -eq 0 -and [double]([string]$h.data.version) -ge 4.0 -and [bool]$h.data.db)
   Check '管理员/学生登录' ($admin -ne '' -and $t1 -ne '' -and $t2 -ne '')
 
   $a = Api 'GET' '/api/activity/list?page=1&size=2' $null $t1
@@ -458,7 +459,7 @@ finally {
   Check '基线报名仍为 19' ((Num "SELECT COUNT(*) FROM signup") -eq 19)
   Check '基线学时仍为 20.5' ([Math]::Abs((Num "SELECT SUM(total_hours) FROM hours_total") - 20.5) -lt 0.001)
   Check 'taken 仍自洽' ((Num "SELECT COUNT(*) FROM activity a WHERE a.taken<>(SELECT COUNT(*) FROM signup s WHERE s.activity_id=a.id AND s.status<>2)") -eq 0)
-  Check '服务仍健康(version=4.0)' ([string](Api 'GET' '/api/health').data.version -eq '4.0')
+  Check '服务仍健康(version>=4.0)' ([double]([string](Api 'GET' '/api/health').data.version) -ge 4.0)
 }
 
 Write-Host ''

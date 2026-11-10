@@ -567,6 +567,13 @@ struct MainPage {
           .fontSize(Theme.fsCaption).fontColor(Theme.report)
           .padding({ left: 6, right: 6, top: 1, bottom: 1 })
           .backgroundColor(Theme.reportBg).borderRadius(Theme.radiusSm)
+        // 只给内部活动打标: 公开活动不加标签, 避免满屏标签造成视觉噪音
+        if (a.join_scope === 'club') {
+          Text('仅本社团')
+            .fontSize(Theme.fsCaption).fontColor(Theme.textSecondary)
+            .padding({ left: 6, right: 6, top: 1, bottom: 1 })
+            .backgroundColor(Theme.bgSubtle).borderRadius(Theme.radiusSm)
+        }
       }.width('100%')
 
       Row({ space: 6 }) {
@@ -662,7 +669,7 @@ struct MainPage {
               }
             }, (a: ActivityInfo) => 'act' + a.id.toString() + '-' + a.valid_count.toString() +
               '-' + a.hours.toString() + '-' + a.status.toString() + '-' + (a.expired ? '1' : '0') +
-              '-' + (this.isMine(a) ? '1' : '0') + '-' + a.title)
+              '-' + (this.isMine(a) ? '1' : '0') + '-' + a.join_scope + '-' + a.title)
 
             ListItem() {
               Row() {
@@ -701,6 +708,13 @@ struct MainPage {
           Text('管理员专属').fontSize(Theme.fsCaption).fontColor(Theme.admin)
         }.width('100%').padding({ left: Theme.pagePadding, right: Theme.pagePadding, top: 14, bottom: 4 })
 
+        // 社团账号专属: 账号归属是社团, 换届在社团主页完成(不换账号、不重新注册)
+        if (AppConfig.isClubAccount) {
+          this.bigCard('社团主页', '社团信息 + 社长换届 + 历任社长 + 权限继承说明',
+            Theme.primary, 'pages/ClubProfilePage', '')
+        }
+        this.bigCard('通知公告', '发布/置顶/撤回公告, 成员端显示未读',
+          Theme.admin, 'pages/AnnouncementPage', '')
         this.bigCard('审核中心', '报名审核 + 注册审批, 通过自动累计学时',
           Theme.success, 'pages/AuditPage', 'audit')
         this.bigCard('用户管理', '全量学生信息 + 分组查找(注册状态/学时达标)',
@@ -789,6 +803,8 @@ struct MainPage {
             this.rowItem('我的报名', '本地记录 + 服务器状态同步', 'pages/MySignupPage')
           }
           this.rowItem('学时报表', '排行榜 + 个人明细', 'pages/HoursReportPage')
+          this.dividerLine()
+          this.rowItem('通知公告', '社团公告 + 未读标记', 'pages/AnnouncementPage')
           this.dividerLine()
           this.rowItem('设置', '服务器地址 / 登录会话 / 刷卡调试', 'pages/SettingsPage')
           this.dividerLine()

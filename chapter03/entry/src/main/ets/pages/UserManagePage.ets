@@ -11,7 +11,8 @@ import { DbHelper } from '../common/DbHelper';
 import { AdminGuardView } from '../common/GuardViews';
 import {
   StudentInfo, StudentGroupCounts, CancelImpact, parseStudentList, parseStudentGroupCounts,
-  parseCancelImpact, dataOf, numOf, studentStatusText
+  parseCancelImpact, dataOf, numOf, studentStatusText,
+  ClubMember, parseClubMembers, memberRoleText
 } from '../common/Models';
 import { Theme } from '../common/Theme';
 import { StateView } from '../components/StateView';
@@ -36,6 +37,15 @@ struct UserManagePage {
   @State notAdmin: boolean = false;
   @State expandedSearch: boolean = false;
 
+  // ---- v5.0 本社团成员(社团账号可见): 岗位筛选 + 移除 ----
+  @State members: ClubMember[] = [];
+  @State memberRole: string = '';          // '' 全部 | leader | minister | member
+  @State memberLeaderCount: number = 0;
+  @State memberMinisterCount: number = 0;
+  @State memberPlainCount: number = 0;
+  @State memberActiveCount: number = 0;
+  @State memberMsg: string = '';
+
   // ---- 注销学生(危险操作): 同一时刻只展开一个 ----
   @State cancelStuNo: string = '';        // 当前展开注销面板的学号
   @State cancelImpact: CancelImpact | null = null;
@@ -52,10 +62,59 @@ struct UserManagePage {
         return;
       }
       this.load();
+      // 社团账号额外拉本社团成员(平台管理员没有 club_id, 只看全平台列表)
+      if (AppConfig.isClubAccount) this.loadClubMembers();
     }).catch((e: Error) => {
       this.loadError = '初始化失败: ' + e.message;
       this.loading = false;
     });
+  }
+
+  async loadClubMembers(): Promise<void> {
+    if (!AppConfig.isClubAccount) return;
+    const q = this.memberRole === '' ? '' : '&role=' + this.memberRole;
+    const resp = await ApiClient.get('/api/club/members?size=100' + q);
+    if (resp['code'] === 0) {
+      this.members = parseClubMembers(resp);
+      const d = dataOf(resp);
+      if (d !== null) {
+        this.memberLeaderCount = numOf(d, 'leader_count');
+        this.memberMinisterCount = numOf(d, 'minister_count');
+        this.memberPlainCount = numOf(d, 'member_count');
+        this.memberActiveCount = numOf(d, 'active_count');
+      }
+      this.memberMsg = '';
+    } else {
+      this.memberMsg = resp['msg'] as string;
+    }
+  }
+
+  switchMemberRole(r: string): void {
+    if (this.memberRole === r) return;
+    this.memberRole = r;
+    this.loadClubMembers();
+  }
+
+  /** 移除成员: 二次确认 + 服务端二次校验(现任社长不可移除) */
+  confirmRemoveMember(m: ClubMember): void {
+    AlertDialog.show({
+      title: '移除该成员?',
+      message: '「' + m.name + ' (' + m.stu_no + ')」将退出本社团。\n其学生账号、历史报名与已认定学时全部保留。',
+      primaryButton: { value: '取消', action: () => {} },
+      secondaryButton: {
+        value: '移除',
+        fontColor: Theme.danger,
+        action: () => {
+          this.removeMember(m);
+        }
+      }
+    });
+  }
+
+  async removeMember(m: ClubMember): Promise<void> {
+    const resp = await ApiClient.post('/api/club/member/remove', { 'stu_no': m.stu_no }, true);
+    this.memberMsg = resp['msg'] as string;
+    await this.loadClubMembers();
   }
 
   async load(): Promise<void> {
@@ -166,6 +225,68 @@ struct UserManagePage {
   }
 
   // ==================== UI 构建 ====================
+
+  /** 岗位筛选胶囊(计数来自服务端聚合, 不是前端数出来的) */
+  @Builder
+  memberChip(label: string, key: string, count: number) {
+    Text(label + ' ' + count.toString())
+      .fontSize(Theme.fsCaption)
+      .fontColor(this.memberRole === key ? Theme.textOnPrimary : Theme.textSecondary)
+      .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+      .backgroundColor(this.memberRole === key ? Theme.primary : Theme.bgSubtle)
+      .borderRadius(Theme.radiusPill)
+      .onClick(() => this.switchMemberRole(key))
+  }
+
+  /** 本社团成员区(仅社团账号): 岗位筛选 + 移除(保留账号与历史学时) */
+  @Builder
+  memberSection() {
+    Column({ space: 8 }) {
+      Row() {
+        Text('本社团成员').fontSize(Theme.fsBody).fontWeight(FontWeight.Bold)
+          .fontColor(Theme.textBody).layoutWeight(1)
+        Text('在册 ' + this.memberActiveCount.toString())
+          .fontSize(Theme.fsCaption).fontColor(Theme.textTertiary)
+      }.width('100%')
+
+      Row({ space: 6 }) {
+        this.memberChip('全部', '', this.memberLeaderCount + this.memberMinisterCount + this.memberPlainCount)
+        this.memberChip('社长', 'leader', this.memberLeaderCount)
+        this.memberChip('部长', 'minister', this.memberMinisterCount)
+        this.memberChip('成员', 'member', this.memberPlainCount)
+      }.width('100%')
+
+      if (this.memberMsg !== '') {
+        Text(this.memberMsg).fontSize(Theme.fsCaption).fontColor(Theme.primary).width('100%')
+      }
+
+      if (this.members.length === 0) {
+        Text('暂无成员').fontSize(Theme.fsCaption).fontColor(Theme.textDisabled).width('100%')
+      } else {
+        ForEach(this.members.slice(0, 12), (m: ClubMember) => {
+          Row({ space: 8 }) {
+            Text(m.name).fontSize(Theme.fsSmall).fontColor(Theme.textBody).width(64)
+              .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            Text(m.stu_no).fontSize(Theme.fsCaption).fontColor(Theme.textTertiary).layoutWeight(1)
+            Text(memberRoleText(m.role)).fontSize(10).fontColor(Theme.primary)
+              .padding({ left: 5, right: 5, top: 1, bottom: 1 })
+              .backgroundColor(Theme.primaryBg).borderRadius(4)
+            if (m.role !== 'leader') {
+              Text('移除').fontSize(Theme.fsCaption).fontColor(Theme.danger)
+                .padding({ left: 6, right: 4, top: 3, bottom: 3 })
+                .onClick(() => this.confirmRemoveMember(m))
+            }
+          }.width('100%').padding({ top: 4, bottom: 4 })
+        }, (m: ClubMember) => 'cm' + m.stu_no + '-' + m.role + '-' + this.memberRole)
+        if (this.members.length > 12) {
+          Text('仅显示前 12 条(共 ' + this.members.length.toString() + ' 条)')
+            .fontSize(10).fontColor(Theme.textDisabled).width('100%')
+        }
+      }
+    }
+    .width('100%').padding(12).backgroundColor(Theme.bgCard)
+    .borderRadius(Theme.radiusLg).alignItems(HorizontalAlign.Start)
+  }
 
   @Builder
   groupChips() {
@@ -343,6 +464,15 @@ struct UserManagePage {
           Button('刷新').fontSize(13).height(30).backgroundColor(Theme.primary)
             .onClick(() => this.load())
         }.width('100%').padding({ left: 14, right: 14, top: 12, bottom: 6 })
+
+        // 本社团成员(社团账号专属)
+        if (AppConfig.isClubAccount) {
+          Column() {
+            this.memberSection()
+          }
+          .width('100%')
+          .padding({ left: Theme.pagePadding, right: Theme.pagePadding, top: 8 })
+        }
 
         // 分组查找
         this.groupChips()

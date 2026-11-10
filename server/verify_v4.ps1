@@ -100,13 +100,17 @@ function SetupTestData {
     "(9104,'V4-学时超限活动','认定学时大于活动学时','V4场地',NOW()+INTERVAL 7 DAY,NOW()+INTERVAL 7 DAY+INTERVAL 2 HOUR,4.0,10,'sports','测试',1,NOW())," +
     "(9105,'V4-规则裁剪活动','技能类单活动上限','V4场地',NOW()+INTERVAL 8 DAY,NOW()+INTERVAL 8 DAY+INTERVAL 2 HOUR,3.0,10,'skill','测试',1,NOW())") | Out-Null
 
+  # 批量签到用例的时间必须落在同一个 10 分钟窗口内(服务端按 UNIX_TIMESTAMP/600 分桶)。
+  # 原来用 NOW()-INTERVAL 1..5 MINUTE, 当运行时刻靠近 :00/:10/:20... 边界时会被切成两桶,
+  # 只剩 4 条命中, 用例随机失败。这里统一对齐到当前窗口起点再 +1..+5 分钟, 保证同桶。
+  $burstBase = "DATE_ADD(FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(NOW())/600)*600),INTERVAL "
   Sql ("INSERT INTO signup (id,client_id,activity_id,stu_no,name,status,category,checkin,checked_at,signout_at,hours,created_at,audited_at) VALUES " +
     "(9101,'v4-appeal',9101,'V9001','V4测试1',1,'volunteer',0,NULL,NULL,3.0,NOW()-INTERVAL 1 DAY,NOW()-INTERVAL 1 DAY)," +
-    "(9102,'v4-burst-1',9102,'V9002','V4测试2',1,'sports',1,NOW()-INTERVAL 5 MINUTE,NULL,1.0,NOW()-INTERVAL 1 DAY,NOW()-INTERVAL 1 DAY)," +
-    "(9103,'v4-burst-2',9102,'V9003','V4测试3',1,'sports',1,NOW()-INTERVAL 4 MINUTE,NULL,1.0,NOW()-INTERVAL 1 DAY,NOW()-INTERVAL 1 DAY)," +
-    "(9104,'v4-burst-3',9102,'V9004','V4测试4',1,'sports',1,NOW()-INTERVAL 3 MINUTE,NULL,1.0,NOW()-INTERVAL 1 DAY,NOW()-INTERVAL 1 DAY)," +
-    "(9105,'v4-burst-4',9102,'V9005','V4测试5',1,'sports',1,NOW()-INTERVAL 2 MINUTE,NULL,1.0,NOW()-INTERVAL 1 DAY,NOW()-INTERVAL 1 DAY)," +
-    "(9106,'v4-burst-5',9102,'V9006','V4测试6',1,'sports',1,NOW()-INTERVAL 1 MINUTE,NULL,1.0,NOW()-INTERVAL 1 DAY,NOW()-INTERVAL 1 DAY)," +
+    "(9102,'v4-burst-1',9102,'V9002','V4测试2',1,'sports',1," + $burstBase + "1 MINUTE),NULL,1.0,NOW()-INTERVAL 1 DAY,NOW()-INTERVAL 1 DAY)," +
+    "(9103,'v4-burst-2',9102,'V9003','V4测试3',1,'sports',1," + $burstBase + "2 MINUTE),NULL,1.0,NOW()-INTERVAL 1 DAY,NOW()-INTERVAL 1 DAY)," +
+    "(9104,'v4-burst-3',9102,'V9004','V4测试4',1,'sports',1," + $burstBase + "3 MINUTE),NULL,1.0,NOW()-INTERVAL 1 DAY,NOW()-INTERVAL 1 DAY)," +
+    "(9105,'v4-burst-4',9102,'V9005','V4测试5',1,'sports',1," + $burstBase + "4 MINUTE),NULL,1.0,NOW()-INTERVAL 1 DAY,NOW()-INTERVAL 1 DAY)," +
+    "(9106,'v4-burst-5',9102,'V9006','V4测试6',1,'sports',1," + $burstBase + "5 MINUTE),NULL,1.0,NOW()-INTERVAL 1 DAY,NOW()-INTERVAL 1 DAY)," +
     "(9107,'v4-notout',9103,'V9007','V4测试7',1,'thought',1,NOW()-INTERVAL 30 HOUR,NULL,2.0,NOW()-INTERVAL 2 DAY,NOW()-INTERVAL 2 DAY)," +
     "(9108,'v4-exceed',9104,'V9001','V4测试1',1,'sports',0,NULL,NULL,5.0,NOW()-INTERVAL 1 DAY,NOW()-INTERVAL 1 DAY)," +
     "(9109,'v4-rule',9105,'V9002','V4测试2',0,'skill',0,NULL,NULL,0.0,NOW()-INTERVAL 1 HOUR,NULL)") | Out-Null
@@ -217,7 +221,9 @@ finally {
   Check '申诉表已清空' ((Num "SELECT COUNT(*) FROM appeal") -eq 0)
   Check 'skill 规则复位 0' ((Num "SELECT cfg_value FROM sys_config WHERE cfg_key='rule.skill.max_activity'") -eq 0)
   $h = Api 'GET' '/api/health'
-  Check 'health version=4.0' ([string]$h.data.version -eq '4.0')
+  # v5.0 起版本号前移到 5.0; 本脚本是 v4 能力回归, 只要求"版本 >= 4.0"这层语义仍成立
+  $ver = [double]([string]$h.data.version)
+  Check 'health version >= 4.0' ($ver -ge 4.0) ([string]$h.data.version)
 }
 
 Write-Host ''

@@ -43,6 +43,7 @@ export class DbHelper {
       'start_time TEXT, end_time TEXT, ' +
       'hours REAL DEFAULT 1.0, capacity INTEGER DEFAULT 0, ' +
       "category TEXT DEFAULT 'sports', " +
+      "join_scope TEXT DEFAULT 'all', " +
       'publisher TEXT, synced INTEGER DEFAULT 0, ' +
       'created_at TEXT DEFAULT CURRENT_TIMESTAMP)'
     );
@@ -79,6 +80,17 @@ export class DbHelper {
     if (!hasCategory) {
       await store.executeSql("ALTER TABLE local_activity ADD COLUMN category TEXT DEFAULT 'sports'");
     }
+    // v5.0: 草稿补参与范围列。默认 'all' 与老草稿的历史语义一致,
+    // 新建草稿时由发布页显式写入(UI 默认仅本社团)。
+    let hasScope = false;
+    const rsScope = await store.querySql('PRAGMA table_info(local_activity)');
+    while (rsScope.goToNextRow()) {
+      if (DbHelper.safeStr(rsScope, 'name') === 'join_scope') hasScope = true;
+    }
+    rsScope.close();
+    if (!hasScope) {
+      await store.executeSql("ALTER TABLE local_activity ADD COLUMN join_scope TEXT DEFAULT 'all'");
+    }
     DbHelper.rdb = store;
   }
 
@@ -87,7 +99,7 @@ export class DbHelper {
   /** 保存活动草稿(本地), 返回草稿 id */
   static async addDraft(title: string, content: string, location: string,
     startTime: string, endTime: string, hours: number, capacity: number,
-    publisher: string, category: string): Promise<number> {
+    publisher: string, category: string, joinScope: string): Promise<number> {
     const store = DbHelper.rdb;
     if (!store) return 0;
     const vb: relationalStore.ValuesBucket = {
@@ -100,6 +112,7 @@ export class DbHelper {
       'capacity': capacity,
       'publisher': publisher,
       'category': category,
+      'join_scope': joinScope,
       'synced': 0
     };
     return await store.insert('local_activity', vb);
@@ -146,7 +159,7 @@ export class DbHelper {
   /** 更新草稿(表单回填后再次保存, 不新增记录) */
   static async updateDraft(id: number, title: string, content: string, location: string,
     startTime: string, endTime: string, hours: number, capacity: number,
-    publisher: string, category: string): Promise<void> {
+    publisher: string, category: string, joinScope: string): Promise<void> {
     const store = DbHelper.rdb;
     if (!store) return;
     const vb: relationalStore.ValuesBucket = {
@@ -158,7 +171,8 @@ export class DbHelper {
       'hours': hours,
       'capacity': capacity,
       'publisher': publisher,
-      'category': category
+      'category': category,
+      'join_scope': joinScope
     };
     const pred = new relationalStore.RdbPredicates('local_activity');
     pred.equalTo('id', id);
@@ -167,7 +181,8 @@ export class DbHelper {
 
   /** 草稿字段列表(查询与映射共用, 避免两处字段顺序不一致) */
   private static readonly DRAFT_COLS: string[] = ['id', 'server_id', 'title', 'content', 'location',
-    'start_time', 'end_time', 'hours', 'capacity', 'publisher', 'category', 'synced', 'created_at'];
+    'start_time', 'end_time', 'hours', 'capacity', 'publisher', 'category', 'join_scope',
+    'synced', 'created_at'];
 
   private static mapDraft(rs: relationalStore.ResultSet): LocalDraft {
     return {
@@ -182,6 +197,7 @@ export class DbHelper {
       capacity: rs.getLong(rs.getColumnIndex('capacity')),
       publisher: DbHelper.safeStr(rs, 'publisher'),
       category: DbHelper.safeStr(rs, 'category', 'sports'),
+      join_scope: DbHelper.safeStr(rs, 'join_scope', 'all'),
       synced: rs.getLong(rs.getColumnIndex('synced')),
       created_at: DbHelper.safeStr(rs, 'created_at')
     };

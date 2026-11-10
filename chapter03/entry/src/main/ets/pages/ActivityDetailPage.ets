@@ -26,7 +26,7 @@ function blankAct(): ActivityInfo {
     id: 0, title: '', content: '', location: '', start_time: '', end_time: '',
     hours: 0, capacity: 0, publisher: '', signed_count: 0, passed_count: 0,
     valid_count: 0, remaining: 0, expired: false, status: 1,
-    category: 'sports', taken: 0
+    category: 'sports', taken: 0, join_scope: 'all'
   };
 }
 
@@ -444,6 +444,10 @@ struct ActivityDetailPage {
           Text(this.act.title).fontSize(20).fontWeight(FontWeight.Bold).fontColor(Theme.textBody).width('100%')
           Row({ space: 8 }) {
             this.tag(this.act.hours.toString() + ' 学时', Theme.primary, Theme.primaryBg)
+            // v5.0 参与范围: 让用户报名前就知道这是内部活动还是全校开放
+            this.tag(this.act.join_scope === 'club' ? '仅本社团' : '全校开放',
+              this.act.join_scope === 'club' ? Theme.textSecondary : Theme.success,
+              this.act.join_scope === 'club' ? Theme.bgSubtle : Theme.successBg)
             if (this.act.capacity > 0) {
               this.tag('限 ' + this.act.capacity + ' 人', Theme.warning, Theme.warningBg)
             }

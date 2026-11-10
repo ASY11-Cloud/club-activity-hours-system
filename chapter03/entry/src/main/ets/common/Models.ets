@@ -22,6 +22,7 @@ export interface ActivityInfo {
   status: number;         // 1 已发布 / 0 已下线(仅管理员查询 all=1 时可能出现)
   category: string;       // 七大类 key: thought/practice/volunteer/innovation/sports/social/skill
   taken: number;          // 服务端名额计数缓存(status<>2), 与 valid_count 应一致
+  join_scope: string;     // v5.0 参与范围: 'club'=仅本社团成员 / 'all'=全校开放
 }
 
 // 报名记录
@@ -42,6 +43,7 @@ export interface SignupInfo {
   checkin_at: string;      // 刷卡/输码签到时间(未签到为空)
   category: string;        // 报名时的活动类别快照
   signout_at: string;      // 签退时间(空 = 未签退)
+  is_outsider: boolean;    // v5.0 报名人是否不属于活动所属社团(公开活动的外部参与者)
 }
 
 // 学时排行
@@ -174,6 +176,7 @@ export interface LocalDraft {
   capacity: number;
   publisher: string;
   category: string;    // 七大类 key, 发布时随活动一起提交
+  join_scope: string;  // v5.0 参与范围: club=仅本社团 / all=全校开放
   synced: number;
   created_at: string;
 }
@@ -279,7 +282,8 @@ export function parseActivities(resp: Record<string, Object>): ActivityInfo[] {
       expired: boolOf(item, 'expired'),
       status: numOf(item, 'status', 1),
       category: strOf(item, 'category', 'sports'),
-      taken: numOf(item, 'taken', numOf(item, 'valid_count'))
+      taken: numOf(item, 'taken', numOf(item, 'valid_count')),
+      join_scope: strOf(item, 'join_scope', 'all')
     });
   }
   return out;
@@ -310,7 +314,8 @@ export function parseSignups(resp: Record<string, Object>): SignupInfo[] {
       activity_hours: numOf(item, 'activity_hours'),
       checkin_at: strOf(item, 'checkin_at'),
       category: strOf(item, 'category', 'sports'),
-      signout_at: strOf(item, 'signout_at')
+      signout_at: strOf(item, 'signout_at'),
+      is_outsider: boolOf(item, 'is_outsider')
     });
   }
   return out;
@@ -664,5 +669,220 @@ export function parseCancelImpact(resp: Record<string, Object>): CancelImpact | 
     signup_rejected: numOf(d, 'signup_rejected'),
     hours_sum: numOf(d, 'hours_sum'),
     hours_total: numOf(d, 'hours_total')
+  };
+}
+
+// ==================== v5.0 社团账号(认证主体=社团) ====================
+
+/** 社团信息 + 现任社长 + 社团维度统计 */
+export interface ClubInfo {
+  id: number;
+  account: string;          // 社团登录账号(长期不变)
+  club_name: string;
+  intro: string;
+  dept: string;             // 挂靠单位
+  leader_name: string;      // 现任社长(换届只改这个字段)
+  leader_stu_no: string;
+  leader_since: string;
+  leader_days: number;      // 在任天数
+  status: number;           // 1 正常 / 0 停用
+  created_at: string;
+  member_count: number;
+  activity_count: number;
+  signup_count: number;
+  hours_sum: number;        // 本社团活动已认定学时合计
+  pending_signup: number;   // 待审核报名数
+  internal_count: number;   // 仅本社团活动数
+  public_count: number;     // 全校开放活动数
+}
+
+export function parseClubInfo(resp: Record<string, Object>): ClubInfo | null {
+  const d = dataOf(resp);
+  if (d === null) return null;
+  return {
+    id: numOf(d, 'id'),
+    account: strOf(d, 'account'),
+    club_name: strOf(d, 'club_name'),
+    intro: strOf(d, 'intro'),
+    dept: strOf(d, 'dept'),
+    leader_name: strOf(d, 'leader_name'),
+    leader_stu_no: strOf(d, 'leader_stu_no'),
+    leader_since: strOf(d, 'leader_since'),
+    leader_days: numOf(d, 'leader_days'),
+    status: numOf(d, 'status', 1),
+    created_at: strOf(d, 'created_at'),
+    member_count: numOf(d, 'member_count'),
+    activity_count: numOf(d, 'activity_count'),
+    signup_count: numOf(d, 'signup_count'),
+    hours_sum: numOf(d, 'hours_sum'),
+    pending_signup: numOf(d, 'pending_signup'),
+    internal_count: numOf(d, 'internal_count'),
+    public_count: numOf(d, 'public_count')
+  };
+}
+
+/** 历任社长记录(时间轴) */
+export interface LeaderRecord {
+  id: number;
+  leader_name: string;
+  leader_stu_no: string;
+  start_at: string;
+  end_at: string;          // 空 = 在任
+  is_current: boolean;
+  change_type: number;     // 1 换届 / 2 更正 / 3 初始化
+  operator: string;
+  reason: string;
+}
+
+export function parseLeaders(resp: Record<string, Object>): LeaderRecord[] {
+  const out: LeaderRecord[] = [];
+  const d = dataOf(resp);
+  if (d === null) return out;
+  const list = d['list'] as Array<Record<string, Object>> | null;
+  if (!list) return out;
+  for (const item of list) {
+    out.push({
+      id: numOf(item, 'id'),
+      leader_name: strOf(item, 'leader_name'),
+      leader_stu_no: strOf(item, 'leader_stu_no'),
+      start_at: strOf(item, 'start_at'),
+      end_at: strOf(item, 'end_at'),
+      is_current: boolOf(item, 'is_current'),
+      change_type: numOf(item, 'change_type'),
+      operator: strOf(item, 'operator'),
+      reason: strOf(item, 'reason')
+    });
+  }
+  return out;
+}
+
+export function changeTypeText(t: number): string {
+  if (t === 1) return '换届';
+  if (t === 2) return '更正';
+  return '初始化';
+}
+
+/** 参与范围展示文案: 内部活动用"仅本社团", 公开活动用"全校开放" */
+export function joinScopeText(scope: string): string {
+  return scope === 'club' ? '仅本社团' : '全校开放';
+}
+
+// ==================== v5.0 社团成员 / 通知公告 ====================
+
+/** 社团成员(成员管理页) */
+export interface ClubMember {
+  stu_no: string;
+  name: string;
+  dept: string;
+  role: string;            // leader | minister | member
+  status: number;          // 1 在册 / 0 已退出
+  joined_at: string;
+  quit_at: string;
+  student_status: number;  // 学生账号状态: 1 正常 / 0 待审核 / 2 拒绝 / -1 账号已注销
+}
+
+export function parseClubMembers(resp: Record<string, Object>): ClubMember[] {
+  const out: ClubMember[] = [];
+  const d = dataOf(resp);
+  if (d === null) return out;
+  const list = d['list'] as Array<Record<string, Object>> | null;
+  if (!list) return out;
+  for (const item of list) {
+    out.push({
+      stu_no: strOf(item, 'stu_no'),
+      name: strOf(item, 'name'),
+      dept: strOf(item, 'dept'),
+      role: strOf(item, 'role', 'member'),
+      status: numOf(item, 'status', 1),
+      joined_at: strOf(item, 'joined_at'),
+      quit_at: strOf(item, 'quit_at'),
+      student_status: numOf(item, 'student_status', -1)
+    });
+  }
+  return out;
+}
+
+export function memberRoleText(role: string): string {
+  if (role === 'leader') return '社长';
+  if (role === 'minister') return '部长';
+  return '成员';
+}
+
+/** 通知公告 */
+export interface AnnouncementInfo {
+  id: number;
+  title: string;
+  content: string;
+  publisher: string;
+  top_flag: number;      // 1 置顶
+  status: number;        // 1 已发布 / 0 已撤回
+  created_at: string;
+  club_name: string;
+  is_read: boolean;
+}
+
+export function parseAnnouncements(resp: Record<string, Object>): AnnouncementInfo[] {
+  const out: AnnouncementInfo[] = [];
+  const d = dataOf(resp);
+  if (d === null) return out;
+  const list = d['list'] as Array<Record<string, Object>> | null;
+  if (!list) return out;
+  for (const item of list) {
+    out.push({
+      id: numOf(item, 'id'),
+      title: strOf(item, 'title'),
+      content: strOf(item, 'content'),
+      publisher: strOf(item, 'publisher'),
+      top_flag: numOf(item, 'top_flag'),
+      status: numOf(item, 'status', 1),
+      created_at: strOf(item, 'created_at'),
+      club_name: strOf(item, 'club_name'),
+      is_read: boolOf(item, 'is_read')
+    });
+  }
+  return out;
+}
+
+/** 公告未读数(学生端角标用) */
+export function unreadAnnouncements(resp: Record<string, Object>): number {
+  const d = dataOf(resp);
+  return d === null ? 0 : numOf(d, 'unread_count');
+}
+
+// ==================== v5.0 社团维度统计 (/api/stats/club) ====================
+
+/**
+ * 社团维度统计。口径: 一切按 signup.club_id(报名时快照的活动所属社团)聚合,
+ * 因此"公开活动引来的外社团报名"也计入本社团, 但用 outsider_* 单独标出。
+ */
+export interface ClubStats {
+  club_id: number;
+  member_count: number;      // 在册成员数
+  activity_count: number;    // 社团活动总数
+  internal_count: number;    // 仅本社团活动数
+  public_count: number;      // 全校开放活动数
+  signup_count: number;      // 报名总数(含待审/拒绝)
+  passed_count: number;      // 已通过报名数
+  hours_sum: number;         // 已认定学时合计
+  pass_rate: number;         // 通过率(百分比)
+  outsider_count: number;    // 外社团参与人数(去重)
+  outsider_join_count: number; // 外社团报名条数
+}
+
+export function parseClubStats(resp: Record<string, Object>): ClubStats | null {
+  const d = dataOf(resp);
+  if (d === null) return null;
+  return {
+    club_id: numOf(d, 'club_id'),
+    member_count: numOf(d, 'member_count'),
+    activity_count: numOf(d, 'activity_count'),
+    internal_count: numOf(d, 'internal_count'),
+    public_count: numOf(d, 'public_count'),
+    signup_count: numOf(d, 'signup_count'),
+    passed_count: numOf(d, 'passed_count'),
+    hours_sum: numOf(d, 'hours_sum'),
+    pass_rate: numOf(d, 'pass_rate'),
+    outsider_count: numOf(d, 'outsider_count'),
+    outsider_join_count: numOf(d, 'outsider_join_count')
   };
 }

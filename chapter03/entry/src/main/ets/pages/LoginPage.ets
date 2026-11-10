@@ -44,6 +44,10 @@ struct LoginPage {
     if (r === 'student') {
       this.account = '2023001';
       this.secret = '123456';
+    } else if (r === 'club') {
+      // 社团账号: 认证主体是社团, 社长换届不换账号, 因此这里永远是同一个登录名
+      this.account = 'club';
+      this.secret = 'club123';
     } else {
       this.account = 'admin';
       this.secret = 'admin123';
@@ -53,7 +57,8 @@ struct LoginPage {
   async doLogin(): Promise<void> {
     if (this.busy) return;
     if (this.account.trim() === '' || this.secret.trim() === '') {
-      this.msg = this.role === 'student' ? '请填写学号与密码' : '请填写管理员账号与密码';
+      this.msg = this.role === 'student' ? '请填写学号与密码'
+        : (this.role === 'club' ? '请填写社团账号与密码' : '请填写管理员账号与密码');
       return;
     }
     this.busy = true;
@@ -74,8 +79,16 @@ struct LoginPage {
       const name = data['name'] as string;
       const stuNo = data['stu_no'] as string;
       const token = data['token'] as string;
-      await AppConfig.saveLogin(role, name, stuNo, token);
-      this.msg = '登录成功! 身份: ' + (role === 'admin' ? '管理员' : '普通成员') + ' ' + name;
+      // 社团会话: club_id>0 表示社团账号, 后续页面按它显示社团信息与换届入口
+      const clubId = data['club_id'] !== undefined ? Number(data['club_id']) : 0;
+      const clubName = data['club_name'] !== undefined ? (data['club_name'] as string) : '';
+      const accountType = data['account_type'] !== undefined ? (data['account_type'] as string) : '';
+      await AppConfig.saveLogin(role, name, stuNo, token, clubId, clubName, accountType);
+      let roleLabel = '普通成员';
+      if (accountType === 'club') roleLabel = '社团账号';
+      else if (role === 'admin') roleLabel = '管理员';
+      const showName = accountType === 'club' && clubName !== '' ? clubName : name;
+      this.msg = '登录成功! 身份: ' + roleLabel + ' ' + showName;
       // 进入底部 TabBar 主界面(replace: 返回时不再回到本页)
       setTimeout(() => {
         Nav.resetTo('pages/MainPage');
@@ -123,25 +136,33 @@ struct LoginPage {
             Text('不同身份进入不同的功能(权限由服务端校验)')
               .fontSize(11).fontColor(Theme.textTertiary).width('100%').margin({ top: 4, bottom: 12 })
 
-            // 角色切换
-            Row({ space: 10 }) {
-              this.roleTab('普通成员', 'student', '学号 + 密码')
-              this.roleTab('管理员', 'admin', '账号 + 密码')
+            // 角色切换: 普通成员 / 社团账号 / 平台管理员
+            Row({ space: 8 }) {
+              this.roleTab('普通成员', 'student', '学号+密码')
+              this.roleTab('社团账号', 'club', '社团+密码')
+              this.roleTab('管理员', 'admin', '账号+密码')
             }.width('100%')
 
             // 表单
             Column({ space: 12 }) {
               Row({ space: 10 }) {
-                Text(this.role === 'student' ? '学号' : '账号')
-                  .fontSize(14).fontColor(Theme.textBody).width(52)
-                TextInput({ text: this.account, placeholder: this.role === 'student' ? '如 2023001' : '如 admin' })
+                Text(this.role === 'student' ? '学号' : (this.role === 'club' ? '社团账号' : '账号'))
+                  .fontSize(14).fontColor(Theme.textBody).width(60)
+                TextInput({
+                  text: this.account,
+                  placeholder: this.role === 'student' ? '如 2023001' : (this.role === 'club' ? '如 club' : '如 admin')
+                })
                   .layoutWeight(1)
                   .onChange((v: string) => this.account = v)
               }
               Row({ space: 10 }) {
                 Text('密码')
-                  .fontSize(14).fontColor(Theme.textBody).width(52)
-                TextInput({ text: this.secret, placeholder: this.role === 'student' ? '成员登录密码' : '管理员密码' })
+                  .fontSize(14).fontColor(Theme.textBody).width(60)
+                TextInput({
+                  text: this.secret,
+                  placeholder: this.role === 'student' ? '成员登录密码'
+                    : (this.role === 'club' ? '社团账号密码' : '管理员密码')
+                })
                   .type(InputType.Password)
                   .layoutWeight(1)
                   .onChange((v: string) => this.secret = v)
@@ -181,6 +202,8 @@ struct LoginPage {
           Column({ space: 5 }) {
             Text('演示账号').fontSize(13).fontWeight(FontWeight.Medium).width('100%')
             Text('普通成员: 2023001 张三 / 2023002 李铭')
+              .fontSize(11).fontColor(Theme.textSecondary).width('100%')
+            Text('社团账号: club / club123 (认证主体是社团, 换届不换账号)')
               .fontSize(11).fontColor(Theme.textSecondary).width('100%')
             Text('管理员: admin / admin123')
               .fontSize(11).fontColor(Theme.textSecondary).width('100%')
